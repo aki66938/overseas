@@ -146,15 +146,28 @@ func Validate(state State, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("wireguard_interface: %w", err)
 	}
-	if _, err := findInterface(state.Interfaces, cfg.TelecomInterface); err != nil {
+	telecom, err := findInterface(state.Interfaces, cfg.TelecomInterface)
+	if err != nil {
 		return fmt.Errorf("telecom_interface: %w", err)
 	}
-	if _, err := findInterface(state.Interfaces, cfg.EmployeeInterface); err != nil {
+	employee, err := findInterface(state.Interfaces, cfg.EmployeeInterface)
+	if err != nil {
 		return fmt.Errorf("employee_interface: %w", err)
+	}
+	if wireGuard.Index == telecom.Index || wireGuard.Index == employee.Index || telecom.Index == employee.Index {
+		return fmt.Errorf("wireguard_interface, telecom_interface, and employee_interface must resolve to different interface indices")
 	}
 
 	if countActiveIPv4DefaultRoutes(state.Routes) != 1 {
 		return fmt.Errorf("inventory must contain exactly one active IPv4 default route")
+	}
+	for _, route := range state.Routes {
+		if route.DestinationPrefix == "0.0.0.0/0" && route.State == "Alive" {
+			if route.Alias != employee.Alias || route.Index != employee.Index {
+				return fmt.Errorf("active IPv4 default route must belong to employee_interface %q", employee.Alias)
+			}
+			break
+		}
 	}
 
 	wireGuardPrefix, err := netip.ParsePrefix(cfg.WireGuardSubnet)
@@ -180,7 +193,10 @@ func findInterface(interfaces []Interface, alias string) (Interface, error) {
 			continue
 		}
 		if match != nil {
-			return Interface{}, fmt.Errorf("alias %q is ambiguous", alias)
+			if match.Index != interfaces[i].Index {
+				return Interface{}, fmt.Errorf("alias %q has conflicting interface indices %d and %d", alias, match.Index, interfaces[i].Index)
+			}
+			continue
 		}
 		match = &interfaces[i]
 	}
