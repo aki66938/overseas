@@ -1,0 +1,182 @@
+// Package probe runs bounded HTTPS checks against configured, approved targets.
+package probe
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"net/netip"
+	"net/url"
+	"time"
+
+	"corp.example/overseas-access-gateway/internal/config"
+)
+
+const (
+	defaultTimeout = 10 * time.Second
+	maxBodyBytes   = int64(64 * 1024)
+)
+
+// Result is the JSON-serializable evidence produced for one approved target.
+type Result struct {
+	TargetName  string        `json:"target_name"`
+	ResolvedIPs []string      `json:"resolved_ips"`
+	SelectedIP  string        `json:"selected_ip"`
+	TCPLatency  time.Duration `json:"tcp_latency"`
+	TLSStatus   string        `json:"tls_status"`
+	HTTPStatus  int           `json:"http_status"`
+	Bytes       int64         `json:"bytes"`
+	StartedAt   time.Time     `json:"started_at"`
+	FinishedAt  time.Time     `json:"finished_at"`
+	ErrorCode   string        `json:"error_code,omitempty"`
+}
+
+// Run checks target using source when it is non-nil. The context deadline
+// bounds DNS, TCP, TLS, and HTTP work and is also used as the TCP dial timeout.
+func Run(ctx context.Context, target config.Target, source net.IP) Result {
+	timeout := defaultTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+
+	dialer := net.Dialer{Timeout: timeout}
+	if source != nil {
+		dialer.LocalAddr = &net.TCPAddr{IP: source}
+	}
+	return run(ctx, target, source, net.DefaultResolver.LookupNetIP, dialer.DialContext, nil)
+}
+
+func run(
+	ctx context.Context,
+	target config.Target,
+	_ net.IP,
+	lookup func(context.Context, string, string) ([]netip.Addr, error),
+	dial func(context.Context, string, string) (net.Conn, error),
+	tlsConfig *tls.Config,
+) (result Result) {
+	result.TargetName = target.Name
+	result.TLSStatus = "not_attempted"
+	result.StartedAt = time.Now().UTC()
+	defer func() { result.FinishedAt = time.Now().UTC() }()
+
+	if err := ctx.Err(); err != nil {
+		result.ErrorCode = contextErrorCode(err)
+		return result
+	}
+
+	parsed, err := url.Parse(target.URL)
+	if err != nil || parsed.Hostname() == "" {
+		result.ErrorCode = "dns_failed"
+		return result
+	}
+
+	ips, err := lookup(ctx, "ip", parsed.Hostname())
+	if err != nil || len(ips) == 0 {
+		result.ErrorCode = errorCodeForContext(ctx, "dns_failed")
+		return result
+	}
+	for _, ip := range ips {
+		if !ip.IsValid() {
+			continue
+		}
+		result.ResolvedIPs = append(result.ResolvedIPs, ip.String())
+	}
+	if len(result.ResolvedIPs) == 0 {
+		result.ErrorCode = "dns_failed"
+		return result
+	}
+	result.SelectedIP = result.ResolvedIPs[0]
+
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	selectedAddress := net.JoinHostPort(result.SelectedIP, port)
+
+	configuredTLS := tlsConfig
+	if configuredTLS == nil {
+		configuredTLS = &tls.Config{}
+	} else {
+		configuredTLS = configuredTLS.Clone()
+	}
+	if configuredTLS.MinVersion < tls.VersionTLS12 {
+		configuredTLS.MinVersion = tls.VersionTLS12
+	}
+
+	var tlsErr error
+	transport := &http.Transport{
+		TLSClientConfig: configuredTLS,
+		DialContext: func(callCtx context.Context, network, _ string) (net.Conn, error) {
+			started := time.Now()
+			conn, dialErr := dial(callCtx, network, selectedAddress)
+			if dialErr == nil {
+				result.TCPLatency = time.Since(started)
+			}
+			return conn, dialErr
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
+	if err != nil {
+		result.ErrorCode = "dns_failed"
+		return result
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		TLSHandshakeDone: func(_ tls.ConnectionState, handshakeErr error) {
+			tlsErr = handshakeErr
+			if handshakeErr == nil {
+				result.TLSStatus = "validated"
+			} else {
+				result.TLSStatus = "failed"
+			}
+		},
+	}))
+
+	response, err := client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			result.ErrorCode = contextErrorCode(ctx.Err())
+		} else if tlsErr != nil {
+			result.ErrorCode = "tls_failed"
+		} else {
+			result.ErrorCode = "tcp_failed"
+		}
+		return result
+	}
+	defer response.Body.Close()
+
+	result.HTTPStatus = response.StatusCode
+	result.Bytes, err = io.Copy(io.Discard, io.LimitReader(response.Body, maxBodyBytes))
+	if err != nil {
+		result.ErrorCode = errorCodeForContext(ctx, "tcp_failed")
+		return result
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		result.ErrorCode = "http_rejected"
+	}
+	return result
+}
+
+func errorCodeForContext(ctx context.Context, fallback string) string {
+	if err := ctx.Err(); err != nil {
+		return contextErrorCode(err)
+	}
+	return fallback
+}
+
+func contextErrorCode(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline"
+	}
+	return "tcp_failed"
+}

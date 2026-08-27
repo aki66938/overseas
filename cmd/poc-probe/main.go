@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 
 	"corp.example/overseas-access-gateway/internal/config"
 	"corp.example/overseas-access-gateway/internal/inventory"
+	"corp.example/overseas-access-gateway/internal/probe"
 )
 
 var snapshot = inventory.Snapshot
@@ -29,10 +31,54 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPreflight(args[1:], stdout, stderr)
 	case "inventory":
 		return runInventory(args[1:], stdout, stderr)
+	case "probe":
+		return runProbe(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "PREFLIGHT_USAGE: poc-probe preflight --config <path>")
 		return 2
 	}
+}
+
+func runProbe(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("probe", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to PoC configuration")
+	outputPath := flags.String("out", "", "path for new JSON evidence")
+	sourceText := flags.String("source-ip", "", "optional source IP address")
+	if err := flags.Parse(args); err != nil || *configPath == "" || *outputPath == "" || flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "PROBE_USAGE: poc-probe probe --config <path> --out <path> [--source-ip <ip>]")
+		return 2
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "PROBE_CONFIG_ERROR: %v\n", err)
+		return 1
+	}
+
+	var source net.IP
+	if *sourceText != "" {
+		source = net.ParseIP(*sourceText)
+		if source == nil {
+			fmt.Fprintln(stderr, "PROBE_SOURCE_ERROR: source-ip must be a valid IP address")
+			return 1
+		}
+	}
+
+	results := make([]probe.Result, 0, len(cfg.ApprovedTargets))
+	for _, target := range cfg.ApprovedTargets {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ProbeTimeout)
+		result := probe.Run(ctx, target, source)
+		cancel()
+		results = append(results, result)
+	}
+	if err := writeNewJSON(*outputPath, results); err != nil {
+		fmt.Fprintf(stderr, "PROBE_OUTPUT_ERROR: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "PROBE_EVIDENCE_WRITTEN")
+	return 0
 }
 
 func runPreflight(args []string, stdout, stderr io.Writer) int {

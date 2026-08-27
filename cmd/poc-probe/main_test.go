@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
 	"corp.example/overseas-access-gateway/internal/inventory"
+	"corp.example/overseas-access-gateway/internal/probe"
 )
 
 func TestRunPreflightPrintsSuccessForValidConfiguration(t *testing.T) {
@@ -128,5 +133,54 @@ probe_timeout: 8s
 	}
 	if !strings.HasPrefix(stderr.String(), "INVENTORY_OUTPUT_ERROR:") {
 		t.Fatalf("stderr = %q, want create-new output error", stderr.String())
+	}
+}
+
+func TestRunProbeWritesEvidenceForConfiguredApprovedTargets(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "local approved target")
+	}))
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	defer server.Close()
+
+	configPath := t.TempDir() + "/poc.yaml"
+	configContents := `wireguard_subnet: 100.127.77.0/24
+wireguard_interface: wg-overseas-poc
+telecom_interface: Telecom-Client
+employee_interface: Ethernet
+internal_cidrs:
+  - 10.0.0.0/8
+approved_targets:
+  - name: operator-approved-local-test
+    url: ` + server.URL + `
+probe_timeout: 1s
+`
+	if err := os.WriteFile(configPath, []byte(configContents), 0o600); err != nil {
+		t.Fatalf("write test configuration: %v", err)
+	}
+
+	outputPath := t.TempDir() + "/probe-evidence.json"
+	var stdout, stderr bytes.Buffer
+	args := []string{"probe", "--config", configPath, "--out", outputPath}
+	if exitCode := run(args, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if got := stdout.String(); got != "PROBE_EVIDENCE_WRITTEN\n" {
+		t.Fatalf("stdout = %q, want evidence marker", got)
+	}
+
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read probe evidence: %v", err)
+	}
+	var results []probe.Result
+	if err := json.Unmarshal(contents, &results); err != nil {
+		t.Fatalf("decode probe evidence: %v", err)
+	}
+	if len(results) != 1 || results[0].TargetName != "operator-approved-local-test" {
+		t.Fatalf("results = %#v, want exactly configured target", results)
+	}
+	if results[0].ErrorCode != "tls_failed" {
+		t.Fatalf("result error = %q, want local server validation failure evidence", results[0].ErrorCode)
 	}
 }
