@@ -4,5 +4,7 @@ bin/
 /configs/poc.yaml
 /artifacts/*
 !/artifacts/.gitkeep
+/artifacts/.poc-config-*
+/artifacts/*.tmp
 /poc-probe.exe
 /coverage.out
