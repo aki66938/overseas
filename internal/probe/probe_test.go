@@ -31,6 +31,9 @@ func TestRunSuccessfulHTTPSProbe(t *testing.T) {
 	if result.TargetName != "operator-approved-test" {
 		t.Fatalf("TargetName = %q", result.TargetName)
 	}
+	if result.TargetURL != server.URL {
+		t.Fatalf("TargetURL = %q, want %q", result.TargetURL, server.URL)
+	}
 	if len(result.ResolvedIPs) != 1 || result.ResolvedIPs[0] != "127.0.0.1" {
 		t.Fatalf("ResolvedIPs = %v, want loopback", result.ResolvedIPs)
 	}
@@ -132,6 +135,21 @@ func TestRunCapsResponseBodyAt64KiB(t *testing.T) {
 	}
 	if result.Bytes != 64*1024 {
 		t.Fatalf("Bytes = %d, want 65536", result.Bytes)
+	}
+}
+
+func TestRunRecordsBodyFailureAfterReachabilityEvidence(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "short")
+	}))
+	defer server.Close()
+
+	result := run(contextWithDeadline(t), targetFor(server), nil, time.Second, localResolver, dialServer(server), trustedTLSConfig(t, server))
+
+	if result.ErrorCode != "body_failed" || result.HTTPStatus != http.StatusOK || result.TLSStatus != "validated" || result.TCPLatency <= 0 {
+		t.Fatalf("result = %#v, want body_failed with completed TCP/TLS/HTTP evidence", result)
 	}
 }
 

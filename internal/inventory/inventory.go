@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"time"
 
 	"corp.example/overseas-access-gateway/internal/config"
 )
@@ -14,8 +15,19 @@ import (
 // State is a read-only snapshot of the interfaces and routes reported by
 // Windows networking cmdlets.
 type State struct {
-	Interfaces []Interface `json:"interfaces"`
-	Routes     []Route     `json:"routes"`
+	Interfaces    []Interface    `json:"interfaces"`
+	Routes        []Route        `json:"routes"`
+	NAT           []NAT          `json:"nat"`
+	FirewallRules []FirewallRule `json:"firewall_rules"`
+}
+
+// Artifact binds a network-state capture to one validated PoC run.
+type Artifact struct {
+	SchemaVersion int       `json:"schema_version"`
+	RunID         string    `json:"run_id"`
+	ConfigDigest  string    `json:"config_digest"`
+	CapturedAt    time.Time `json:"captured_at"`
+	State         State     `json:"state"`
 }
 
 // Interface describes a Windows IP interface.
@@ -38,10 +50,43 @@ type Route struct {
 	State             string `json:"state"`
 }
 
+// NAT is the stable configuration subset of one WinNAT object.
+type NAT struct {
+	Name           string `json:"name"`
+	InternalPrefix string `json:"internal_prefix"`
+	ExternalPrefix string `json:"external_prefix"`
+	Active         bool   `json:"active"`
+}
+
+// FirewallRule captures rule configuration plus the associated filters that
+// materially affect packet matching.
+type FirewallRule struct {
+	Name                  string   `json:"name"`
+	DisplayName           string   `json:"display_name"`
+	Description           string   `json:"description"`
+	Group                 string   `json:"group"`
+	Enabled               string   `json:"enabled"`
+	Profile               string   `json:"profile"`
+	Direction             string   `json:"direction"`
+	Action                string   `json:"action"`
+	PolicyStoreSource     string   `json:"policy_store_source"`
+	PolicyStoreSourceType string   `json:"policy_store_source_type"`
+	InterfaceAliases      []string `json:"interface_aliases"`
+	LocalAddresses        []string `json:"local_addresses"`
+	RemoteAddresses       []string `json:"remote_addresses"`
+	Protocols             []string `json:"protocols"`
+	LocalPorts            []string `json:"local_ports"`
+	RemotePorts           []string `json:"remote_ports"`
+	Programs              []string `json:"programs"`
+	Services              []string `json:"services"`
+}
+
 func parseJSON(source io.Reader) (State, error) {
 	var raw struct {
 		Interfaces json.RawMessage `json:"interfaces"`
 		Routes     json.RawMessage `json:"routes"`
+		NAT        json.RawMessage `json:"nat"`
+		Firewall   json.RawMessage `json:"firewall_rules"`
 	}
 	if err := json.NewDecoder(source).Decode(&raw); err != nil {
 		return State{}, fmt.Errorf("decode inventory JSON: %w", err)
@@ -55,7 +100,15 @@ func parseJSON(source io.Reader) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	return State{Interfaces: interfaces, Routes: routes}, nil
+	nat, err := decodeNAT(raw.NAT)
+	if err != nil {
+		return State{}, err
+	}
+	firewall, err := decodeFirewallRules(raw.Firewall)
+	if err != nil {
+		return State{}, err
+	}
+	return State{Interfaces: interfaces, Routes: routes, NAT: nat, FirewallRules: firewall}, nil
 }
 
 func decodeInterfaces(raw json.RawMessage) ([]Interface, error) {
@@ -112,6 +165,54 @@ func decodeRoutes(raw json.RawMessage) ([]Route, error) {
 	return routes, nil
 }
 
+func decodeNAT(raw json.RawMessage) ([]NAT, error) {
+	var records []struct {
+		Name           string `json:"Name"`
+		InternalPrefix string `json:"InternalIPInterfaceAddressPrefix"`
+		ExternalPrefix string `json:"ExternalIPInterfaceAddressPrefix"`
+		Active         bool   `json:"Active"`
+	}
+	if err := decodeArrayOrOneAllowEmpty(raw, &records); err != nil {
+		return nil, fmt.Errorf("decode inventory NAT: %w", err)
+	}
+	nat := make([]NAT, len(records))
+	for i, record := range records {
+		nat[i] = NAT(record)
+	}
+	return nat, nil
+}
+
+func decodeFirewallRules(raw json.RawMessage) ([]FirewallRule, error) {
+	var records []struct {
+		Name                  string   `json:"Name"`
+		DisplayName           string   `json:"DisplayName"`
+		Description           string   `json:"Description"`
+		Group                 string   `json:"Group"`
+		Enabled               string   `json:"Enabled"`
+		Profile               string   `json:"Profile"`
+		Direction             string   `json:"Direction"`
+		Action                string   `json:"Action"`
+		PolicyStoreSource     string   `json:"PolicyStoreSource"`
+		PolicyStoreSourceType string   `json:"PolicyStoreSourceType"`
+		InterfaceAliases      []string `json:"InterfaceAlias"`
+		LocalAddresses        []string `json:"LocalAddress"`
+		RemoteAddresses       []string `json:"RemoteAddress"`
+		Protocols             []string `json:"Protocol"`
+		LocalPorts            []string `json:"LocalPort"`
+		RemotePorts           []string `json:"RemotePort"`
+		Programs              []string `json:"Program"`
+		Services              []string `json:"Service"`
+	}
+	if err := decodeArrayOrOne(raw, &records); err != nil {
+		return nil, fmt.Errorf("decode inventory firewall rules: %w", err)
+	}
+	rules := make([]FirewallRule, len(records))
+	for i, record := range records {
+		rules[i] = FirewallRule(record)
+	}
+	return rules, nil
+}
+
 func decodeArrayOrOne[T any](raw json.RawMessage, destination *[]T) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return fmt.Errorf("field is missing")
@@ -126,6 +227,16 @@ func decodeArrayOrOne[T any](raw json.RawMessage, destination *[]T) error {
 	}
 	*destination = []T{one}
 	return nil
+}
+
+func decodeArrayOrOneAllowEmpty[T any](raw json.RawMessage, destination *[]T) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return fmt.Errorf("field is missing")
+	}
+	if raw[0] == '[' {
+		return json.Unmarshal(raw, destination)
+	}
+	return decodeArrayOrOne(raw, destination)
 }
 
 // Validate verifies that the configured roles have distinct, exact interface

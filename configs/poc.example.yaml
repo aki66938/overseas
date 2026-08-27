@@ -1,6 +1,10 @@
 wireguard_subnet: 100.127.77.0/24
 wireguard_interface: wg-overseas-poc
 telecom_interface: Telecom-Client
+telecom_route_prefixes:
+  # Exact IPv4 default/external prefixes installed by the telecom client.
+  # Replace this example with prefixes observed and approved for the PoC.
+  - 0.0.0.0/0
 employee_interface: Ethernet
 internal_cidrs:
   - 10.0.0.0/8

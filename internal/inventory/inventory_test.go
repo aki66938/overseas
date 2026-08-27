@@ -19,6 +19,12 @@ const inventoryFixture = `{
     {"InterfaceAlias":"Ethernet","InterfaceIndex":7,"DestinationPrefix":"172.20.10.0/24","NextHop":"0.0.0.0","RouteMetric":25,"State":"Alive"},
     {"InterfaceAlias":"Telecom-Client","InterfaceIndex":11,"DestinationPrefix":"198.51.100.0/24","NextHop":"0.0.0.0","RouteMetric":1,"State":"Alive"},
     {"InterfaceAlias":"wg-overseas-poc","InterfaceIndex":19,"DestinationPrefix":"100.127.77.0/24","NextHop":"0.0.0.0","RouteMetric":0,"State":"Alive"}
+  ],
+  "nat": [
+    {"Name":"ExistingNat","InternalIPInterfaceAddressPrefix":"192.0.2.0/24","ExternalIPInterfaceAddressPrefix":"","Active":true}
+  ],
+  "firewall_rules": [
+    {"Name":"ExistingRule","DisplayName":"Existing rule","Description":"baseline","Group":"Baseline","Enabled":"True","Profile":"Any","Direction":"Outbound","Action":"Allow","PolicyStoreSource":"PersistentStore","PolicyStoreSourceType":"Local","InterfaceAlias":["Ethernet"],"LocalAddress":["Any"],"RemoteAddress":["Internet"],"Protocol":["TCP"],"LocalPort":["Any"],"RemotePort":["443"],"Program":["Any"],"Service":["Any"]}
   ]
 }`
 
@@ -34,7 +40,9 @@ const dualStackInventoryFixture = `{
   "routes": [
     {"InterfaceAlias":"Ethernet","InterfaceIndex":7,"DestinationPrefix":"0.0.0.0/0","NextHop":"172.20.10.1","RouteMetric":25,"State":"Alive"},
     {"InterfaceAlias":"wg-overseas-poc","InterfaceIndex":19,"DestinationPrefix":"100.127.77.0/24","NextHop":"0.0.0.0","RouteMetric":0,"State":"Alive"}
-  ]
+  ],
+  "nat": [],
+  "firewall_rules": []
 }`
 
 func TestParseJSONDecodesThreeAdaptersAndRoutes(t *testing.T) {
@@ -47,6 +55,12 @@ func TestParseJSONDecodesThreeAdaptersAndRoutes(t *testing.T) {
 	}
 	if got := state.Interfaces[1]; got.Alias != "Telecom-Client" || got.Index != 11 || got.Status != "Connected" {
 		t.Fatalf("telecom interface = %#v", got)
+	}
+	if len(state.NAT) != 1 || state.NAT[0].Name != "ExistingNat" || !state.NAT[0].Active {
+		t.Fatalf("NAT = %#v, want the exact existing NAT", state.NAT)
+	}
+	if len(state.FirewallRules) != 1 || state.FirewallRules[0].Name != "ExistingRule" || state.FirewallRules[0].RemotePorts[0] != "443" {
+		t.Fatalf("firewall rules = %#v, want normalized exact rule metadata", state.FirewallRules)
 	}
 }
 
@@ -154,9 +168,12 @@ func configForAliases(telecomAlias, employeeAlias string) config.Config {
 		WireGuardSubnet:    "100.127.77.0/24",
 		WireGuardInterface: "wg-overseas-poc",
 		TelecomInterface:   telecomAlias,
-		EmployeeInterface:  employeeAlias,
-		InternalCIDRs:      []string{"10.0.0.0/8"},
-		ApprovedTargets:    []config.Target{{Name: "operator-approved-test", URL: "https://approved-test.example.invalid/"}},
-		ProbeTimeout:       8 * time.Second,
+		TelecomRoutePrefixes: []string{
+			"0.0.0.0/0",
+		},
+		EmployeeInterface: employeeAlias,
+		InternalCIDRs:     []string{"10.0.0.0/8"},
+		ApprovedTargets:   []config.Target{{Name: "operator-approved-test", URL: "https://approved-test.example.invalid/"}},
+		ProbeTimeout:      8 * time.Second,
 	}
 }

@@ -24,6 +24,7 @@ const (
 // Result is the JSON-serializable evidence produced for one approved target.
 type Result struct {
 	TargetName  string        `json:"target_name"`
+	TargetURL   string        `json:"target_url"`
 	ResolvedIPs []string      `json:"resolved_ips"`
 	SelectedIP  string        `json:"selected_ip"`
 	TCPLatency  time.Duration `json:"tcp_latency"`
@@ -33,6 +34,16 @@ type Result struct {
 	StartedAt   time.Time     `json:"started_at"`
 	FinishedAt  time.Time     `json:"finished_at"`
 	ErrorCode   string        `json:"error_code,omitempty"`
+}
+
+// Artifact binds one complete approved-target probe interval to a PoC run.
+type Artifact struct {
+	SchemaVersion int       `json:"schema_version"`
+	RunID         string    `json:"run_id"`
+	ConfigDigest  string    `json:"config_digest"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at"`
+	Results       []Result  `json:"results"`
 }
 
 type lookupFunc func(context.Context, string, string) ([]netip.Addr, error)
@@ -62,6 +73,7 @@ func run(
 	defer cancel()
 
 	result.TargetName = target.Name
+	result.TargetURL = target.URL
 	result.TLSStatus = "not_attempted"
 	result.StartedAt = time.Now().UTC()
 	defer func() { result.FinishedAt = time.Now().UTC() }()
@@ -172,7 +184,7 @@ func run(
 	result.HTTPStatus = response.StatusCode
 	result.Bytes, err = io.Copy(io.Discard, io.LimitReader(response.Body, maxBodyBytes))
 	if err != nil {
-		result.ErrorCode = errorCodeForContext(ctx, "tcp_failed")
+		result.ErrorCode = errorCodeForContext(ctx, "body_failed")
 		return result
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {

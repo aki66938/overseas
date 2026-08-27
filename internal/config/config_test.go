@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,8 @@ func TestLoadDecodesValidConfiguration(t *testing.T) {
 	contents := `wireguard_subnet: 100.127.77.0/24
 wireguard_interface: wg-overseas-poc
 telecom_interface: Telecom-Client
+telecom_route_prefixes:
+  - 0.0.0.0/0
 employee_interface: Ethernet
 internal_cidrs:
   - 10.0.0.0/8
@@ -46,6 +49,8 @@ func TestLoadRejectsUnknownYAMLField(t *testing.T) {
 	contents := `wireguard_subnet: 100.127.77.0/24
 wireguard_interface: wg-overseas-poc
 telecom_interface: Telecom-Client
+telecom_route_prefixes:
+  - 0.0.0.0/0
 employee_interface: Ethernet
 internal_cidrs:
   - 10.0.0.0/8
@@ -71,6 +76,8 @@ func TestLoadRejectsTrailingYAMLDocument(t *testing.T) {
 	contents := `wireguard_subnet: 100.127.77.0/24
 wireguard_interface: wg-overseas-poc
 telecom_interface: Telecom-Client
+telecom_route_prefixes:
+  - 0.0.0.0/0
 employee_interface: Ethernet
 internal_cidrs:
   - 10.0.0.0/8
@@ -134,6 +141,7 @@ func TestValidateRejectsEmptyRequiredLists(t *testing.T) {
 	}{
 		{"internal CIDRs", func(cfg *Config) { cfg.InternalCIDRs = nil }},
 		{"approved targets", func(cfg *Config) { cfg.ApprovedTargets = nil }},
+		{"telecom route prefixes", func(cfg *Config) { cfg.TelecomRoutePrefixes = nil }},
 	}
 
 	for _, tt := range tests {
@@ -145,6 +153,53 @@ func TestValidateRejectsEmptyRequiredLists(t *testing.T) {
 				t.Fatal("expected empty required list to be rejected")
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidOrDuplicateTelecomRoutePrefixes(t *testing.T) {
+	tests := []struct {
+		name     string
+		prefixes []string
+	}{
+		{name: "non IPv4", prefixes: []string{"2001:db8::/32"}},
+		{name: "not a prefix", prefixes: []string{"not-a-prefix"}},
+		{name: "private route is not external", prefixes: []string{"10.0.0.0/8"}},
+		{name: "duplicate", prefixes: []string{"0.0.0.0/0", "0.0.0.0/0"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.TelecomRoutePrefixes = test.prefixes
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "telecom_route_prefixes") {
+				t.Fatalf("Validate() error = %v, want telecom_route_prefixes rejection", err)
+			}
+		})
+	}
+}
+
+func TestDigestIsStableAndCoversExactApprovedTargetURL(t *testing.T) {
+	first := validConfig()
+	second := validConfig()
+
+	firstDigest, err := Digest(first)
+	if err != nil {
+		t.Fatalf("Digest(first) error: %v", err)
+	}
+	secondDigest, err := Digest(second)
+	if err != nil {
+		t.Fatalf("Digest(second) error: %v", err)
+	}
+	if firstDigest != secondDigest || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(firstDigest) {
+		t.Fatalf("digests = %q and %q, want the same lowercase SHA-256", firstDigest, secondDigest)
+	}
+
+	second.ApprovedTargets[0].URL = "https://approved-test.example.invalid/different"
+	changedDigest, err := Digest(second)
+	if err != nil {
+		t.Fatalf("Digest(changed) error: %v", err)
+	}
+	if changedDigest == firstDigest {
+		t.Fatal("configuration digest did not cover the exact approved target URL")
 	}
 }
 
@@ -178,6 +233,15 @@ func TestValidateRejectsEmptyTargetName(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsTargetNameWithSurroundingWhitespace(t *testing.T) {
+	cfg := validConfig()
+	cfg.ApprovedTargets[0].Name = " operator-approved-test "
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected a target name with surrounding whitespace to be rejected")
+	}
+}
+
 func TestValidateRejectsTimeoutOutsideAllowedRange(t *testing.T) {
 	for _, timeout := range []time.Duration{0, 31 * time.Second} {
 		t.Run(timeout.String(), func(t *testing.T) {
@@ -196,7 +260,10 @@ func validConfig() Config {
 		WireGuardSubnet:    "100.127.77.0/24",
 		WireGuardInterface: "wg-overseas-poc",
 		TelecomInterface:   "Telecom-Client",
-		EmployeeInterface:  "Ethernet",
+		TelecomRoutePrefixes: []string{
+			"0.0.0.0/0",
+		},
+		EmployeeInterface: "Ethernet",
 		InternalCIDRs: []string{
 			"10.0.0.0/8",
 			"172.16.0.0/12",
