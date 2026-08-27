@@ -1,0 +1,6 @@
+.worktrees/
+.superpowers/
+bin/
+artifacts/*
+!artifacts/.gitkeep
+configs/poc.yaml

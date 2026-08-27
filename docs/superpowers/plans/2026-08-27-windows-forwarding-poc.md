@@ -126,7 +126,7 @@ type Target struct {
 `poc-probe preflight --config configs/poc.yaml` loads configuration and prints either `PREFLIGHT_CONFIG_OK` or a single actionable error. The example must use documentation ranges and an operator-approved example hostname:
 
 ```yaml
-wireguard_subnet: 10.77.0.0/24
+wireguard_subnet: 100.127.77.0/24
 wireguard_interface: wg-overseas-poc
 telecom_interface: Telecom-Client
 employee_interface: Ethernet
@@ -373,7 +373,7 @@ git commit -m "feat: add fail-closed PoC verdict"
 
 - [ ] **Step 1: Write the runbook with exact order and stop conditions**
 
-The runbook must require: written operator approval; an operator-approved HTTPS target; VM console access; a recovery snapshot; current telecom PIN holder availability; and a maintenance window. Stop immediately if snapshot fails, an interface alias is ambiguous, NAT creation fails, internal routes change, or rollback verification fails.
+The runbook must require: written operator approval; an operator-approved HTTPS target; VM console access; a recovery snapshot; current telecom PIN holder availability; and a maintenance window. It must also verify that `100.127.77.0/24` is absent from internal routes, operator routes, and CGNAT usage before applying the example. Stop immediately if snapshot fails, an interface alias is ambiguous, the WireGuard subnet overlaps an existing route, NAT creation fails, internal routes change, or rollback verification fails.
 
 - [ ] **Step 2: Add build and test targets**
 
@@ -444,7 +444,7 @@ Run snapshot, copy the snapshot to a second protected location, and run both app
 
 - [ ] **Step 3: Apply PoC networking and test with telecom connected**
 
-Connect one WireGuard test peer, verify it receives an address from `10.77.0.0/24`, then run the approved-target probe. Expected: HTTPS succeeds and the observed public path matches the telecom line evidence supplied by the operator.
+Connect one WireGuard test peer, verify it receives an address from `100.127.77.0/24`, then run the approved-target probe. Expected: HTTPS succeeds and the observed public path matches the telecom line evidence supplied by the operator.
 
 - [ ] **Step 4: Test fail-closed behavior**
 
@@ -477,4 +477,3 @@ git commit -m "docs: record validated PoC procedure"
 - Spec coverage: this plan intentionally covers only the mandatory forwarding/fail-closed gate. AD enrollment, leases, production clients, audit storage, signed updates, and high availability require later plans after a `PASS` verdict.
 - Placeholder scan: runtime-specific interface aliases, snapshot filenames, and approved targets are operator inputs with explicit discovery procedures; they are not implementation placeholders.
 - Type consistency: configuration, inventory, probe, and verdict interfaces are defined before their consumers.
-
