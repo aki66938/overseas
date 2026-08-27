@@ -18,98 +18,66 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string] $WireGuardSubnet
+    [string] $WireGuardSubnet,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string[]] $InternalCidrs,
+
+    [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int] $MaximumSnapshotAgeMinutes = 240
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'poc-networking-common.ps1')
 
-function Assert-PocSnapshot {
+function Invoke-PocApplyCompensation {
     param(
-        [Parameter(Mandatory = $true)]
-        [string] $Path,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable] $ExpectedInterfaces
+        [Parameter(Mandatory = $true)] [object[]] $Definitions,
+        [Parameter(Mandatory = $true)] [object[]] $ForwardingEntries,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [int[]] $ForwardingAttempted,
+        [Parameter(Mandatory = $true)] [bool] $NatAttempted,
+        [Parameter(Mandatory = $true)] [bool] $FirewallAttempted
     )
 
-    if (-not [System.IO.Path]::IsPathRooted($SnapshotPath)) {
-        throw 'SnapshotPath must be an absolute path.'
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Snapshot does not exist: $Path"
-    }
-
-    try {
-        $data = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        throw "Snapshot is not valid JSON: $($_.Exception.Message)"
-    }
-
-    foreach ($property in @(
-        'SchemaVersion', 'CapturedAtUtc', 'ComputerName', 'RequiredInterfaces',
-        'NetIPInterfaces', 'Routes', 'Nat', 'FirewallRules',
-        'FirewallAddressFilters', 'Adapters'
-    )) {
-        if ($null -eq $data.PSObject.Properties[$property]) {
-            throw "Snapshot is missing required property '$property'."
+    $failures = @()
+    if ($NatAttempted) {
+        try {
+            if ($null -ne (Get-NetNat -Name OverseasPocNat -ErrorAction SilentlyContinue)) {
+                Remove-NetNat -Name OverseasPocNat -Confirm:$false -ErrorAction Stop | Out-Null
+            }
         }
-    }
-    if ($data.SchemaVersion -ne 1) {
-        throw "Unsupported snapshot schema version '$($data.SchemaVersion)'."
-    }
-    if ($data.ComputerName -ne $env:COMPUTERNAME) {
-        throw "Snapshot belongs to computer '$($data.ComputerName)', not '$env:COMPUTERNAME'."
-    }
-
-    foreach ($role in $ExpectedInterfaces.Keys) {
-        $entries = @($data.RequiredInterfaces | Where-Object { $_.Role -eq $role })
-        if ($entries.Count -ne 1) {
-            throw "Snapshot must contain exactly one required interface for role '$role'."
-        }
-        $entry = $entries[0]
-        if ($entry.Alias -ne $ExpectedInterfaces[$role] -or [int] $entry.InterfaceIndex -le 0) {
-            throw "Snapshot required interface '$role' does not match the configured alias or index."
-        }
-        if ($entry.AddressFamily -ne 'IPv4' -or $entry.Forwarding -notin @('Enabled', 'Disabled')) {
-            throw "Snapshot lacks valid IPv4 forwarding state for required interface index $($entry.InterfaceIndex)."
-        }
-        if (@($data.NetIPInterfaces | Where-Object { [int] $_.InterfaceIndex -eq [int] $entry.InterfaceIndex }).Count -eq 0) {
-            throw "Snapshot inventory lacks required interface index $($entry.InterfaceIndex)."
+        catch {
+            $failures += "remove NAT: $($_.Exception.Message)"
         }
     }
 
-    return $data
-}
-
-function Assert-IPv4NetworkPrefix {
-    param([string] $Prefix)
-
-    $parts = $Prefix.Split('/')
-    $address = $null
-    $prefixLength = 0
-    if (
-        $parts.Count -ne 2 -or
-        -not [System.Net.IPAddress]::TryParse($parts[0], [ref] $address) -or
-        $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
-        -not [int]::TryParse($parts[1], [ref] $prefixLength) -or
-        $prefixLength -lt 1 -or
-        $prefixLength -gt 32
-    ) {
-        throw "WireGuardSubnet must be an absolute IPv4 CIDR prefix: '$Prefix'."
+    foreach ($entry in $ForwardingEntries) {
+        if ($ForwardingAttempted -notcontains [int] $entry.InterfaceIndex) { continue }
+        try {
+            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding $entry.Forwarding -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+        }
+        catch {
+            $failures += "restore forwarding on index $($entry.InterfaceIndex): $($_.Exception.Message)"
+        }
     }
 
-    $bytes = $address.GetAddressBytes()
-    $value = ([uint32] $bytes[0] -shl 24) -bor
-        ([uint32] $bytes[1] -shl 16) -bor
-        ([uint32] $bytes[2] -shl 8) -bor
-        [uint32] $bytes[3]
-    $hostBits = 32 - $prefixLength
-    $hostMask = if ($hostBits -eq 0) { [uint32] 0 } else { [uint32] ([math]::Pow(2, $hostBits) - 1) }
-    if (($value -band $hostMask) -ne 0) {
-        throw "WireGuardSubnet must use the network address, not a host address: '$Prefix'."
+    if ($FirewallAttempted) {
+        foreach ($definition in $Definitions) {
+            try {
+                if ($null -ne (Get-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -ErrorAction SilentlyContinue)) {
+                    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -Confirm:$false -ErrorAction Stop | Out-Null
+                }
+            }
+            catch {
+                $failures += "remove firewall rule '$($definition.Name)': $($_.Exception.Message)"
+            }
+        }
     }
+
+    return $failures
 }
 
 if (-not [System.IO.Path]::IsPathRooted($SnapshotPath)) {
@@ -118,63 +86,139 @@ if (-not [System.IO.Path]::IsPathRooted($SnapshotPath)) {
 $SnapshotPath = [System.IO.Path]::GetFullPath($SnapshotPath)
 
 $configuredAliases = @($WireGuardInterface, $TelecomInterface, $EmployeeInterface)
-if ($configuredAliases.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
+if (@($configuredAliases | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
     throw 'Interface aliases must not be empty or whitespace.'
 }
-$aliases = @($configuredAliases | Select-Object -Unique)
-if ($aliases.Count -ne 3) {
-    throw 'WireGuard, telecom, and employee interfaces must be distinct.'
+if (@($configuredAliases | Select-Object -Unique).Count -ne 3) {
+    throw 'WireGuard, telecom, and employee interface aliases must be distinct.'
 }
-Assert-IPv4NetworkPrefix -Prefix $WireGuardSubnet
 
 $wireGuardAdapter = Get-NetAdapter -Name $WireGuardInterface -ErrorAction Stop
 $telecomAdapter = Get-NetAdapter -Name $TelecomInterface -ErrorAction Stop
 $employeeAdapter = Get-NetAdapter -Name $EmployeeInterface -ErrorAction Stop
-
-$expectedInterfaces = @{
-    WireGuard = $WireGuardInterface
-    Telecom = $TelecomInterface
-    Employee = $EmployeeInterface
+$adaptersByRole = @{
+    WireGuard = $wireGuardAdapter
+    Telecom = $telecomAdapter
+    Employee = $employeeAdapter
 }
-$snapshot = Assert-PocSnapshot -Path $SnapshotPath -ExpectedInterfaces $expectedInterfaces
+$resolvedIndexes = @(
+    [int] $wireGuardAdapter.ifIndex,
+    [int] $telecomAdapter.ifIndex,
+    [int] $employeeAdapter.ifIndex
+)
+if ($resolvedIndexes.Where({ $_ -le 0 }).Count -ne 0 -or @($resolvedIndexes | Select-Object -Unique).Count -ne 3) {
+    throw 'WireGuard, telecom, and employee interfaces must resolve to distinct canonical indices.'
+}
 
-foreach ($entry in $snapshot.RequiredInterfaces) {
-    $currentAdapter = Get-NetAdapter -InterfaceIndex ([int] $entry.InterfaceIndex) -ErrorAction Stop
-    if ($currentAdapter.Name -ne $entry.Alias) {
-        throw "Current adapter at required interface index $($entry.InterfaceIndex) is not '$($entry.Alias)'."
+$snapshot = Read-PocSnapshot -Path $SnapshotPath -MaximumAgeMinutes $MaximumSnapshotAgeMinutes
+foreach ($roleAndAlias in @(
+    @{ Role = 'WireGuard'; Alias = $WireGuardInterface }
+    @{ Role = 'Telecom'; Alias = $TelecomInterface }
+    @{ Role = 'Employee'; Alias = $EmployeeInterface }
+)) {
+    $saved = Get-PocRequiredInterface -Snapshot $snapshot -Role $roleAndAlias.Role
+    if ($saved.Alias -cne $roleAndAlias.Alias) {
+        throw "Configured interface for role '$($roleAndAlias.Role)' does not match the snapshot."
     }
 }
+Assert-PocAdaptersMatchSnapshot -Snapshot $snapshot -AdaptersByRole $adaptersByRole -RequireBaselineForwarding
 
-if ($null -ne (Get-NetNat -Name OverseasPocNat -ErrorAction SilentlyContinue)) {
-    throw "NAT 'OverseasPocNat' already exists; refusing to overwrite owned state."
-}
-if (@(Get-NetFirewallRule -Group 'Overseas Gateway PoC' -ErrorAction SilentlyContinue).Count -ne 0) {
-    throw "Firewall group 'Overseas Gateway PoC' already exists; refusing to overwrite owned state."
-}
+$currentRoutes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+$defaultRoute = Get-PocSoleEmployeeDefaultRoute -EmployeeInterfaceIndex ([int] $employeeAdapter.ifIndex) -EmployeeInterfaceAlias $EmployeeInterface -Routes $currentRoutes
+Assert-PocDefaultRouteMatchesSnapshot -Snapshot $snapshot -CurrentDefaultRoute $defaultRoute
 
-# Windows Firewall block rules take precedence over overlapping allow rules. The
-# employee-interface block therefore provides fail-closed behavior without a
-# nonexistent numeric firewall-rule priority.
-if ($PSCmdlet.ShouldProcess($EmployeeInterface, 'Create fail-closed WireGuard subnet block')) {
-    New-NetFirewallRule -DisplayName 'Overseas Gateway PoC - Block employee fallback' -Group 'Overseas Gateway PoC' -Direction Outbound -Action Block -InterfaceAlias $EmployeeInterface -LocalAddress $WireGuardSubnet -Profile Any -Enabled True -ErrorAction Stop | Out-Null
-}
+$currentAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+Assert-PocWireGuardSubnetAvailable `
+    -WireGuardSubnet $WireGuardSubnet `
+    -InternalCidrs $InternalCidrs `
+    -WireGuardInterfaceIndex ([int] $wireGuardAdapter.ifIndex) `
+    -IPAddresses $currentAddresses `
+    -Routes $currentRoutes
 
-if ($PSCmdlet.ShouldProcess($WireGuardInterface, 'Allow WireGuard subnet ingress')) {
-    New-NetFirewallRule -DisplayName 'Overseas Gateway PoC - Allow WireGuard ingress' -Group 'Overseas Gateway PoC' -Direction Inbound -Action Allow -InterfaceAlias $WireGuardInterface -RemoteAddress $WireGuardSubnet -Profile Any -Enabled True -ErrorAction Stop | Out-Null
+if (@($snapshot.Nat).Count -ne 0) {
+    throw 'Snapshot contains existing WinNAT state and cannot authorize this transaction.'
 }
-
-if ($PSCmdlet.ShouldProcess($TelecomInterface, 'Allow WireGuard subnet egress through telecom')) {
-    New-NetFirewallRule -DisplayName 'Overseas Gateway PoC - Allow telecom egress' -Group 'Overseas Gateway PoC' -Direction Outbound -Action Allow -InterfaceAlias $TelecomInterface -LocalAddress $WireGuardSubnet -Profile Any -Enabled True -ErrorAction Stop | Out-Null
-}
-
-if ($PSCmdlet.ShouldProcess('OverseasPocNat', "Create NAT for $WireGuardSubnet")) {
-    New-NetNat -Name OverseasPocNat -InternalIPInterfaceAddressPrefix $WireGuardSubnet -ErrorAction Stop | Out-Null
+$existingNat = @(Get-NetNat -ErrorAction Stop)
+if ($existingNat.Count -ne 0) {
+    throw 'Existing WinNAT state does not permit safe creation of OverseasPocNat.'
 }
 
-if ($PSCmdlet.ShouldProcess($WireGuardInterface, 'Enable IPv4 forwarding')) {
-    Set-NetIPInterface -InterfaceIndex $wireGuardAdapter.ifIndex -Forwarding Enabled -AddressFamily IPv4 -ErrorAction Stop
+$definitions = @(Get-PocFirewallDefinitions `
+    -WireGuardInterface $WireGuardInterface `
+    -TelecomInterface $TelecomInterface `
+    -EmployeeInterface $EmployeeInterface `
+    -WireGuardSubnet $WireGuardSubnet)
+$ownedNames = @($definitions | ForEach-Object { $_.Name })
+$savedOwnedRules = @($snapshot.FirewallRules | Where-Object {
+    $_.Group -eq 'Overseas Gateway PoC' -or $ownedNames -contains $_.Name
+})
+if ($savedOwnedRules.Count -ne 0) {
+    throw 'Snapshot already contains PoC-owned firewall state.'
+}
+$existingOwnedRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group 'Overseas Gateway PoC' -ErrorAction SilentlyContinue)
+foreach ($name in $ownedNames) {
+    $existingOwnedRules += @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+}
+if (@($existingOwnedRules | Where-Object { $null -ne $_ } | Select-Object -Unique).Count -ne 0) {
+    throw 'PoC-owned firewall state already exists in PersistentStore.'
 }
 
-if ($PSCmdlet.ShouldProcess($TelecomInterface, 'Enable IPv4 forwarding')) {
-    Set-NetIPInterface -InterfaceIndex $telecomAdapter.ifIndex -Forwarding Enabled -AddressFamily IPv4 -ErrorAction Stop
+$description = "SnapshotId=$($snapshot.SnapshotId); WireGuardSubnet=$WireGuardSubnet; OperatorWhitelist=Required"
+$forwardingEntries = @(
+    (Get-PocRequiredInterface -Snapshot $snapshot -Role 'WireGuard'),
+    (Get-PocRequiredInterface -Snapshot $snapshot -Role 'Telecom')
+)
+$forwardingAttempted = @()
+$natAttempted = $false
+$firewallAttempted = $false
+$target = "OverseasPocNat, three exact firewall rules, and IPv4 forwarding on indices $($wireGuardAdapter.ifIndex)/$($telecomAdapter.ifIndex)"
+
+# Destination authorization is deliberately not duplicated here. The telecom
+# operator whitelist remains the enforcement boundary; poc-probe only tests
+# configured approved targets. The local rules enforce interface fail-closed
+# behavior while the operator continues to decide which destinations are legal.
+if ($PSCmdlet.ShouldProcess($target, 'Apply the complete Overseas Gateway PoC networking transaction')) {
+    try {
+        $firewallAttempted = $true
+        foreach ($definition in $definitions) {
+            New-NetFirewallRule `
+                -PolicyStore PersistentStore `
+                -Name $definition.Name `
+                -DisplayName $definition.DisplayName `
+                -Description $description `
+                -Group 'Overseas Gateway PoC' `
+                -Direction $definition.Direction `
+                -Action $definition.Action `
+                -InterfaceAlias $definition.InterfaceAlias `
+                -RemoteAddress $definition.RemoteAddress `
+                -Profile Any `
+                -Enabled True `
+                -ErrorAction Stop | Out-Null
+        }
+
+        # If local firewall rules are not merged into effective policy, abort
+        # before NAT or forwarding can expose traffic and compensate the rules.
+        Assert-PocFirewallRulesActive -Definitions $definitions -Description $description
+
+        $natAttempted = $true
+        New-NetNat -Name OverseasPocNat -InternalIPInterfaceAddressPrefix $WireGuardSubnet -ErrorAction Stop | Out-Null
+
+        foreach ($entry in $forwardingEntries) {
+            $forwardingAttempted += [int] $entry.InterfaceIndex
+            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding Enabled -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+        }
+    }
+    catch {
+        $primaryFailure = $_.Exception.Message
+        $compensationFailures = @(Invoke-PocApplyCompensation `
+            -Definitions $definitions `
+            -ForwardingEntries $forwardingEntries `
+            -ForwardingAttempted $forwardingAttempted `
+            -NatAttempted $natAttempted `
+            -FirewallAttempted $firewallAttempted)
+        if ($compensationFailures.Count -ne 0) {
+            throw "Apply transaction failed: $primaryFailure Compensation also failed: $($compensationFailures -join '; ')"
+        }
+        throw "Apply transaction failed and was compensated: $primaryFailure"
+    }
 }

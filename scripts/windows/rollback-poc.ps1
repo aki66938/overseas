@@ -2,101 +2,105 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string] $SnapshotPath
+    [string] $SnapshotPath,
+
+    [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int] $MaximumSnapshotAgeMinutes = 240
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Assert-PocSnapshot {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    if (-not [System.IO.Path]::IsPathRooted($SnapshotPath)) {
-        throw 'SnapshotPath must be an absolute path.'
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Snapshot does not exist: $Path"
-    }
-
-    try {
-        $data = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        throw "Snapshot is not valid JSON: $($_.Exception.Message)"
-    }
-
-    foreach ($property in @(
-        'SchemaVersion', 'CapturedAtUtc', 'ComputerName', 'RequiredInterfaces',
-        'NetIPInterfaces', 'Routes', 'Nat', 'FirewallRules',
-        'FirewallAddressFilters', 'Adapters'
-    )) {
-        if ($null -eq $data.PSObject.Properties[$property]) {
-            throw "Snapshot is missing required property '$property'."
-        }
-    }
-    if ($data.SchemaVersion -ne 1) {
-        throw "Unsupported snapshot schema version '$($data.SchemaVersion)'."
-    }
-    if ($data.ComputerName -ne $env:COMPUTERNAME) {
-        throw "Snapshot belongs to computer '$($data.ComputerName)', not '$env:COMPUTERNAME'."
-    }
-
-    $requiredRoles = @('WireGuard', 'Telecom', 'Employee')
-    foreach ($role in $requiredRoles) {
-        $roleEntries = @($data.RequiredInterfaces | Where-Object { $_.Role -eq $role })
-        if ($roleEntries.Count -ne 1 -or [int] $roleEntries[0].InterfaceIndex -le 0) {
-            throw "Snapshot lacks the required interface index for role '$role'."
-        }
-        $entry = $roleEntries[0]
-        if ($entry.AddressFamily -ne 'IPv4' -or $entry.Forwarding -notin @('Enabled', 'Disabled')) {
-            throw "Snapshot lacks valid forwarding state for required interface index $($entry.InterfaceIndex)."
-        }
-        if (@($data.NetIPInterfaces | Where-Object { [int] $_.InterfaceIndex -eq [int] $entry.InterfaceIndex }).Count -eq 0) {
-            throw "Snapshot inventory lacks required interface index $($entry.InterfaceIndex)."
-        }
-    }
-
-    return $data
-}
+. (Join-Path $PSScriptRoot 'poc-networking-common.ps1')
 
 if (-not [System.IO.Path]::IsPathRooted($SnapshotPath)) {
     throw 'SnapshotPath must be an absolute path.'
 }
 $SnapshotPath = [System.IO.Path]::GetFullPath($SnapshotPath)
-$snapshot = Assert-PocSnapshot -Path $SnapshotPath
+$snapshot = Read-PocSnapshot -Path $SnapshotPath -MaximumAgeMinutes $MaximumSnapshotAgeMinutes
 
-$requiredInterfaceIndexes = @($snapshot.RequiredInterfaces | ForEach-Object { [int] $_.InterfaceIndex })
-if ($requiredInterfaceIndexes.Count -ne 3 -or @($requiredInterfaceIndexes | Select-Object -Unique).Count -ne 3) {
-    throw 'Snapshot required interface indexes must be present and distinct.'
+$wireGuardEntry = Get-PocRequiredInterface -Snapshot $snapshot -Role 'WireGuard'
+$telecomEntry = Get-PocRequiredInterface -Snapshot $snapshot -Role 'Telecom'
+$employeeEntry = Get-PocRequiredInterface -Snapshot $snapshot -Role 'Employee'
+$adaptersByRole = @{
+    WireGuard = Get-NetAdapter -Name $wireGuardEntry.Alias -ErrorAction Stop
+    Telecom = Get-NetAdapter -Name $telecomEntry.Alias -ErrorAction Stop
+    Employee = Get-NetAdapter -Name $employeeEntry.Alias -ErrorAction Stop
 }
+Assert-PocAdaptersMatchSnapshot -Snapshot $snapshot -AdaptersByRole $adaptersByRole
 
-foreach ($required in $snapshot.RequiredInterfaces) {
-    $adapter = Get-NetAdapter -InterfaceIndex ([int] $required.InterfaceIndex) -ErrorAction Stop
-    if ($adapter.Name -ne $required.Alias) {
-        throw "Adapter mismatch at required interface index $($required.InterfaceIndex); rollback aborted."
+$currentRoutes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+$defaultRoute = Get-PocSoleEmployeeDefaultRoute `
+    -EmployeeInterfaceIndex ([int] $employeeEntry.InterfaceIndex) `
+    -EmployeeInterfaceAlias $employeeEntry.Alias `
+    -Routes $currentRoutes
+Assert-PocDefaultRouteMatchesSnapshot -Snapshot $snapshot -CurrentDefaultRoute $defaultRoute
+
+$currentEmployeeForwarding = @(Get-NetIPInterface -InterfaceIndex ([int] $employeeEntry.InterfaceIndex) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+if ($currentEmployeeForwarding.Count -ne 1 -or $currentEmployeeForwarding[0].Forwarding.ToString() -ne $employeeEntry.Forwarding) {
+    throw 'Employee-interface forwarding drifted after the snapshot; rollback aborted.'
+}
+foreach ($entry in @($wireGuardEntry, $telecomEntry)) {
+    $current = @(Get-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+    if ($current.Count -ne 1 -or $current[0].Forwarding.ToString() -ne 'Enabled') {
+        throw "Interface index $($entry.InterfaceIndex) is not in the expected applied forwarding state."
     }
 }
 
-$forwardingEntriesToRestore = @()
-foreach ($role in @('WireGuard', 'Telecom')) {
-    $forwardingEntriesToRestore += @($snapshot.RequiredInterfaces | Where-Object { $_.Role -eq $role })[0]
+$allNat = @(Get-NetNat -ErrorAction Stop)
+if ($allNat.Count -ne 1 -or $allNat[0].Name -cne 'OverseasPocNat') {
+    throw 'Current WinNAT state does not match the exact applied PoC transaction.'
 }
+$wireGuardSubnet = [string] $allNat[0].InternalIPInterfaceAddressPrefix
+[void] (ConvertTo-PocIPv4Prefix -Prefix $wireGuardSubnet -RequireNetworkAddress)
+$description = "SnapshotId=$($snapshot.SnapshotId); WireGuardSubnet=$wireGuardSubnet; OperatorWhitelist=Required"
+$definitions = @(Get-PocFirewallDefinitions `
+    -WireGuardInterface $wireGuardEntry.Alias `
+    -TelecomInterface $telecomEntry.Alias `
+    -EmployeeInterface $employeeEntry.Alias `
+    -WireGuardSubnet $wireGuardSubnet)
 
-$ownedRules = @(Get-NetFirewallRule -Group 'Overseas Gateway PoC' -ErrorAction SilentlyContinue)
-$ownedNat = Get-NetNat -Name OverseasPocNat -ErrorAction SilentlyContinue
-
-foreach ($rule in $ownedRules) {
-    if ($PSCmdlet.ShouldProcess($rule.DisplayName, "Remove firewall rule in group 'Overseas Gateway PoC'")) {
-        Remove-NetFirewallRule -InputObject $rule -Confirm:$false -ErrorAction Stop
+foreach ($definition in $definitions) {
+    $persistent = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -ErrorAction SilentlyContinue)
+    if ($persistent.Count -ne 1 -or (Get-PocFirewallRuleGroup -Rule $persistent[0]) -cne 'Overseas Gateway PoC' -or $persistent[0].Description -cne $description) {
+        throw "Persistent firewall rule '$($definition.Name)' does not belong to this snapshot transaction."
     }
 }
+Assert-PocFirewallRulesActive -Definitions $definitions -Description $description
 
-if ($null -ne $ownedNat -and $PSCmdlet.ShouldProcess('OverseasPocNat', 'Remove owned NAT')) {
-    Remove-NetNat -Name OverseasPocNat -Confirm:$false -ErrorAction Stop
-}
+$target = "OverseasPocNat, firewall rules $(@($definitions.Name) -join '/'), and forwarding on indices $($wireGuardEntry.InterfaceIndex)/$($telecomEntry.InterfaceIndex)"
+if ($PSCmdlet.ShouldProcess($target, 'Roll back the complete Overseas Gateway PoC networking transaction')) {
+    Remove-NetNat -Name OverseasPocNat -Confirm:$false -ErrorAction Stop | Out-Null
 
-foreach ($entry in $forwardingEntriesToRestore) {
-    if ($PSCmdlet.ShouldProcess("interface index $($entry.InterfaceIndex)", "Restore IPv4 forwarding to $($entry.Forwarding)")) {
-        Set-NetIPInterface -InterfaceIndex $entry.InterfaceIndex -Forwarding $entry.Forwarding -AddressFamily $entry.AddressFamily -ErrorAction Stop
+    foreach ($entry in @($wireGuardEntry, $telecomEntry)) {
+        Set-NetIPInterface `
+            -InterfaceIndex ([int] $entry.InterfaceIndex) `
+            -Forwarding $entry.Forwarding `
+            -AddressFamily IPv4 `
+            -PolicyStore ActiveStore `
+            -ErrorAction Stop | Out-Null
+    }
+
+    foreach ($definition in $definitions) {
+        Remove-NetFirewallRule `
+            -PolicyStore PersistentStore `
+            -Name $definition.Name `
+            -Confirm:$false `
+            -ErrorAction Stop | Out-Null
+    }
+
+    if ($null -ne (Get-NetNat -Name OverseasPocNat -ErrorAction SilentlyContinue)) {
+        throw 'Rollback verification failed: OverseasPocNat is still present.'
+    }
+    foreach ($entry in @($wireGuardEntry, $telecomEntry)) {
+        $current = @(Get-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+        if ($current.Count -ne 1 -or $current[0].Forwarding.ToString() -ne $entry.Forwarding) {
+            throw "Rollback verification failed for forwarding on interface index $($entry.InterfaceIndex)."
+        }
+    }
+    foreach ($definition in $definitions) {
+        if ($null -ne (Get-NetFirewallRule -PolicyStore ActiveStore -Name $definition.Name -ErrorAction SilentlyContinue)) {
+            throw "Rollback verification failed: firewall rule '$($definition.Name)' is still effective."
+        }
     }
 }

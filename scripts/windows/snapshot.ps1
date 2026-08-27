@@ -21,56 +21,66 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'poc-networking-common.ps1')
 
 if (-not [System.IO.Path]::IsPathRooted($ArtifactsDirectory)) {
     throw 'ArtifactsDirectory must be an absolute path.'
 }
-
 $ArtifactsDirectory = [System.IO.Path]::GetFullPath($ArtifactsDirectory)
 if (-not (Test-Path -LiteralPath $ArtifactsDirectory -PathType Container)) {
     throw "ArtifactsDirectory does not exist: $ArtifactsDirectory"
 }
 
 $configuredAliases = @($WireGuardInterface, $TelecomInterface, $EmployeeInterface)
-if ($configuredAliases.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
+if (@($configuredAliases | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
     throw 'Interface aliases must not be empty or whitespace.'
 }
-
-$uniqueAliases = @($configuredAliases | Select-Object -Unique)
-if ($uniqueAliases.Count -ne 3) {
-    throw 'WireGuard, telecom, and employee interfaces must be distinct.'
+if (@($configuredAliases | Select-Object -Unique).Count -ne 3) {
+    throw 'WireGuard, telecom, and employee interface aliases must be distinct.'
 }
 
 $wireGuardAdapter = Get-NetAdapter -Name $WireGuardInterface -ErrorAction Stop
 $telecomAdapter = Get-NetAdapter -Name $TelecomInterface -ErrorAction Stop
 $employeeAdapter = Get-NetAdapter -Name $EmployeeInterface -ErrorAction Stop
-$netIPInterfaces = @(Get-NetIPInterface -ErrorAction Stop)
-
-$wireGuardIPv4 = @($netIPInterfaces | Where-Object {
-    [int] $_.InterfaceIndex -eq [int] $wireGuardAdapter.ifIndex -and $_.AddressFamily.ToString() -eq 'IPv4'
-})
-$telecomIPv4 = @($netIPInterfaces | Where-Object {
-    [int] $_.InterfaceIndex -eq [int] $telecomAdapter.ifIndex -and $_.AddressFamily.ToString() -eq 'IPv4'
-})
-$employeeIPv4 = @($netIPInterfaces | Where-Object {
-    [int] $_.InterfaceIndex -eq [int] $employeeAdapter.ifIndex -and $_.AddressFamily.ToString() -eq 'IPv4'
-})
-if ($wireGuardIPv4.Count -ne 1 -or $telecomIPv4.Count -ne 1 -or $employeeIPv4.Count -ne 1) {
-    throw 'Each required adapter must have exactly one IPv4 interface entry.'
+$adapterIndexes = @(
+    [int] $wireGuardAdapter.ifIndex,
+    [int] $telecomAdapter.ifIndex,
+    [int] $employeeAdapter.ifIndex
+)
+if ($adapterIndexes.Where({ $_ -le 0 }).Count -ne 0 -or @($adapterIndexes | Select-Object -Unique).Count -ne 3) {
+    throw 'WireGuard, telecom, and employee interfaces must resolve to distinct canonical indices.'
 }
-$wireGuardIPv4 = $wireGuardIPv4[0]
-$telecomIPv4 = $telecomIPv4[0]
-$employeeIPv4 = $employeeIPv4[0]
 
-$snapshot = [ordered] @{
-    SchemaVersion = 1
-    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+$netIPInterfaces = @(Get-NetIPInterface -ErrorAction Stop)
+$requiredInterfaces = @()
+foreach ($roleAndAdapter in @(
+    @{ Role = 'WireGuard'; Alias = $WireGuardInterface; Adapter = $wireGuardAdapter }
+    @{ Role = 'Telecom'; Alias = $TelecomInterface; Adapter = $telecomAdapter }
+    @{ Role = 'Employee'; Alias = $EmployeeInterface; Adapter = $employeeAdapter }
+)) {
+    $ipv4 = @($netIPInterfaces | Where-Object {
+        [int] $_.InterfaceIndex -eq [int] $roleAndAdapter.Adapter.ifIndex -and
+        $_.AddressFamily.ToString() -eq 'IPv4'
+    })
+    if ($ipv4.Count -ne 1 -or $ipv4[0].Forwarding.ToString() -notin @('Enabled', 'Disabled')) {
+        throw "Role '$($roleAndAdapter.Role)' must have exactly one valid IPv4 forwarding entry."
+    }
+    $requiredInterfaces += [ordered] @{
+        Role = $roleAndAdapter.Role
+        Alias = $roleAndAdapter.Alias
+        InterfaceIndex = [int] $roleAndAdapter.Adapter.ifIndex
+        AddressFamily = 'IPv4'
+        Forwarding = $ipv4[0].Forwarding.ToString()
+    }
+}
+
+$snapshotPayload = [ordered] @{
+    SnapshotId = [guid]::NewGuid().ToString('D')
+    # Compact UTC avoids Windows PowerShell 5.1 ConvertFrom-Json converting an
+    # ISO 8601 value into a Kind=Unspecified DateTime and shifting it twice.
+    CapturedAtUtc = [datetime]::UtcNow.ToString("yyyyMMdd'T'HHmmss.fffffff'Z'")
     ComputerName = $env:COMPUTERNAME
-    RequiredInterfaces = @(
-        [ordered] @{ Role = 'WireGuard'; Alias = $WireGuardInterface; InterfaceIndex = $wireGuardAdapter.ifIndex; AddressFamily = 'IPv4'; Forwarding = $wireGuardIPv4.Forwarding.ToString() }
-        [ordered] @{ Role = 'Telecom'; Alias = $TelecomInterface; InterfaceIndex = $telecomAdapter.ifIndex; AddressFamily = 'IPv4'; Forwarding = $telecomIPv4.Forwarding.ToString() }
-        [ordered] @{ Role = 'Employee'; Alias = $EmployeeInterface; InterfaceIndex = $employeeAdapter.ifIndex; AddressFamily = 'IPv4'; Forwarding = $employeeIPv4.Forwarding.ToString() }
-    )
+    RequiredInterfaces = $requiredInterfaces
     NetIPInterfaces = $netIPInterfaces
     Routes = @(Get-NetRoute -ErrorAction Stop)
     Nat = @(Get-NetNat -ErrorAction Stop)
@@ -79,34 +89,59 @@ $snapshot = [ordered] @{
     Adapters = @(Get-NetAdapter -ErrorAction Stop)
 }
 
-$fileName = 'poc-networking-{0:yyyyMMdd-HHmmss-fffffff}.json' -f (Get-Date)
-$snapshotPath = Join-Path $ArtifactsDirectory $fileName
-$json = $snapshot | ConvertTo-Json -Depth 12
+$payloadJson = $snapshotPayload | ConvertTo-Json -Compress -Depth 20
+$payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
+$envelope = [ordered] @{
+    SchemaVersion = 2
+    IntegrityAlgorithm = 'SHA256'
+    PayloadBase64 = [Convert]::ToBase64String($payloadBytes)
+    PayloadSha256 = Get-PocSha256Hex -Bytes $payloadBytes
+}
+$json = $envelope | ConvertTo-Json -Depth 5
 
-if ($PSCmdlet.ShouldProcess($snapshotPath, 'Create pre-change networking snapshot')) {
-    $stream = $null
-    $writer = $null
+$fileName = 'poc-networking-{0:yyyyMMdd-HHmmss-fffffff}-{1}.json' -f (Get-Date), ([guid]::NewGuid().ToString('N'))
+$snapshotPath = Join-Path $ArtifactsDirectory $fileName
+$temporaryPath = Join-Path $ArtifactsDirectory ('.{0}.tmp' -f ([guid]::NewGuid().ToString('N')))
+$published = $false
+
+if ($PSCmdlet.ShouldProcess($snapshotPath, 'Atomically create an integrity-protected pre-change networking snapshot')) {
     try {
-        $stream = [System.IO.File]::Open(
-            $snapshotPath,
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None
-        )
-        $writer = New-Object System.IO.StreamWriter(
-            $stream,
-            (New-Object System.Text.UTF8Encoding($false))
-        )
-        $writer.Write($json)
+        $stream = $null
+        $writer = $null
+        try {
+            $stream = [System.IO.File]::Open(
+                $temporaryPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+            $writer = New-Object System.IO.StreamWriter(
+                $stream,
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            $writer.Write($json)
+            $writer.Flush()
+            $stream.Flush($true)
+        }
+        finally {
+            if ($null -ne $writer) {
+                $writer.Dispose()
+            }
+            elseif ($null -ne $stream) {
+                $stream.Dispose()
+            }
+        }
+
+        Move-Item -LiteralPath $temporaryPath -Destination $snapshotPath -ErrorAction Stop
+        $published = $true
     }
     finally {
-        if ($null -ne $writer) {
-            $writer.Dispose()
-        }
-        elseif ($null -ne $stream) {
-            $stream.Dispose()
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-$snapshotPath
+if ($published) {
+    $snapshotPath
+}
