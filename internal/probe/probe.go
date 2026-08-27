@@ -35,29 +35,32 @@ type Result struct {
 	ErrorCode   string        `json:"error_code,omitempty"`
 }
 
+type lookupFunc func(context.Context, string, string) ([]netip.Addr, error)
+
+type dialFunc func(context.Context, string, string) (net.Conn, error)
+
+// dialerFactory receives the requested source IP so every dial path can bind
+// to it. It must not introduce an unbound fallback dial.
+type dialerFactory func(time.Duration, net.IP) dialFunc
+
 // Run checks target using source when it is non-nil. The context deadline
 // bounds DNS, TCP, TLS, and HTTP work and is also used as the TCP dial timeout.
 func Run(ctx context.Context, target config.Target, source net.IP) Result {
-	timeout := defaultTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout = time.Until(deadline)
-	}
-
-	dialer := net.Dialer{Timeout: timeout}
-	if source != nil {
-		dialer.LocalAddr = &net.TCPAddr{IP: source}
-	}
-	return run(ctx, target, source, net.DefaultResolver.LookupNetIP, dialer.DialContext, nil)
+	return run(ctx, target, source, defaultTimeout, net.DefaultResolver.LookupNetIP, defaultDialerFactory, nil)
 }
 
 func run(
 	ctx context.Context,
 	target config.Target,
-	_ net.IP,
-	lookup func(context.Context, string, string) ([]netip.Addr, error),
-	dial func(context.Context, string, string) (net.Conn, error),
+	source net.IP,
+	timeout time.Duration,
+	lookup lookupFunc,
+	makeDialer dialerFactory,
 	tlsConfig *tls.Config,
 ) (result Result) {
+	ctx, cancel := contextWithTimeoutIfMissing(ctx, timeout)
+	defer cancel()
+
 	result.TargetName = target.Name
 	result.TLSStatus = "not_attempted"
 	result.StartedAt = time.Now().UTC()
@@ -96,6 +99,11 @@ func run(
 		port = "443"
 	}
 	selectedAddress := net.JoinHostPort(result.SelectedIP, port)
+	dialTimeout := timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		dialTimeout = time.Until(deadline)
+	}
+	dial := makeDialer(dialTimeout, source)
 
 	configuredTLS := tlsConfig
 	if configuredTLS == nil {
@@ -165,6 +173,21 @@ func run(
 		result.ErrorCode = "http_rejected"
 	}
 	return result
+}
+
+func contextWithTimeoutIfMissing(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func defaultDialerFactory(timeout time.Duration, source net.IP) dialFunc {
+	dialer := net.Dialer{Timeout: timeout}
+	if source != nil {
+		dialer.LocalAddr = &net.TCPAddr{IP: append(net.IP(nil), source...)}
+	}
+	return dialer.DialContext
 }
 
 func errorCodeForContext(ctx context.Context, fallback string) string {

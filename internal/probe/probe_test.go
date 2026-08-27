@@ -23,7 +23,7 @@ func TestRunSuccessfulHTTPSProbe(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := run(contextWithDeadline(t), targetFor(server), nil, localResolver, dialServer(server), trustedTLSConfig(t, server))
+	result := run(contextWithDeadline(t), targetFor(server), nil, time.Second, localResolver, dialServer(server), trustedTLSConfig(t, server))
 
 	if result.ErrorCode != "" {
 		t.Fatalf("ErrorCode = %q, want empty", result.ErrorCode)
@@ -55,7 +55,7 @@ func TestRunSuccessfulHTTPSProbe(t *testing.T) {
 }
 
 func TestRunReportsDNSFailure(t *testing.T) {
-	result := run(contextWithDeadline(t), config.Target{Name: "operator-approved-test", URL: "https://approved.example.invalid/"}, nil,
+	result := run(contextWithDeadline(t), config.Target{Name: "operator-approved-test", URL: "https://approved.example.invalid/"}, nil, time.Second,
 		func(context.Context, string, string) ([]netip.Addr, error) {
 			return nil, errors.New("resolver unavailable")
 		},
@@ -69,9 +69,9 @@ func TestRunReportsDNSFailure(t *testing.T) {
 }
 
 func TestRunReportsTCPFailure(t *testing.T) {
-	result := run(contextWithDeadline(t), config.Target{Name: "operator-approved-test", URL: "https://approved.example.invalid/"}, nil,
+	result := run(contextWithDeadline(t), config.Target{Name: "operator-approved-test", URL: "https://approved.example.invalid/"}, nil, time.Second,
 		localResolver,
-		func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connect timeout") },
+		staticDialer(func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connect timeout") }),
 		nil,
 	)
 
@@ -85,7 +85,7 @@ func TestRunReportsTLSValidationFailure(t *testing.T) {
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	defer server.Close()
 
-	result := run(contextWithDeadline(t), targetFor(server), nil, localResolver, dialServer(server), nil)
+	result := run(contextWithDeadline(t), targetFor(server), nil, time.Second, localResolver, dialServer(server), nil)
 
 	if result.ErrorCode != "tls_failed" {
 		t.Fatalf("ErrorCode = %q, want tls_failed", result.ErrorCode)
@@ -106,7 +106,7 @@ func TestRunReportsRejectedHTTPStatusWithoutFollowingRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := run(contextWithDeadline(t), targetFor(server), nil, localResolver, dialServer(server), trustedTLSConfig(t, server))
+	result := run(contextWithDeadline(t), targetFor(server), nil, time.Second, localResolver, dialServer(server), trustedTLSConfig(t, server))
 
 	if result.ErrorCode != "http_rejected" {
 		t.Fatalf("ErrorCode = %q, want http_rejected", result.ErrorCode)
@@ -125,7 +125,7 @@ func TestRunCapsResponseBodyAt64KiB(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := run(contextWithDeadline(t), targetFor(server), nil, localResolver, dialServer(server), trustedTLSConfig(t, server))
+	result := run(contextWithDeadline(t), targetFor(server), nil, time.Second, localResolver, dialServer(server), trustedTLSConfig(t, server))
 
 	if result.ErrorCode != "" {
 		t.Fatalf("ErrorCode = %q, want empty", result.ErrorCode)
@@ -150,9 +150,97 @@ func localResolver(context.Context, string, string) ([]netip.Addr, error) {
 	return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 }
 
-func dialServer(server *httptest.Server) func(context.Context, string, string) (net.Conn, error) {
-	return func(_ context.Context, network, _ string) (net.Conn, error) {
-		return net.Dial(network, server.Listener.Addr().String())
+func TestRunDerivesDeadlineWithoutCallerDeadlineAndDoesNotFallbackDial(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	var observedDeadline time.Time
+	dialCalls := 0
+
+	result := run(context.Background(), config.Target{Name: "operator-approved-test", URL: "https://approved.example.invalid/"}, net.ParseIP("127.0.0.2"), timeout,
+		func(ctx context.Context, _, _ string) ([]netip.Addr, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return nil, errors.New("resolver context had no deadline")
+			}
+			observedDeadline = deadline
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		dialerFactory(func(time.Duration, net.IP) dialFunc {
+			return func(context.Context, string, string) (net.Conn, error) {
+				dialCalls++
+				return nil, errors.New("unexpected fallback dial")
+			}
+		}),
+		nil,
+	)
+
+	if observedDeadline.IsZero() {
+		t.Fatal("resolver did not receive a derived deadline")
+	}
+	if result.ErrorCode != "context_deadline" {
+		t.Fatalf("ErrorCode = %q, want context_deadline", result.ErrorCode)
+	}
+	if result.StartedAt.IsZero() || result.FinishedAt.IsZero() || result.FinishedAt.Before(result.StartedAt) {
+		t.Fatalf("invalid timestamps: start=%s finish=%s", result.StartedAt, result.FinishedAt)
+	}
+	if dialCalls != 0 {
+		t.Fatalf("dial calls = %d, want no fallback dial after deadline", dialCalls)
+	}
+}
+
+func TestRunPassesAndBindsRequestedSourceIPToInjectedDialerFactory(t *testing.T) {
+	serverSource := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			t.Errorf("split remote address: %v", err)
+			return
+		}
+		serverSource <- host
+		_, _ = io.WriteString(w, "approved target reached")
+	}))
+	defer server.Close()
+
+	wantSource := net.ParseIP("127.0.0.2")
+	var factorySource net.IP
+	result := run(contextWithDeadline(t), targetFor(server), wantSource, time.Second, localResolver,
+		dialerFactory(func(_ time.Duration, source net.IP) dialFunc {
+			factorySource = append(net.IP(nil), source...)
+			dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: source}}
+			return func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, server.Listener.Addr().String())
+			}
+		}),
+		trustedTLSConfig(t, server),
+	)
+
+	if result.ErrorCode != "" {
+		t.Fatalf("ErrorCode = %q, want empty", result.ErrorCode)
+	}
+	if !factorySource.Equal(wantSource) {
+		t.Fatalf("factory source = %v, want %v", factorySource, wantSource)
+	}
+	select {
+	case gotSource := <-serverSource:
+		if gotSource != wantSource.String() {
+			t.Fatalf("server observed source = %q, want %q", gotSource, wantSource)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe a connection")
+	}
+}
+
+func dialServer(server *httptest.Server) dialerFactory {
+	return func(_ time.Duration, _ net.IP) dialFunc {
+		return func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+	}
+}
+
+func staticDialer(dial func(context.Context, string, string) (net.Conn, error)) dialerFactory {
+	return func(time.Duration, net.IP) dialFunc {
+		return dial
 	}
 }
 
