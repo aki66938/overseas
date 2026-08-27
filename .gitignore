@@ -1,6 +1,8 @@
 .worktrees/
 .superpowers/
 bin/
-artifacts/*
-!artifacts/.gitkeep
-configs/poc.yaml
+/configs/poc.yaml
+/artifacts/*
+!/artifacts/.gitkeep
+/poc-probe.exe
+/coverage.out

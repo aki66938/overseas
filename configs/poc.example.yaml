@@ -1,0 +1,12 @@
+wireguard_subnet: 100.127.77.0/24
+wireguard_interface: wg-overseas-poc
+telecom_interface: Telecom-Client
+employee_interface: Ethernet
+internal_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+approved_targets:
+  - name: operator-approved-test
+    url: https://approved-test.example.invalid/
+probe_timeout: 8s
