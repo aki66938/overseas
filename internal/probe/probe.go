@@ -123,6 +123,12 @@ func run(
 			conn, dialErr := dial(callCtx, network, selectedAddress)
 			if dialErr == nil {
 				result.TCPLatency = time.Since(started)
+				if result.TCPLatency <= 0 {
+					// A successful loopback dial can complete within one clock
+					// tick on Windows. Preserve the positive-duration result
+					// invariant without pretending to have finer measurement.
+					result.TCPLatency = time.Nanosecond
+				}
 			}
 			return conn, dialErr
 		},

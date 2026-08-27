@@ -92,7 +92,8 @@ function New-TestFirewallCimRule {
         [string] $RuleGroup,
         [string] $RuleDirection,
         [string] $RuleAction,
-        [string] $RuleDescription
+        [string] $RuleDescription,
+        [int] $RuleProfiles = 0
     )
 
     return New-CimInstance `
@@ -106,6 +107,7 @@ function New-TestFirewallCimRule {
             Direction = $(if ($RuleDirection -eq 'Inbound') { 1 } else { 2 })
             Action = $(if ($RuleAction -eq 'Allow') { 2 } else { 4 })
             Enabled = 1
+            Profiles = $RuleProfiles
             Description = $RuleDescription
         }
 }
@@ -199,6 +201,10 @@ Describe 'Windows PoC networking transactions' {
         $global:PocTestActiveStoreEnabled = $true
         $global:PocTestFailTelecomEnableOnce = $false
         $global:PocTestTelecomEnableFailed = $false
+        $global:PocTestFailNatRemoval = $false
+        $global:PocTestFailTelecomRestoreOnce = $false
+        $global:PocTestTelecomRestoreFailed = $false
+        $global:PocTestMutationCalls = @()
 
         Mock Get-NetAdapter {
             if ($null -ne $Name) {
@@ -263,6 +269,11 @@ Describe 'Windows PoC networking transactions' {
         }
 
         Mock New-NetFirewallRule {
+            $global:PocTestMutationCalls += [pscustomobject] @{
+                Command = 'New-NetFirewallRule'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
             $ruleName = [string] @($Name)[0]
             $global:PocTestRules[$ruleName] = New-TestFirewallCimRule `
                 -RuleName $ruleName `
@@ -283,6 +294,11 @@ Describe 'Windows PoC networking transactions' {
         }
 
         Mock Remove-NetFirewallRule {
+            $global:PocTestMutationCalls += [pscustomobject] @{
+                Command = 'Remove-NetFirewallRule'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
             if ($null -ne $Name) {
                 $ruleName = [string] @($Name)[0]
                 $global:PocTestRules.Remove($ruleName)
@@ -296,6 +312,11 @@ Describe 'Windows PoC networking transactions' {
         }
 
         Mock New-NetNat {
+            $global:PocTestMutationCalls += [pscustomobject] @{
+                Command = 'New-NetNat'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
             $global:PocTestNat = [pscustomobject] @{
                 Name = [string] $Name
                 InternalIPInterfaceAddressPrefix = [string] $InternalIPInterfaceAddressPrefix
@@ -304,10 +325,23 @@ Describe 'Windows PoC networking transactions' {
         }
 
         Mock Remove-NetNat {
+            $global:PocTestMutationCalls += [pscustomobject] @{
+                Command = 'Remove-NetNat'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
+            if ($global:PocTestFailNatRemoval) {
+                throw 'injected NAT removal failure'
+            }
             if ([string] @($Name)[0] -eq 'OverseasPocNat') { $global:PocTestNat = $null }
         }
 
         Mock Set-NetIPInterface {
+            $global:PocTestMutationCalls += [pscustomobject] @{
+                Command = 'Set-NetIPInterface'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
             if (
                 $global:PocTestFailTelecomEnableOnce -and
                 -not $global:PocTestTelecomEnableFailed -and
@@ -315,7 +349,19 @@ Describe 'Windows PoC networking transactions' {
                 [string] $Forwarding -eq 'Enabled'
             ) {
                 $global:PocTestTelecomEnableFailed = $true
+                # Model a cmdlet that mutates state and only then reports an
+                # error, so compensation must not assume failure was atomic.
+                $global:PocTestForwarding[11] = 'Enabled'
                 throw 'injected telecom forwarding failure'
+            }
+            if (
+                $global:PocTestFailTelecomRestoreOnce -and
+                -not $global:PocTestTelecomRestoreFailed -and
+                [int] @($InterfaceIndex)[0] -eq 11 -and
+                [string] $Forwarding -eq 'Disabled'
+            ) {
+                $global:PocTestTelecomRestoreFailed = $true
+                throw 'injected telecom rollback failure'
             }
             $global:PocTestForwarding[[int] @($InterfaceIndex)[0]] = [string] $Forwarding
         }
@@ -353,6 +399,35 @@ Describe 'Windows PoC networking transactions' {
         $global:PocTestForwarding[11] | Should Be 'Disabled'
         Assert-MockCalled Remove-NetFirewallRule -Times 3 -Exactly -Scope It
         Assert-MockCalled Remove-NetNat -Times 1 -Exactly -Scope It -ParameterFilter { $Name -eq 'OverseasPocNat' }
+    }
+
+    It 'retains the employee Internet block and reports emergency state when compensation cannot prove NAT removal' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'compensation-emergency.json')
+        $global:PocTestFailTelecomEnableOnce = $true
+        $global:PocTestFailNatRemoval = $true
+
+        $message = Get-TestFailureMessage { & $applyScript -SnapshotPath $snapshot.Path -WireGuardInterface 'wg-overseas-poc' -TelecomInterface 'Telecom-Client' -EmployeeInterface 'Ethernet' -WireGuardSubnet '100.127.77.0/24' -InternalCidrs @('10.0.0.0/8') -Confirm:$false }
+
+        $message | Should Match 'EMERGENCY'
+        $message | Should Match 'employee public-internet block retained'
+        $global:PocTestRules.ContainsKey('OverseasPocBlockEmployeeInternet') | Should Be $true
+        $global:PocTestRules.ContainsKey('OverseasPocAllowWireGuardIngress') | Should Be $false
+        $global:PocTestRules.ContainsKey('OverseasPocAllowTelecomInternet') | Should Be $false
+        $global:PocTestNat | Should Not BeNullOrEmpty
+    }
+
+    It 'retains the employee Internet block when forwarding restoration cannot be verified at baseline' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'compensation-forwarding-emergency.json')
+        $global:PocTestFailTelecomEnableOnce = $true
+        $global:PocTestFailTelecomRestoreOnce = $true
+
+        $message = Get-TestFailureMessage { & $applyScript -SnapshotPath $snapshot.Path -WireGuardInterface 'wg-overseas-poc' -TelecomInterface 'Telecom-Client' -EmployeeInterface 'Ethernet' -WireGuardSubnet '100.127.77.0/24' -InternalCidrs @('10.0.0.0/8') -Confirm:$false }
+
+        $message | Should Match 'EMERGENCY'
+        $message | Should Match 'employee public-internet block retained'
+        $global:PocTestNat | Should BeNullOrEmpty
+        $global:PocTestForwarding[11] | Should Be 'Enabled'
+        $global:PocTestRules.ContainsKey('OverseasPocBlockEmployeeInternet') | Should Be $true
     }
 
     It 'rejects a stale snapshot before any mutation' {
@@ -466,6 +541,101 @@ Describe 'Windows PoC networking transactions' {
             [string] @($RemoteAddress)[0] -eq 'Internet' -and
             [string] $Action -eq 'Block'
         }
+        Assert-MockCalled New-NetFirewallRule -Times 3 -Exactly -Scope It -ParameterFilter { [string] $Profile -eq 'Any' }
+    }
+
+    It 'rejects an effective firewall rule whose profile is not Any' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'profile.json')
+        Add-TestAppliedState -SnapshotId $snapshot.SnapshotId
+        $description = "SnapshotId=$($snapshot.SnapshotId); WireGuardSubnet=100.127.77.0/24; OperatorWhitelist=Required"
+        $global:PocTestRules['OverseasPocBlockEmployeeInternet'] = New-TestFirewallCimRule `
+            -RuleName 'OverseasPocBlockEmployeeInternet' `
+            -RuleDisplayName 'Overseas Gateway PoC - Block employee public internet' `
+            -RuleGroup 'Overseas Gateway PoC' `
+            -RuleDirection 'Outbound' `
+            -RuleAction 'Block' `
+            -RuleDescription $description `
+            -RuleProfiles 2
+
+        $message = Get-TestFailureMessage { & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false }
+
+        $message | Should Match 'profile'
+        Assert-MockCalled Remove-NetNat -Times 0 -Exactly -Scope It
+    }
+
+    It 'uses an expired verified transaction snapshot for emergency rollback' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -AgeHours 8 -Path (Join-Path $TestDrive 'expired-recovery.json')
+        Add-TestAppliedState -SnapshotId $snapshot.SnapshotId
+
+        & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false
+
+        $global:PocTestNat | Should BeNullOrEmpty
+        $global:PocTestRules.Count | Should Be 0
+        $global:PocTestForwarding[19] | Should Be 'Disabled'
+        $global:PocTestForwarding[11] | Should Be 'Disabled'
+    }
+
+    It 'performs emergency cleanup when owned persistent rules disappear from ActiveStore' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'active-disappeared.json')
+        Add-TestAppliedState -SnapshotId $snapshot.SnapshotId
+        $global:PocTestActiveStoreEnabled = $false
+
+        & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false
+
+        $global:PocTestNat | Should BeNullOrEmpty
+        $global:PocTestRules.Count | Should Be 0
+        $global:PocTestForwarding[19] | Should Be 'Disabled'
+        $global:PocTestForwarding[11] | Should Be 'Disabled'
+    }
+
+    It 'resumes rollback safely after a partial rollback failure' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'rollback-retry.json')
+        Add-TestAppliedState -SnapshotId $snapshot.SnapshotId
+        $global:PocTestFailTelecomRestoreOnce = $true
+
+        $firstMessage = Get-TestFailureMessage { & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false }
+        $firstMessage | Should Match 'injected telecom rollback failure'
+        $global:PocTestNat | Should BeNullOrEmpty
+        $global:PocTestForwarding[19] | Should Be 'Disabled'
+        $global:PocTestForwarding[11] | Should Be 'Enabled'
+
+        & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false
+
+        $global:PocTestRules.Count | Should Be 0
+        $global:PocTestForwarding[11] | Should Be 'Disabled'
+    }
+
+    It 'suppresses every nested confirmation after the transaction decision' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'confirm.json')
+
+        & $applyScript -SnapshotPath $snapshot.Path -WireGuardInterface 'wg-overseas-poc' -TelecomInterface 'Telecom-Client' -EmployeeInterface 'Ethernet' -WireGuardSubnet '100.127.77.0/24' -InternalCidrs @('10.0.0.0/8') -Confirm:$false
+        & $rollbackScript -SnapshotPath $snapshot.Path -Confirm:$false
+
+        $global:PocTestMutationCalls.Count | Should BeGreaterThan 0
+        @($global:PocTestMutationCalls | Where-Object { -not $_.ConfirmBound -or $_.Confirm }).Count | Should Be 0
+    }
+
+    It 'allows a pristine-baseline rollback preview without mutating anything' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'pristine-preview.json')
+
+        $message = Get-TestFailureMessage { & $rollbackScript -SnapshotPath $snapshot.Path -WhatIf }
+
+        $message | Should BeNullOrEmpty
+        Assert-MockCalled Remove-NetFirewallRule -Times 0 -Exactly -Scope It
+        Assert-MockCalled Remove-NetNat -Times 0 -Exactly -Scope It
+        Assert-MockCalled Set-NetIPInterface -Times 0 -Exactly -Scope It
+    }
+
+    It 'rejects markerless forwarding drift instead of restoring unrelated state' {
+        $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'unrelated-forwarding.json')
+        $global:PocTestForwarding[19] = 'Enabled'
+
+        $message = Get-TestFailureMessage { & $rollbackScript -SnapshotPath $snapshot.Path -WhatIf }
+
+        $message | Should Match 'unrelated state'
+        Assert-MockCalled Remove-NetFirewallRule -Times 0 -Exactly -Scope It
+        Assert-MockCalled Remove-NetNat -Times 0 -Exactly -Scope It
+        Assert-MockCalled Set-NetIPInterface -Times 0 -Exactly -Scope It
     }
 
     It 'rolls back only exact transaction-owned resources and leaves another group rule untouched' {
@@ -491,6 +661,7 @@ Describe 'Windows PoC networking transactions' {
 
 Describe 'Windows PoC snapshot safety' {
     BeforeEach {
+        $global:PocTestSnapshotMutationCalls = @()
         Mock Get-NetAdapter {
             if ($Name -eq 'wg-overseas-poc') { return New-TestAdapter 'wg-overseas-poc' 19 }
             if ($Name -eq 'Telecom-Client') { return New-TestAdapter 'Telecom-Client' 11 }
@@ -522,12 +693,49 @@ Describe 'Windows PoC snapshot safety' {
     }
 
     It 'removes a temporary file when atomic snapshot publication fails' {
-        Mock Move-Item { throw 'injected publication failure' }
+        Mock Move-Item {
+            $global:PocTestSnapshotMutationCalls += [pscustomobject] @{
+                Command = 'Move-Item'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
+            throw 'injected publication failure'
+        }
+        Mock Remove-Item {
+            $global:PocTestSnapshotMutationCalls += [pscustomobject] @{
+                Command = 'Remove-Item'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
+            [System.IO.File]::Delete([string] $LiteralPath)
+        }
 
         $message = Get-TestFailureMessage { & $snapshotScript -WireGuardInterface 'wg-overseas-poc' -TelecomInterface 'Telecom-Client' -EmployeeInterface 'Ethernet' -ArtifactsDirectory $TestDrive -Confirm:$false }
         $message | Should Match 'injected publication failure'
 
         @(Get-ChildItem -LiteralPath $TestDrive -File).Count | Should Be 0
+        $global:PocTestSnapshotMutationCalls.Count | Should Be 2
+        @($global:PocTestSnapshotMutationCalls | Where-Object { -not $_.ConfirmBound -or $_.Confirm }).Count | Should Be 0
+    }
+
+    It 'publishes the snapshot with nested confirmation suppressed' {
+        Mock Move-Item {
+            $global:PocTestSnapshotMutationCalls += [pscustomobject] @{
+                Command = 'Move-Item'
+                ConfirmBound = $BoundParameters.ContainsKey('Confirm')
+                Confirm = $(if ($BoundParameters.ContainsKey('Confirm')) { [bool] $BoundParameters['Confirm'] } else { $null })
+            }
+            [System.IO.File]::Move([string] $LiteralPath, [string] $Destination)
+        }
+
+        $output = @(& $snapshotScript -WireGuardInterface 'wg-overseas-poc' -TelecomInterface 'Telecom-Client' -EmployeeInterface 'Ethernet' -ArtifactsDirectory $TestDrive -Confirm:$false)
+
+        $output.Count | Should Be 1
+        (Test-Path -LiteralPath $output[0] -PathType Leaf) | Should Be $true
+        $global:PocTestSnapshotMutationCalls.Count | Should Be 1
+        $global:PocTestSnapshotMutationCalls[0].ConfirmBound | Should Be $true
+        $global:PocTestSnapshotMutationCalls[0].Confirm | Should Be $false
+        [System.IO.File]::Delete([string] $output[0])
     }
 
     It 'rejects aliases that resolve to one canonical index before writing a snapshot' {
@@ -551,6 +759,27 @@ Describe 'Windows PoC script syntax' {
             $errors = $null
             [void] [System.Management.Automation.Language.Parser]::ParseFile($path, [ref] $tokens, [ref] $errors)
             $errors.Count | Should Be 0
+        }
+    }
+
+    It 'suppresses confirmation on every nested mutating cmdlet' {
+        $mutationNames = @(
+            'Move-Item', 'Remove-Item',
+            'New-NetFirewallRule', 'Remove-NetFirewallRule',
+            'New-NetNat', 'Remove-NetNat', 'Set-NetIPInterface'
+        )
+        foreach ($path in @($snapshotScript, $applyScript, $rollbackScript)) {
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref] $tokens, [ref] $errors)
+            $commands = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                $mutationNames -contains $node.GetCommandName()
+            }, $true))
+            foreach ($command in $commands) {
+                $command.Extent.Text | Should Match '(?i)-Confirm:\$false'
+            }
         }
     }
 }

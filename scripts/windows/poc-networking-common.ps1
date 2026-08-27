@@ -73,7 +73,9 @@ function Read-PocSnapshot {
         [string] $Path,
 
         [ValidateRange(1, 1440)]
-        [int] $MaximumAgeMinutes = 240
+        [int] $MaximumAgeMinutes = 240,
+
+        [switch] $SkipAgeValidation
     )
 
     if (-not [System.IO.Path]::IsPathRooted($Path)) {
@@ -147,7 +149,7 @@ function Read-PocSnapshot {
         throw 'Snapshot capture time is unreasonably far in the future.'
     }
     $snapshotAgeMinutes = ($now - $capturedAt).TotalMinutes
-    if ($snapshotAgeMinutes -gt $MaximumAgeMinutes) {
+    if (-not $SkipAgeValidation -and $snapshotAgeMinutes -gt $MaximumAgeMinutes) {
         throw "Snapshot is stale (captured $($capturedAt.ToString('o')), now $($now.ToString('o')), age $([math]::Round($snapshotAgeMinutes, 1)) minutes); maximum age is $MaximumAgeMinutes minutes."
     }
     if ($payload.ComputerName -cne $env:COMPUTERNAME) {
@@ -394,40 +396,73 @@ function Get-PocFirewallRuleGroup {
     return [string] $Rule.RuleGroup
 }
 
+function Get-PocFirewallRuleProfile {
+    param([Parameter(Mandatory = $true)] $Rule)
+
+    if ($null -ne $Rule.PSObject.Properties['Profile']) {
+        return @($Rule.Profile)
+    }
+    if ($null -ne $Rule.PSObject.Properties['Profiles']) {
+        return @($Rule.Profiles)
+    }
+    return @()
+}
+
+function Assert-PocFirewallRuleMatchesDefinition {
+    param(
+        [Parameter(Mandatory = $true)] $Rule,
+        [Parameter(Mandatory = $true)] $Definition,
+        [Parameter(Mandatory = $true)] [string] $Description,
+        [Parameter(Mandatory = $true)] [string] $StoreLabel
+    )
+
+    $directionValues = if ($Definition.Direction -eq 'Inbound') { @('Inbound', '1') } else { @('Outbound', '2') }
+    $actionValues = if ($Definition.Action -eq 'Allow') { @('Allow', '2') } else { @('Block', '4') }
+    $profiles = @(Get-PocFirewallRuleProfile -Rule $Rule | ForEach-Object { $_.ToString() })
+    $profileIsAny = $profiles.Count -eq 1 -and $profiles[0] -in @('Any', '0')
+    if (
+        (Get-PocFirewallRuleGroup -Rule $Rule) -cne 'Overseas Gateway PoC' -or
+        $directionValues -notcontains $Rule.Direction.ToString() -or
+        $actionValues -notcontains $Rule.Action.ToString() -or
+        @('True', '1') -notcontains $Rule.Enabled.ToString() -or
+        -not $profileIsAny -or
+        $Rule.Description -cne $Description
+    ) {
+        throw "Firewall rule '$($Definition.Name)' has unexpected settings, ownership, or profile in $StoreLabel."
+    }
+
+    $addressFilters = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop)
+    $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) })
+    if ($remoteAddresses.Count -ne 1 -or $remoteAddresses[0].ToString() -cne $Definition.RemoteAddress) {
+        throw "Firewall rule '$($Definition.Name)' has an unexpected remote scope in $StoreLabel."
+    }
+    $interfaceFilters = @(Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop)
+    $interfaces = @($interfaceFilters | ForEach-Object { @($_.InterfaceAlias) })
+    if ($interfaces.Count -ne 1 -or $interfaces[0].ToString() -cne $Definition.InterfaceAlias) {
+        throw "Firewall rule '$($Definition.Name)' has an unexpected interface in $StoreLabel (got '$($interfaces -join ',')', expected '$($Definition.InterfaceAlias)')."
+    }
+}
+
 function Assert-PocFirewallRulesActive {
     param(
         [Parameter(Mandatory = $true)] [object[]] $Definitions,
-        [Parameter(Mandatory = $true)] [string] $Description
+        [Parameter(Mandatory = $true)] [string] $Description,
+        [switch] $AllowMissing
     )
 
     $activeRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Group 'Overseas Gateway PoC' -ErrorAction Stop)
     foreach ($definition in $Definitions) {
         $matches = @($activeRules | Where-Object { (Get-PocFirewallRuleName -Rule $_) -ceq $definition.Name })
+        if ($matches.Count -eq 0 -and $AllowMissing) {
+            continue
+        }
         if ($matches.Count -ne 1) {
             throw "Firewall rule '$($definition.Name)' is not effective in ActiveStore; local policy may be inactive."
         }
-        $rule = $matches[0]
-        $directionValues = if ($definition.Direction -eq 'Inbound') { @('Inbound', '1') } else { @('Outbound', '2') }
-        $actionValues = if ($definition.Action -eq 'Allow') { @('Allow', '2') } else { @('Block', '4') }
-        if (
-            (Get-PocFirewallRuleGroup -Rule $rule) -cne 'Overseas Gateway PoC' -or
-            $directionValues -notcontains $rule.Direction.ToString() -or
-            $actionValues -notcontains $rule.Action.ToString() -or
-            @('True', '1') -notcontains $rule.Enabled.ToString() -or
-            $rule.Description -cne $Description
-        ) {
-            throw "Firewall rule '$($definition.Name)' has unexpected effective settings in ActiveStore."
-        }
-
-        $addressFilters = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop)
-        $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) })
-        if ($remoteAddresses.Count -ne 1 -or $remoteAddresses[0].ToString() -cne $definition.RemoteAddress) {
-            throw "Firewall rule '$($definition.Name)' has an unexpected effective remote scope in ActiveStore."
-        }
-        $interfaceFilters = @(Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop)
-        $interfaces = @($interfaceFilters | ForEach-Object { @($_.InterfaceAlias) })
-        if ($interfaces.Count -ne 1 -or $interfaces[0].ToString() -cne $definition.InterfaceAlias) {
-            throw "Firewall rule '$($definition.Name)' has an unexpected effective interface in ActiveStore (got '$($interfaces -join ',')', expected '$($definition.InterfaceAlias)')."
-        }
+        Assert-PocFirewallRuleMatchesDefinition `
+            -Rule $matches[0] `
+            -Definition $definition `
+            -Description $Description `
+            -StoreLabel 'ActiveStore'
     }
 }

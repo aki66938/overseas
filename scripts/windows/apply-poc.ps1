@@ -43,6 +43,22 @@ function Invoke-PocApplyCompensation {
     )
 
     $failures = @()
+
+    # Remove permissive rules first, but retain the employee public-Internet
+    # block until NAT absence and both forwarding baselines are proven.
+    if ($FirewallAttempted) {
+        foreach ($definition in @($Definitions | Where-Object { $_.Name -ne 'OverseasPocBlockEmployeeInternet' })) {
+            try {
+                if ($null -ne (Get-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -ErrorAction SilentlyContinue)) {
+                    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -Confirm:$false -ErrorAction Stop | Out-Null
+                }
+            }
+            catch {
+                $failures += "remove firewall rule '$($definition.Name)': $($_.Exception.Message)"
+            }
+        }
+    }
+
     if ($NatAttempted) {
         try {
             if ($null -ne (Get-NetNat -Name OverseasPocNat -ErrorAction SilentlyContinue)) {
@@ -57,22 +73,70 @@ function Invoke-PocApplyCompensation {
     foreach ($entry in $ForwardingEntries) {
         if ($ForwardingAttempted -notcontains [int] $entry.InterfaceIndex) { continue }
         try {
-            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding $entry.Forwarding -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding $entry.Forwarding -AddressFamily IPv4 -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop | Out-Null
         }
         catch {
             $failures += "restore forwarding on index $($entry.InterfaceIndex): $($_.Exception.Message)"
         }
     }
 
+    $natAbsent = $false
+    try {
+        $remainingNat = @(Get-NetNat -ErrorAction Stop)
+        $natAbsent = $remainingNat.Count -eq 0
+        if (-not $natAbsent) {
+            $failures += 'verify NAT absence: WinNAT state remains present'
+        }
+    }
+    catch {
+        $failures += "verify NAT absence: $($_.Exception.Message)"
+    }
+
+    $forwardingRestored = $true
+    foreach ($entry in $ForwardingEntries) {
+        try {
+            $current = @(Get-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+            if ($current.Count -ne 1 -or $current[0].Forwarding.ToString() -ne $entry.Forwarding) {
+                $forwardingRestored = $false
+                $failures += "verify forwarding baseline on index $($entry.InterfaceIndex): expected $($entry.Forwarding)"
+            }
+        }
+        catch {
+            $forwardingRestored = $false
+            $failures += "verify forwarding baseline on index $($entry.InterfaceIndex): $($_.Exception.Message)"
+        }
+    }
+
+    if ($FirewallAttempted -and $natAbsent -and $forwardingRestored) {
+        $blockDefinition = @($Definitions | Where-Object { $_.Name -eq 'OverseasPocBlockEmployeeInternet' })[0]
+        try {
+            if ($null -ne (Get-NetFirewallRule -PolicyStore PersistentStore -Name $blockDefinition.Name -ErrorAction SilentlyContinue)) {
+                Remove-NetFirewallRule -PolicyStore PersistentStore -Name $blockDefinition.Name -Confirm:$false -ErrorAction Stop | Out-Null
+            }
+        }
+        catch {
+            $failures += "remove firewall rule '$($blockDefinition.Name)': $($_.Exception.Message)"
+        }
+    }
+    elseif ($FirewallAttempted) {
+        $block = Get-NetFirewallRule -PolicyStore PersistentStore -Name OverseasPocBlockEmployeeInternet -ErrorAction SilentlyContinue
+        if ($null -ne $block) {
+            $failures += 'EMERGENCY: employee public-internet block retained because NAT absence and forwarding baseline restoration were not both positively verified'
+        }
+        else {
+            $failures += 'EMERGENCY: employee public-internet block is absent while safe compensation could not be verified'
+        }
+    }
+
     if ($FirewallAttempted) {
-        foreach ($definition in $Definitions) {
+        foreach ($definition in @($Definitions | Where-Object { $_.Name -ne 'OverseasPocBlockEmployeeInternet' })) {
             try {
                 if ($null -ne (Get-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -ErrorAction SilentlyContinue)) {
-                    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $definition.Name -Confirm:$false -ErrorAction Stop | Out-Null
+                    $failures += "verify firewall cleanup: '$($definition.Name)' remains present"
                 }
             }
             catch {
-                $failures += "remove firewall rule '$($definition.Name)': $($_.Exception.Message)"
+                $failures += "verify firewall cleanup for '$($definition.Name)': $($_.Exception.Message)"
             }
         }
     }
@@ -193,6 +257,7 @@ if ($PSCmdlet.ShouldProcess($target, 'Apply the complete Overseas Gateway PoC ne
                 -RemoteAddress $definition.RemoteAddress `
                 -Profile Any `
                 -Enabled True `
+                -Confirm:$false `
                 -ErrorAction Stop | Out-Null
         }
 
@@ -201,11 +266,11 @@ if ($PSCmdlet.ShouldProcess($target, 'Apply the complete Overseas Gateway PoC ne
         Assert-PocFirewallRulesActive -Definitions $definitions -Description $description
 
         $natAttempted = $true
-        New-NetNat -Name OverseasPocNat -InternalIPInterfaceAddressPrefix $WireGuardSubnet -ErrorAction Stop | Out-Null
+        New-NetNat -Name OverseasPocNat -InternalIPInterfaceAddressPrefix $WireGuardSubnet -Confirm:$false -ErrorAction Stop | Out-Null
 
         foreach ($entry in $forwardingEntries) {
             $forwardingAttempted += [int] $entry.InterfaceIndex
-            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding Enabled -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+            Set-NetIPInterface -InterfaceIndex ([int] $entry.InterfaceIndex) -Forwarding Enabled -AddressFamily IPv4 -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop | Out-Null
         }
     }
     catch {

@@ -132,12 +132,12 @@ if ($PSCmdlet.ShouldProcess($snapshotPath, 'Atomically create an integrity-prote
             }
         }
 
-        Move-Item -LiteralPath $temporaryPath -Destination $snapshotPath -ErrorAction Stop
+        Move-Item -LiteralPath $temporaryPath -Destination $snapshotPath -Confirm:$false -ErrorAction Stop
         $published = $true
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
-            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $temporaryPath -Force -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
 }
