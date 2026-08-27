@@ -8,10 +8,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"corp.example/overseas-access-gateway/internal/config"
 	"corp.example/overseas-access-gateway/internal/inventory"
 	"corp.example/overseas-access-gateway/internal/probe"
+	"corp.example/overseas-access-gateway/internal/verdict"
 )
 
 var snapshot = inventory.Snapshot
@@ -33,10 +36,122 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInventory(args[1:], stdout, stderr)
 	case "probe":
 		return runProbe(args[1:], stdout, stderr)
+	case "verdict":
+		return runVerdict(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "PREFLIGHT_USAGE: poc-probe preflight --config <path>")
 		return 2
 	}
+}
+
+func runVerdict(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("verdict", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	artifactsPath := flags.String("artifacts", "", "directory containing the four fixed evidence files")
+	outputPath := flags.String("out", "", "path for a new JSON verdict report")
+	if err := flags.Parse(args); err != nil || *artifactsPath == "" || *outputPath == "" || flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "VERDICT_USAGE: poc-probe verdict --artifacts <directory> --out <path>")
+		return 2
+	}
+
+	evidence := loadVerdictEvidence(*artifactsPath)
+	report := verdict.Evaluate(evidence)
+	if err := writeNewJSON(*outputPath, report); err != nil {
+		fmt.Fprintf(stderr, "VERDICT_OUTPUT_ERROR: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "VERDICT_WRITTEN: %s %s\n", report.Status, report.Code)
+	return 0
+}
+
+func loadVerdictEvidence(artifactsPath string) verdict.Evidence {
+	var evidence verdict.Evidence
+
+	var before inventory.State
+	if err := readJSON(filepath.Join(artifactsPath, "inventory-before.json"), &before); err == nil {
+		evidence.InventoryBefore = &before
+	}
+
+	var up []probe.Result
+	if err := readJSON(filepath.Join(artifactsPath, "probe-telecom-up.json"), &up); err == nil {
+		evidence.TelecomUp = normalizeProbeEvidence(up)
+	}
+
+	var down []probe.Result
+	if err := readJSON(filepath.Join(artifactsPath, "probe-telecom-down.json"), &down); err == nil {
+		evidence.TelecomDown = normalizeProbeEvidence(down)
+	}
+
+	var after inventory.State
+	if err := readJSON(filepath.Join(artifactsPath, "inventory-after.json"), &after); err == nil {
+		evidence.InventoryAfter = &after
+	}
+
+	return evidence
+}
+
+func normalizeProbeEvidence(results []probe.Result) *verdict.ProbeEvidence {
+	normalized := &verdict.ProbeEvidence{Results: make([]verdict.ProbeResult, 0, len(results))}
+	for _, result := range results {
+		if !validProbeRecord(result) {
+			return &verdict.ProbeEvidence{}
+		}
+		normalized.Results = append(normalized.Results, verdict.ProbeResult{
+			TargetName: result.TargetName,
+			Success:    successfulHTTPS(result),
+		})
+	}
+	return normalized
+}
+
+func validProbeRecord(result probe.Result) bool {
+	if strings.TrimSpace(result.TargetName) == "" || result.StartedAt.IsZero() || result.FinishedAt.IsZero() || result.FinishedAt.Before(result.StartedAt) {
+		return false
+	}
+	if result.ErrorCode == "" {
+		return successfulHTTPS(result)
+	}
+	switch result.ErrorCode {
+	case "dns_failed", "tcp_failed", "tls_failed", "http_rejected", "context_deadline":
+		return true
+	default:
+		return false
+	}
+}
+
+func successfulHTTPS(result probe.Result) bool {
+	if result.ErrorCode != "" || result.TLSStatus != "validated" || result.HTTPStatus < 200 || result.HTTPStatus >= 300 {
+		return false
+	}
+	selected := net.ParseIP(result.SelectedIP)
+	if selected == nil {
+		return false
+	}
+	for _, resolved := range result.ResolvedIPs {
+		if candidate := net.ParseIP(resolved); candidate != nil && candidate.Equal(selected) {
+			return true
+		}
+	}
+	return false
+}
+
+func readJSON(path string, destination any) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var additional any
+	if err := decoder.Decode(&additional); err != io.EOF {
+		return fmt.Errorf("evidence must contain exactly one JSON value")
+	}
+	return nil
 }
 
 func runProbe(args []string, stdout, stderr io.Writer) int {

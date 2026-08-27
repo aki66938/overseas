@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"corp.example/overseas-access-gateway/internal/inventory"
 	"corp.example/overseas-access-gateway/internal/probe"
+	"corp.example/overseas-access-gateway/internal/verdict"
 )
 
 func TestRunPreflightPrintsSuccessForValidConfiguration(t *testing.T) {
@@ -182,5 +185,118 @@ probe_timeout: 1s
 	}
 	if results[0].ErrorCode != "tls_failed" {
 		t.Fatalf("result error = %q, want local server validation failure evidence", results[0].ErrorCode)
+	}
+}
+
+func TestRunVerdictLoadsFixedArtifactsAndPreservesCreateNewOutput(t *testing.T) {
+	artifacts := t.TempDir()
+	routes := []inventory.Route{
+		{
+			Alias:             "Ethernet",
+			Index:             7,
+			DestinationPrefix: "0.0.0.0/0",
+			NextHop:           "172.20.10.1",
+			Metric:            25,
+			State:             "Alive",
+		},
+	}
+	state := inventory.State{Routes: routes}
+	now := time.Now().UTC()
+	up := []probe.Result{
+		{
+			TargetName:  "operator-approved-test",
+			ResolvedIPs: []string{"192.0.2.10"},
+			SelectedIP:  "192.0.2.10",
+			TLSStatus:   "validated",
+			HTTPStatus:  http.StatusNoContent,
+			StartedAt:   now,
+			FinishedAt:  now.Add(time.Second),
+		},
+	}
+	down := []probe.Result{
+		{
+			TargetName: "operator-approved-test",
+			TLSStatus:  "not_attempted",
+			StartedAt:  now.Add(2 * time.Second),
+			FinishedAt: now.Add(3 * time.Second),
+			ErrorCode:  "tcp_failed",
+		},
+	}
+	writeTestJSON(t, filepath.Join(artifacts, "inventory-before.json"), state)
+	writeTestJSON(t, filepath.Join(artifacts, "probe-telecom-up.json"), up)
+	writeTestJSON(t, filepath.Join(artifacts, "probe-telecom-down.json"), down)
+	writeTestJSON(t, filepath.Join(artifacts, "inventory-after.json"), state)
+
+	outputPath := filepath.Join(artifacts, "verdict.json")
+	var stdout, stderr bytes.Buffer
+	args := []string{"verdict", "--artifacts", artifacts, "--out", outputPath}
+	if exitCode := run(args, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.String() != "VERDICT_WRITTEN: PASS PASS\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read verdict: %v", err)
+	}
+	var report verdict.Report
+	if err := json.Unmarshal(contents, &report); err != nil {
+		t.Fatalf("decode verdict: %v", err)
+	}
+	if report.Status != "PASS" || report.Code != "PASS" {
+		t.Fatalf("report = %#v", report)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := run(args, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("second run exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "VERDICT_OUTPUT_ERROR:") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunVerdictDoesNotTreatIncompleteProbeRecordAsNetworkSuccess(t *testing.T) {
+	artifacts := t.TempDir()
+	state := inventory.State{Routes: []inventory.Route{
+		{Alias: "Ethernet", Index: 7, DestinationPrefix: "0.0.0.0/0", State: "Alive"},
+	}}
+	writeTestJSON(t, filepath.Join(artifacts, "inventory-before.json"), state)
+	writeTestJSON(t, filepath.Join(artifacts, "probe-telecom-up.json"), []probe.Result{
+		{TargetName: "operator-approved-test"},
+	})
+	writeTestJSON(t, filepath.Join(artifacts, "probe-telecom-down.json"), []probe.Result{
+		{TargetName: "operator-approved-test", ErrorCode: "tcp_failed"},
+	})
+	writeTestJSON(t, filepath.Join(artifacts, "inventory-after.json"), state)
+
+	outputPath := filepath.Join(artifacts, "verdict.json")
+	var stdout, stderr bytes.Buffer
+	if exitCode := run([]string{"verdict", "--artifacts", artifacts, "--out", outputPath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read verdict: %v", err)
+	}
+	var report verdict.Report
+	if err := json.Unmarshal(contents, &report); err != nil {
+		t.Fatalf("decode verdict: %v", err)
+	}
+	if report.Status != "INCONCLUSIVE" || report.Code != "INCONCLUSIVE_INVALID_EVIDENCE" {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func writeTestJSON(t *testing.T, path string, value any) {
+	t.Helper()
+	contents, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
