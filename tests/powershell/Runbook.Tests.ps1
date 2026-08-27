@@ -60,6 +60,28 @@ Describe 'Windows forwarding PoC operator documentation' {
         }
     }
 
+    It 'guards every native poc-probe invocation immediately with LASTEXITCODE' {
+        if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
+        $lines = @(Get-Content -LiteralPath $runbookPath)
+        $commands = @()
+
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -notmatch '(?i)\.\\bin\\poc-probe\.exe\s+(preflight|describe-config|inventory|probe|verdict)\b') {
+                continue
+            }
+            $command = $Matches[1].ToLowerInvariant()
+            $commands += $command
+            ($index + 1 -lt $lines.Count) | Should Be $true
+
+            $guard = $lines[$index + 1].Trim()
+            $escapedCommand = [regex]::Escape($command)
+            $guardPattern = '^if\s*\(\s*\$LASTEXITCODE\s*-ne\s*0\s*\)\s*\{\s*throw\s+[''\"]poc-probe\.exe ' + $escapedCommand + ' failed with exit code \$LASTEXITCODE\.[''\"]\s*\}\s*$'
+            $guard | Should Match $guardPattern
+        }
+
+        ($commands -join ',') | Should Be 'preflight,describe-config,inventory,probe,inventory,verdict'
+    }
+
     It 'provides reproducible Go and Pester build targets' {
         if (-not (Assert-DocumentationFileExists -Path $makefilePath)) { return }
         $makefile = Get-Content -LiteralPath $makefilePath -Raw

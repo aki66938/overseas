@@ -52,6 +52,7 @@ if (-not (Test-Path -LiteralPath .\configs\poc.yaml -PathType Leaf)) {
 }
 notepad .\configs\poc.yaml
 .\bin\poc-probe.exe preflight --config .\configs\poc.yaml
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe preflight failed with exit code $LASTEXITCODE." }
 Get-Content -LiteralPath .\configs\poc.yaml -Raw
 ~~~
 
@@ -71,7 +72,9 @@ $DownMonitorPath = Join-Path $ArtifactsPath 'probe-telecom-down-monitor.json'
 $InventoryAfterPath = Join-Path $ArtifactsPath 'inventory-after.json'
 $VerdictPath = Join-Path $ArtifactsPath 'verdict.json'
 
-$ConfigMetadata = & .\bin\poc-probe.exe describe-config --config $ConfigPath | ConvertFrom-Json
+$ConfigMetadataJson = & .\bin\poc-probe.exe describe-config --config $ConfigPath
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe describe-config failed with exit code $LASTEXITCODE." }
+$ConfigMetadata = $ConfigMetadataJson | ConvertFrom-Json
 $ConfigDigest = $ConfigMetadata.config_digest
 $TelecomRoutePrefixes = @($ConfigMetadata.telecom_route_prefixes)
 $ConfigMetadata
@@ -155,6 +158,7 @@ deliberately retained if safe compensation cannot be verified.
 
 ~~~powershell
 .\bin\poc-probe.exe inventory --config $ConfigPath --run-id $RunId --out $InventoryBeforePath
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe inventory failed with exit code $LASTEXITCODE." }
 .\scripts\windows\apply-poc.ps1 -SnapshotPath $SnapshotPath -WireGuardInterface $WireGuardInterface -TelecomInterface $TelecomInterface -EmployeeInterface $EmployeeInterface -WireGuardSubnet $WireGuardSubnet -InternalCidrs $InternalCidrs -Confirm:$false
 ~~~
 
@@ -171,6 +175,7 @@ with operator-supplied telecom-line evidence.
 
 ~~~powershell
 .\bin\poc-probe.exe probe --config $ConfigPath --run-id $RunId --out $ProbeUpPath
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe probe failed with exit code $LASTEXITCODE." }
 ~~~
 
 Hash the exact compiled native binary immediately before the no-leak step. The
@@ -203,7 +208,9 @@ keep console access and escalate; do not declare normal networking restored.
 ~~~powershell
 .\scripts\windows\rollback-poc.ps1 -SnapshotPath $SnapshotPath -Confirm:$false
 .\bin\poc-probe.exe inventory --config $ConfigPath --run-id $RunId --out $InventoryAfterPath
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe inventory failed with exit code $LASTEXITCODE." }
 .\bin\poc-probe.exe verdict --config $ConfigPath --run-id $RunId --artifacts $ArtifactsPath --out $VerdictPath
+if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe verdict failed with exit code $LASTEXITCODE." }
 Get-Content -LiteralPath $VerdictPath -Raw | ConvertFrom-Json
 ~~~
 
