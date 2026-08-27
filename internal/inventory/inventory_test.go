@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -21,10 +22,10 @@ const inventoryFixture = `{
     {"InterfaceAlias":"wg-overseas-poc","InterfaceIndex":19,"DestinationPrefix":"100.127.77.0/24","NextHop":"0.0.0.0","RouteMetric":0,"State":"Alive"}
   ],
   "nat": [
-    {"Name":"ExistingNat","InternalIPInterfaceAddressPrefix":"192.0.2.0/24","ExternalIPInterfaceAddressPrefix":"","Active":true}
+    {"Name":"ExistingNat","InternalIPInterfaceAddressPrefix":"192.0.2.0/24","ExternalIPInterfaceAddressPrefix":"","Active":true,"Store":"PersistentStore","TcpFilteringBehavior":"AddressDependentFiltering","UdpFilteringBehavior":"AddressAndPortDependentFiltering","UdpInboundRefresh":false,"IcmpQueryTimeout":30,"TcpEstablishedConnectionTimeout":1800,"TcpTransientConnectionTimeout":120,"UdpIdleSessionTimeout":120}
   ],
   "firewall_rules": [
-    {"Name":"ExistingRule","DisplayName":"Existing rule","Description":"baseline","Group":"Baseline","Enabled":"True","Profile":"Any","Direction":"Outbound","Action":"Allow","PolicyStoreSource":"PersistentStore","PolicyStoreSourceType":"Local","InterfaceAlias":["Ethernet"],"LocalAddress":["Any"],"RemoteAddress":["Internet"],"Protocol":["TCP"],"LocalPort":["Any"],"RemotePort":["443"],"Program":["Any"],"Service":["Any"]}
+    {"Name":"ExistingRule","DisplayName":"Existing rule","Description":"baseline","Group":"Baseline","Enabled":"True","Profile":"Any","Direction":"Outbound","Action":"Allow","EdgeTraversalPolicy":"Block","LooseSourceMapping":false,"LocalOnlyMapping":false,"Owner":"S-1-5-32-544","PolicyStoreSource":"PersistentStore","PolicyStoreSourceType":"Local","Platform":["10.0+"],"InterfaceAlias":["Ethernet"],"InterfaceType":["Lan"],"LocalAddress":["Any"],"RemoteAddress":["Internet"],"RemoteDynamicKeywordAddresses":["{01234567-89ab-cdef-0123-456789abcdef}"],"Protocol":["TCP"],"LocalPort":["Any"],"RemotePort":["443"],"IcmpType":[],"DynamicTarget":["Any"],"Program":["Any"],"Package":["S-1-15-2-1"],"Service":["Any"],"Authentication":["NotRequired"],"Encryption":["NotRequired"],"OverrideBlockRules":[false],"LocalUser":["Any"],"RemoteUser":["Any"],"RemoteMachine":["Any"]}
   ]
 }`
 
@@ -59,9 +60,107 @@ func TestParseJSONDecodesThreeAdaptersAndRoutes(t *testing.T) {
 	if len(state.NAT) != 1 || state.NAT[0].Name != "ExistingNat" || !state.NAT[0].Active {
 		t.Fatalf("NAT = %#v, want the exact existing NAT", state.NAT)
 	}
+	if state.NAT[0].TcpFilteringBehavior != "AddressDependentFiltering" || state.NAT[0].IcmpQueryTimeout != 30 || state.NAT[0].TcpEstablishedConnectionTimeout != 1800 {
+		t.Fatalf("NAT behavior/timeouts = %#v, want complete stable WinNAT policy", state.NAT[0])
+	}
 	if len(state.FirewallRules) != 1 || state.FirewallRules[0].Name != "ExistingRule" || state.FirewallRules[0].RemotePorts[0] != "443" {
 		t.Fatalf("firewall rules = %#v, want normalized exact rule metadata", state.FirewallRules)
 	}
+	rule := state.FirewallRules[0]
+	if rule.EdgeTraversalPolicy != "Block" || rule.InterfaceTypes[0] != "Lan" || rule.DynamicTargets[0] != "Any" || rule.Packages[0] != "S-1-15-2-1" || rule.Authentications[0] != "NotRequired" || rule.OverrideBlockRules[0] || len(rule.RemoteDynamicKeywordAddresses) != 1 {
+		t.Fatalf("firewall policy/filters = %#v, want all material Windows Firewall dimensions", rule)
+	}
+}
+
+func TestWindowsInventoryScriptCollectsCompleteNATAndFirewallPolicy(t *testing.T) {
+	required := []string{
+		"TcpFilteringBehavior", "UdpFilteringBehavior", "UdpInboundRefresh", "IcmpQueryTimeout",
+		"TcpEstablishedConnectionTimeout", "TcpTransientConnectionTimeout", "UdpIdleSessionTimeout",
+		"EdgeTraversalPolicy", "LooseSourceMapping", "LocalOnlyMapping", "Owner", "Platform",
+		"Get-NetFirewallInterfaceTypeFilter", "InterfaceType", "IcmpType", "DynamicTarget", "Package", "RemoteDynamicKeywordAddresses",
+		"Get-NetFirewallSecurityFilter", "Authentication", "Encryption", "OverrideBlockRules", "LocalUser", "RemoteUser", "RemoteMachine",
+	}
+	for _, value := range required {
+		if !strings.Contains(windowsInventoryScript, value) {
+			t.Errorf("windowsInventoryScript is missing %q", value)
+		}
+	}
+}
+
+func TestEvidenceStateJSONRequiresPresentCollectionsAndFirewallFields(t *testing.T) {
+	state := State{
+		Interfaces: []Interface{{Alias: "Ethernet", Index: 7, AddressFamily: "IPv4", Status: "Connected", Forwarding: "Disabled", MTU: 1500}},
+		Routes:     []Route{{Alias: "Ethernet", Index: 7, DestinationPrefix: "0.0.0.0/0", NextHop: "192.0.2.1", Metric: 25, State: "Alive"}},
+		NAT:        []NAT{},
+		FirewallRules: []FirewallRule{{
+			Name: "Baseline", DisplayName: "Baseline", Description: "", Group: "", Enabled: "True", Profile: "Any", Direction: "Outbound", Action: "Allow",
+			EdgeTraversalPolicy: "Block", LooseSourceMapping: false, LocalOnlyMapping: false, Owner: "", PolicyStoreSource: "PersistentStore", PolicyStoreSourceType: "Local",
+			Platforms: []string{}, InterfaceAliases: []string{}, InterfaceTypes: []string{}, LocalAddresses: []string{"Any"}, RemoteAddresses: []string{"Internet"}, RemoteDynamicKeywordAddresses: []string{},
+			Protocols: []string{"TCP"}, LocalPorts: []string{"Any"}, RemotePorts: []string{"443"}, IcmpTypes: []string{}, DynamicTargets: []string{},
+			Programs: []string{}, Packages: []string{}, Services: []string{}, Authentications: []string{}, Encryptions: []string{}, OverrideBlockRules: []bool{}, LocalUsers: []string{}, RemoteUsers: []string{}, RemoteMachines: []string{},
+		}},
+	}
+	contents, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(contents, &object); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, field := range []string{"interfaces", "routes", "nat", "firewall_rules"} {
+		t.Run("state_"+field, func(t *testing.T) {
+			copyObject := cloneJSONMap(t, object)
+			delete(copyObject, field)
+			if err := unmarshalStateMap(copyObject); err == nil {
+				t.Fatalf("omitted state field %q was accepted", field)
+			}
+		})
+	}
+
+	requiredRuleFields := []string{
+		"name", "display_name", "description", "group", "enabled", "profile", "direction", "action",
+		"edge_traversal_policy", "loose_source_mapping", "local_only_mapping", "owner", "policy_store_source", "policy_store_source_type",
+		"platforms", "interface_aliases", "interface_types", "local_addresses", "remote_addresses", "remote_dynamic_keyword_addresses", "protocols", "local_ports", "remote_ports",
+		"icmp_types", "dynamic_targets", "programs", "packages", "services", "authentications", "encryptions", "override_block_rules", "local_users", "remote_users", "remote_machines",
+	}
+	for _, field := range requiredRuleFields {
+		t.Run("firewall_"+field, func(t *testing.T) {
+			copyObject := cloneJSONMap(t, object)
+			rule := copyObject["firewall_rules"].([]any)[0].(map[string]any)
+			delete(rule, field)
+			if err := unmarshalStateMap(copyObject); err == nil {
+				t.Fatalf("omitted firewall field %q was accepted", field)
+			}
+		})
+	}
+
+	if err := unmarshalStateMap(object); err != nil {
+		t.Fatalf("complete state with explicit empty arrays was rejected: %v", err)
+	}
+}
+
+func cloneJSONMap(t *testing.T, value map[string]any) map[string]any {
+	t.Helper()
+	contents, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(contents, &clone); err != nil {
+		t.Fatal(err)
+	}
+	return clone
+}
+
+func unmarshalStateMap(value map[string]any) error {
+	contents, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var state State
+	return json.Unmarshal(contents, &state)
 }
 
 func TestValidateAcceptsExactAliasesOneDefaultRouteAndWireGuardPrefix(t *testing.T) {

@@ -182,7 +182,7 @@ func validInventoryArtifact(artifact *inventory.Artifact, e Evidence, digest str
 		return false
 	}
 	state := artifact.State
-	if len(state.Interfaces) == 0 || len(state.Routes) == 0 || len(state.FirewallRules) == 0 {
+	if len(state.Interfaces) == 0 || len(state.Routes) == 0 || state.NAT == nil || len(state.FirewallRules) == 0 {
 		return false
 	}
 	aliases := make(map[string]bool)
@@ -203,16 +203,25 @@ func validInventoryArtifact(artifact *inventory.Artifact, e Evidence, digest str
 		}
 	}
 	for _, item := range state.NAT {
-		if item.Name == "" || item.InternalPrefix == "" {
+		if item.Name == "" || item.InternalPrefix == "" || item.Store == "" || item.TcpFilteringBehavior == "" || item.UdpFilteringBehavior == "" ||
+			item.IcmpQueryTimeout < 0 || item.TcpEstablishedConnectionTimeout < 0 || item.TcpTransientConnectionTimeout < 0 || item.UdpIdleSessionTimeout < 0 {
 			return false
 		}
 	}
 	for _, item := range state.FirewallRules {
-		if item.Name == "" || item.DisplayName == "" || item.Enabled == "" || item.Profile == "" || item.Direction == "" || item.Action == "" {
+		if item.Name == "" || item.DisplayName == "" || item.Enabled == "" || item.Profile == "" || item.Direction == "" || item.Action == "" || item.EdgeTraversalPolicy == "" || !presentFirewallCollections(item) {
 			return false
 		}
 	}
 	return true
+}
+
+func presentFirewallCollections(item inventory.FirewallRule) bool {
+	return item.Platforms != nil && item.InterfaceAliases != nil && item.InterfaceTypes != nil &&
+		item.LocalAddresses != nil && item.RemoteAddresses != nil && item.RemoteDynamicKeywordAddresses != nil &&
+		item.Protocols != nil && item.LocalPorts != nil && item.RemotePorts != nil && item.IcmpTypes != nil && item.DynamicTargets != nil &&
+		item.Programs != nil && item.Packages != nil && item.Services != nil && item.Authentications != nil && item.Encryptions != nil &&
+		item.OverrideBlockRules != nil && item.LocalUsers != nil && item.RemoteUsers != nil && item.RemoteMachines != nil
 }
 
 func validMonitor(monitor *DownMonitorEvidence, e Evidence, digest string) bool {
@@ -304,14 +313,26 @@ func sameFirewallRules(left, right []inventory.FirewallRule) bool {
 	normalize := func(items []inventory.FirewallRule) []inventory.FirewallRule {
 		result := append([]inventory.FirewallRule(nil), items...)
 		for i := range result {
+			result[i].Platforms = sortedCopy(result[i].Platforms)
 			result[i].InterfaceAliases = sortedCopy(result[i].InterfaceAliases)
+			result[i].InterfaceTypes = sortedCopy(result[i].InterfaceTypes)
 			result[i].LocalAddresses = sortedCopy(result[i].LocalAddresses)
 			result[i].RemoteAddresses = sortedCopy(result[i].RemoteAddresses)
+			result[i].RemoteDynamicKeywordAddresses = sortedCopy(result[i].RemoteDynamicKeywordAddresses)
 			result[i].Protocols = sortedCopy(result[i].Protocols)
 			result[i].LocalPorts = sortedCopy(result[i].LocalPorts)
 			result[i].RemotePorts = sortedCopy(result[i].RemotePorts)
+			result[i].IcmpTypes = sortedCopy(result[i].IcmpTypes)
+			result[i].DynamicTargets = sortedCopy(result[i].DynamicTargets)
 			result[i].Programs = sortedCopy(result[i].Programs)
+			result[i].Packages = sortedCopy(result[i].Packages)
 			result[i].Services = sortedCopy(result[i].Services)
+			result[i].Authentications = sortedCopy(result[i].Authentications)
+			result[i].Encryptions = sortedCopy(result[i].Encryptions)
+			result[i].OverrideBlockRules = sortedBoolCopy(result[i].OverrideBlockRules)
+			result[i].LocalUsers = sortedCopy(result[i].LocalUsers)
+			result[i].RemoteUsers = sortedCopy(result[i].RemoteUsers)
+			result[i].RemoteMachines = sortedCopy(result[i].RemoteMachines)
 		}
 		return result
 	}
@@ -321,6 +342,12 @@ func sameFirewallRules(left, right []inventory.FirewallRule) bool {
 func sortedCopy(values []string) []string {
 	copyOfValues := append([]string(nil), values...)
 	sort.Strings(copyOfValues)
+	return copyOfValues
+}
+
+func sortedBoolCopy(values []bool) []bool {
+	copyOfValues := append([]bool(nil), values...)
+	sort.Slice(copyOfValues, func(i, j int) bool { return !copyOfValues[i] && copyOfValues[j] })
 	return copyOfValues
 }
 

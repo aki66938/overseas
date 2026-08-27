@@ -110,7 +110,8 @@ probe_timeout: 8s
 				{Alias: "Ethernet", Index: 7, DestinationPrefix: "0.0.0.0/0", NextHop: "172.20.10.1", State: "Alive"},
 				{Alias: "wg-overseas-poc", Index: 19, DestinationPrefix: "100.127.77.0/24", NextHop: "0.0.0.0", State: "Alive"},
 			},
-			FirewallRules: []inventory.FirewallRule{{Name: "Baseline", DisplayName: "Baseline", Enabled: "True", Profile: "Any", Direction: "Outbound", Action: "Allow"}},
+			NAT:           []inventory.NAT{},
+			FirewallRules: []inventory.FirewallRule{completeFirewallRuleForTest()},
 		}, nil
 	}
 	t.Cleanup(func() { snapshot = previousSnapshot })
@@ -307,6 +308,48 @@ func TestRunVerdictStrictlyRejectsUnknownArtifactFields(t *testing.T) {
 	}
 }
 
+func TestRunVerdictRejectsOmittedRequiredInventoryCollectionsAndFirewallFilters(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "nat", mutate: func(object map[string]any) {
+			state := object["state"].(map[string]any)
+			delete(state, "nat")
+		}},
+		{name: "firewall filter", mutate: func(object map[string]any) {
+			state := object["state"].(map[string]any)
+			rule := state["firewall_rules"].([]any)[0].(map[string]any)
+			delete(rule, "remote_addresses")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := t.TempDir()
+			configPath, cfg := writeVerdictConfig(t)
+			runID := "run-omitted-" + strings.ReplaceAll(test.name, " ", "-")
+			writePassingVerdictArtifacts(t, artifacts, cfg, runID, time.Now().UTC())
+
+			path := filepath.Join(artifacts, "inventory-after.json")
+			var object map[string]any
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(contents, &object); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(object)
+			writeTestJSONReplace(t, path, object)
+
+			report := runVerdictForTest(t, configPath, runID, artifacts)
+			if report.Status != verdict.StatusInconclusive || report.Code != "INCONCLUSIVE_INVALID_EVIDENCE" {
+				t.Fatalf("report = %#v", report)
+			}
+		})
+	}
+}
+
 func TestRunVerdictKeepsValidLeakWhenSiblingJSONRecordIsUnknown(t *testing.T) {
 	artifacts := t.TempDir()
 	configPath, cfg := writeVerdictConfig(t)
@@ -413,7 +456,7 @@ func writePassingVerdictArtifacts(t *testing.T, dir string, cfg config.Config, r
 			{Alias: cfg.WireGuardInterface, Index: 19, DestinationPrefix: cfg.WireGuardSubnet, NextHop: "0.0.0.0", State: "Alive"},
 		},
 		NAT:           []inventory.NAT{},
-		FirewallRules: []inventory.FirewallRule{{Name: "Baseline", DisplayName: "Baseline", Enabled: "True", Profile: "Any", Direction: "Outbound", Action: "Allow"}},
+		FirewallRules: []inventory.FirewallRule{completeFirewallRuleForTest()},
 	}
 	writeTestJSON(t, filepath.Join(dir, "inventory-before.json"), inventory.Artifact{SchemaVersion: 1, RunID: runID, ConfigDigest: digest, CapturedAt: now.Add(-30 * time.Minute), State: state})
 	writeTestJSON(t, filepath.Join(dir, "probe-telecom-up.json"), probe.Artifact{
@@ -426,6 +469,16 @@ func writePassingVerdictArtifacts(t *testing.T, dir string, cfg config.Config, r
 	})
 	writeTestJSON(t, filepath.Join(dir, "probe-telecom-down-monitor.json"), verdict.DownMonitorEvidence{SchemaVersion: 1, RunID: runID, ConfigDigest: digest, StartedAt: now.Add(-27 * time.Minute), FinishedAt: now.Add(-24 * time.Minute), SampleCount: 3, TelecomRoutePrefixes: cfg.TelecomRoutePrefixes})
 	writeTestJSON(t, filepath.Join(dir, "inventory-after.json"), inventory.Artifact{SchemaVersion: 1, RunID: runID, ConfigDigest: digest, CapturedAt: now.Add(-23 * time.Minute), State: state})
+}
+
+func completeFirewallRuleForTest() inventory.FirewallRule {
+	return inventory.FirewallRule{
+		Name: "Baseline", DisplayName: "Baseline", Description: "", Group: "", Enabled: "True", Profile: "Any", Direction: "Outbound", Action: "Allow",
+		EdgeTraversalPolicy: "Block", LooseSourceMapping: false, LocalOnlyMapping: false, Owner: "", PolicyStoreSource: "PersistentStore", PolicyStoreSourceType: "Local",
+		Platforms: []string{}, InterfaceAliases: []string{}, InterfaceTypes: []string{}, LocalAddresses: []string{"Any"}, RemoteAddresses: []string{"Internet"}, RemoteDynamicKeywordAddresses: []string{},
+		Protocols: []string{"TCP"}, LocalPorts: []string{"Any"}, RemotePorts: []string{"443"}, IcmpTypes: []string{}, DynamicTargets: []string{},
+		Programs: []string{}, Packages: []string{}, Services: []string{}, Authentications: []string{}, Encryptions: []string{}, OverrideBlockRules: []bool{}, LocalUsers: []string{}, RemoteUsers: []string{}, RemoteMachines: []string{},
+	}
 }
 
 func writeTestJSONReplace(t *testing.T, path string, value any) {

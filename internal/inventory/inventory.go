@@ -3,6 +3,7 @@
 package inventory
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,33 +53,137 @@ type Route struct {
 
 // NAT is the stable configuration subset of one WinNAT object.
 type NAT struct {
-	Name           string `json:"name"`
-	InternalPrefix string `json:"internal_prefix"`
-	ExternalPrefix string `json:"external_prefix"`
-	Active         bool   `json:"active"`
+	Name                            string `json:"name"`
+	InternalPrefix                  string `json:"internal_prefix"`
+	ExternalPrefix                  string `json:"external_prefix"`
+	Active                          bool   `json:"active"`
+	Store                           string `json:"store"`
+	TcpFilteringBehavior            string `json:"tcp_filtering_behavior"`
+	UdpFilteringBehavior            string `json:"udp_filtering_behavior"`
+	UdpInboundRefresh               bool   `json:"udp_inbound_refresh"`
+	IcmpQueryTimeout                int    `json:"icmp_query_timeout"`
+	TcpEstablishedConnectionTimeout int    `json:"tcp_established_connection_timeout"`
+	TcpTransientConnectionTimeout   int    `json:"tcp_transient_connection_timeout"`
+	UdpIdleSessionTimeout           int    `json:"udp_idle_session_timeout"`
 }
 
 // FirewallRule captures rule configuration plus the associated filters that
 // materially affect packet matching.
 type FirewallRule struct {
-	Name                  string   `json:"name"`
-	DisplayName           string   `json:"display_name"`
-	Description           string   `json:"description"`
-	Group                 string   `json:"group"`
-	Enabled               string   `json:"enabled"`
-	Profile               string   `json:"profile"`
-	Direction             string   `json:"direction"`
-	Action                string   `json:"action"`
-	PolicyStoreSource     string   `json:"policy_store_source"`
-	PolicyStoreSourceType string   `json:"policy_store_source_type"`
-	InterfaceAliases      []string `json:"interface_aliases"`
-	LocalAddresses        []string `json:"local_addresses"`
-	RemoteAddresses       []string `json:"remote_addresses"`
-	Protocols             []string `json:"protocols"`
-	LocalPorts            []string `json:"local_ports"`
-	RemotePorts           []string `json:"remote_ports"`
-	Programs              []string `json:"programs"`
-	Services              []string `json:"services"`
+	Name                          string   `json:"name"`
+	DisplayName                   string   `json:"display_name"`
+	Description                   string   `json:"description"`
+	Group                         string   `json:"group"`
+	Enabled                       string   `json:"enabled"`
+	Profile                       string   `json:"profile"`
+	Direction                     string   `json:"direction"`
+	Action                        string   `json:"action"`
+	EdgeTraversalPolicy           string   `json:"edge_traversal_policy"`
+	LooseSourceMapping            bool     `json:"loose_source_mapping"`
+	LocalOnlyMapping              bool     `json:"local_only_mapping"`
+	Owner                         string   `json:"owner"`
+	PolicyStoreSource             string   `json:"policy_store_source"`
+	PolicyStoreSourceType         string   `json:"policy_store_source_type"`
+	Platforms                     []string `json:"platforms"`
+	InterfaceAliases              []string `json:"interface_aliases"`
+	InterfaceTypes                []string `json:"interface_types"`
+	LocalAddresses                []string `json:"local_addresses"`
+	RemoteAddresses               []string `json:"remote_addresses"`
+	RemoteDynamicKeywordAddresses []string `json:"remote_dynamic_keyword_addresses"`
+	Protocols                     []string `json:"protocols"`
+	LocalPorts                    []string `json:"local_ports"`
+	RemotePorts                   []string `json:"remote_ports"`
+	IcmpTypes                     []string `json:"icmp_types"`
+	DynamicTargets                []string `json:"dynamic_targets"`
+	Programs                      []string `json:"programs"`
+	Packages                      []string `json:"packages"`
+	Services                      []string `json:"services"`
+	Authentications               []string `json:"authentications"`
+	Encryptions                   []string `json:"encryptions"`
+	OverrideBlockRules            []bool   `json:"override_block_rules"`
+	LocalUsers                    []string `json:"local_users"`
+	RemoteUsers                   []string `json:"remote_users"`
+	RemoteMachines                []string `json:"remote_machines"`
+}
+
+// UnmarshalJSON makes the collection boundary presence-aware. A missing or
+// null collection is not equivalent to a cmdlet reporting an explicit empty
+// array, because omission could otherwise erase evidence without invalidating
+// a verdict artifact.
+func (state *State) UnmarshalJSON(data []byte) error {
+	type plain State
+	var decoded plain
+	if err := decodeRequiredObject(data, &decoded, "interfaces", "routes", "nat", "firewall_rules"); err != nil {
+		return fmt.Errorf("decode inventory state: %w", err)
+	}
+	*state = State(decoded)
+	return nil
+}
+
+func (item *Interface) UnmarshalJSON(data []byte) error {
+	type plain Interface
+	var decoded plain
+	if err := decodeRequiredObject(data, &decoded, "alias", "index", "address_family", "status", "forwarding", "mtu"); err != nil {
+		return fmt.Errorf("decode inventory interface: %w", err)
+	}
+	*item = Interface(decoded)
+	return nil
+}
+
+func (item *Route) UnmarshalJSON(data []byte) error {
+	type plain Route
+	var decoded plain
+	if err := decodeRequiredObject(data, &decoded, "alias", "index", "destination_prefix", "next_hop", "metric", "state"); err != nil {
+		return fmt.Errorf("decode inventory route: %w", err)
+	}
+	*item = Route(decoded)
+	return nil
+}
+
+func (item *NAT) UnmarshalJSON(data []byte) error {
+	type plain NAT
+	var decoded plain
+	if err := decodeRequiredObject(data, &decoded,
+		"name", "internal_prefix", "external_prefix", "active", "store",
+		"tcp_filtering_behavior", "udp_filtering_behavior", "udp_inbound_refresh",
+		"icmp_query_timeout", "tcp_established_connection_timeout", "tcp_transient_connection_timeout", "udp_idle_session_timeout"); err != nil {
+		return fmt.Errorf("decode inventory NAT: %w", err)
+	}
+	*item = NAT(decoded)
+	return nil
+}
+
+func (item *FirewallRule) UnmarshalJSON(data []byte) error {
+	type plain FirewallRule
+	var decoded plain
+	if err := decodeRequiredObject(data, &decoded,
+		"name", "display_name", "description", "group", "enabled", "profile", "direction", "action",
+		"edge_traversal_policy", "loose_source_mapping", "local_only_mapping", "owner", "policy_store_source", "policy_store_source_type",
+		"platforms", "interface_aliases", "interface_types", "local_addresses", "remote_addresses", "remote_dynamic_keyword_addresses", "protocols", "local_ports", "remote_ports",
+		"icmp_types", "dynamic_targets", "programs", "packages", "services", "authentications", "encryptions", "override_block_rules", "local_users", "remote_users", "remote_machines"); err != nil {
+		return fmt.Errorf("decode inventory firewall rule: %w", err)
+	}
+	*item = FirewallRule(decoded)
+	return nil
+}
+
+func decodeRequiredObject(data []byte, destination any, fields ...string) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	for _, field := range fields {
+		value, ok := object[field]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("required field %q is missing or null", field)
+		}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	return nil
 }
 
 func parseJSON(source io.Reader) (State, error) {
@@ -167,10 +272,18 @@ func decodeRoutes(raw json.RawMessage) ([]Route, error) {
 
 func decodeNAT(raw json.RawMessage) ([]NAT, error) {
 	var records []struct {
-		Name           string `json:"Name"`
-		InternalPrefix string `json:"InternalIPInterfaceAddressPrefix"`
-		ExternalPrefix string `json:"ExternalIPInterfaceAddressPrefix"`
-		Active         bool   `json:"Active"`
+		Name                            string `json:"Name"`
+		InternalPrefix                  string `json:"InternalIPInterfaceAddressPrefix"`
+		ExternalPrefix                  string `json:"ExternalIPInterfaceAddressPrefix"`
+		Active                          bool   `json:"Active"`
+		Store                           string `json:"Store"`
+		TcpFilteringBehavior            string `json:"TcpFilteringBehavior"`
+		UdpFilteringBehavior            string `json:"UdpFilteringBehavior"`
+		UdpInboundRefresh               bool   `json:"UdpInboundRefresh"`
+		IcmpQueryTimeout                int    `json:"IcmpQueryTimeout"`
+		TcpEstablishedConnectionTimeout int    `json:"TcpEstablishedConnectionTimeout"`
+		TcpTransientConnectionTimeout   int    `json:"TcpTransientConnectionTimeout"`
+		UdpIdleSessionTimeout           int    `json:"UdpIdleSessionTimeout"`
 	}
 	if err := decodeArrayOrOneAllowEmpty(raw, &records); err != nil {
 		return nil, fmt.Errorf("decode inventory NAT: %w", err)
@@ -184,24 +297,40 @@ func decodeNAT(raw json.RawMessage) ([]NAT, error) {
 
 func decodeFirewallRules(raw json.RawMessage) ([]FirewallRule, error) {
 	var records []struct {
-		Name                  string   `json:"Name"`
-		DisplayName           string   `json:"DisplayName"`
-		Description           string   `json:"Description"`
-		Group                 string   `json:"Group"`
-		Enabled               string   `json:"Enabled"`
-		Profile               string   `json:"Profile"`
-		Direction             string   `json:"Direction"`
-		Action                string   `json:"Action"`
-		PolicyStoreSource     string   `json:"PolicyStoreSource"`
-		PolicyStoreSourceType string   `json:"PolicyStoreSourceType"`
-		InterfaceAliases      []string `json:"InterfaceAlias"`
-		LocalAddresses        []string `json:"LocalAddress"`
-		RemoteAddresses       []string `json:"RemoteAddress"`
-		Protocols             []string `json:"Protocol"`
-		LocalPorts            []string `json:"LocalPort"`
-		RemotePorts           []string `json:"RemotePort"`
-		Programs              []string `json:"Program"`
-		Services              []string `json:"Service"`
+		Name                          string   `json:"Name"`
+		DisplayName                   string   `json:"DisplayName"`
+		Description                   string   `json:"Description"`
+		Group                         string   `json:"Group"`
+		Enabled                       string   `json:"Enabled"`
+		Profile                       string   `json:"Profile"`
+		Direction                     string   `json:"Direction"`
+		Action                        string   `json:"Action"`
+		EdgeTraversalPolicy           string   `json:"EdgeTraversalPolicy"`
+		LooseSourceMapping            bool     `json:"LooseSourceMapping"`
+		LocalOnlyMapping              bool     `json:"LocalOnlyMapping"`
+		Owner                         string   `json:"Owner"`
+		PolicyStoreSource             string   `json:"PolicyStoreSource"`
+		PolicyStoreSourceType         string   `json:"PolicyStoreSourceType"`
+		Platforms                     []string `json:"Platform"`
+		InterfaceAliases              []string `json:"InterfaceAlias"`
+		InterfaceTypes                []string `json:"InterfaceType"`
+		LocalAddresses                []string `json:"LocalAddress"`
+		RemoteAddresses               []string `json:"RemoteAddress"`
+		RemoteDynamicKeywordAddresses []string `json:"RemoteDynamicKeywordAddresses"`
+		Protocols                     []string `json:"Protocol"`
+		LocalPorts                    []string `json:"LocalPort"`
+		RemotePorts                   []string `json:"RemotePort"`
+		IcmpTypes                     []string `json:"IcmpType"`
+		DynamicTargets                []string `json:"DynamicTarget"`
+		Programs                      []string `json:"Program"`
+		Packages                      []string `json:"Package"`
+		Services                      []string `json:"Service"`
+		Authentications               []string `json:"Authentication"`
+		Encryptions                   []string `json:"Encryption"`
+		OverrideBlockRules            []bool   `json:"OverrideBlockRules"`
+		LocalUsers                    []string `json:"LocalUser"`
+		RemoteUsers                   []string `json:"RemoteUser"`
+		RemoteMachines                []string `json:"RemoteMachine"`
 	}
 	if err := decodeArrayOrOne(raw, &records); err != nil {
 		return nil, fmt.Errorf("decode inventory firewall rules: %w", err)

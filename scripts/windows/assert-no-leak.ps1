@@ -76,6 +76,40 @@ function Assert-NativeWindowsExecutable {
     }
 }
 
+function Stop-LiveNativeProcess {
+    param([Parameter(Mandatory = $true)] [object] $Process)
+
+    $cleanupFailures = @()
+    $hasExited = $false
+    try {
+        $hasExited = [bool] $Process.HasExited
+    }
+    catch {
+        # An unreadable process state is not evidence that the process exited.
+        # Continue with kill/wait and retain the polling failure.
+        $cleanupFailures += "read child exit state: $($_.Exception.Message)"
+    }
+    if (-not $hasExited) {
+        try {
+            $Process.Kill()
+        }
+        catch {
+            $cleanupFailures += "kill child: $($_.Exception.Message)"
+        }
+        try {
+            if (-not $Process.WaitForExit(5000)) {
+                $cleanupFailures += 'wait for child: timed out after kill'
+            }
+        }
+        catch {
+            $cleanupFailures += "wait for child: $($_.Exception.Message)"
+        }
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        throw "poc-probe child cleanup failed: $($cleanupFailures -join '; ')"
+    }
+}
+
 function Write-NewJson {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -201,11 +235,22 @@ if (-not (Test-Path -LiteralPath $resolvedProbePath -PathType Leaf)) {
 if (-not [System.IO.Path]::GetFileName($resolvedProbePath).Equals('poc-probe.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'The native executable must have the exact filename poc-probe.exe; script wrappers are refused.'
 }
-Assert-NativeWindowsExecutable -Path $resolvedProbePath
-$actualHash = (Get-FileHash -LiteralPath $resolvedProbePath -Algorithm SHA256 -ErrorAction Stop).Hash
-if (-not $actualHash.Equals($PocProbeSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The native poc-probe.exe SHA256 does not match the caller-supplied value.'
-}
+$probeLockStream = $null
+$probeProcess = $null
+try {
+    # FileShare.Read permits Windows to map/execute this exact file but denies
+    # writers and deleters until both trusted native invocations are complete.
+    $probeLockStream = [System.IO.File]::Open(
+        $resolvedProbePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    Assert-NativeWindowsExecutable -Path $resolvedProbePath
+    $actualHash = (Get-FileHash -LiteralPath $resolvedProbePath -Algorithm SHA256 -ErrorAction Stop).Hash
+    if (-not $actualHash.Equals($PocProbeSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The native poc-probe.exe SHA256 does not match the caller-supplied value.'
+    }
 
 $metadataOutputPath = Join-Path ([System.IO.Path]::GetDirectoryName($resolvedOutputPath)) ('.poc-config-{0}.out' -f ([guid]::NewGuid().ToString('N')))
 $metadataErrorPath = Join-Path ([System.IO.Path]::GetDirectoryName($resolvedOutputPath)) ('.poc-config-{0}.err' -f ([guid]::NewGuid().ToString('N')))
@@ -275,8 +320,6 @@ try {
             $reconnectDetected = $true
             $reconnectAt = [datetime]::UtcNow
             $reconnectState = $currentState
-            try { $probeProcess.Kill() } catch { }
-            [void] $probeProcess.WaitForExit(5000)
             break
         }
 
@@ -325,12 +368,40 @@ try {
     }
 }
 finally {
-    [void] (Read-Host "Reconnect telecom client manually, then press Enter to verify interface '$telecomInterface'")
-    $restoredState = Get-TelecomPathState -InterfaceAlias $telecomInterface -RoutePrefixes $telecomRoutePrefixes
-    if (-not $restoredState.InterfaceUp -or @($restoredState.ConfiguredRoutes).Count -eq 0) {
-        throw "Telecom path was not restored on interface '$telecomInterface'; reconnect it manually before continuing."
+    $childCleanupError = $null
+    if ($null -ne $probeProcess) {
+        try {
+            Stop-LiveNativeProcess -Process $probeProcess
+        }
+        catch {
+            $childCleanupError = $_.Exception
+        }
+    }
+
+    $restoreError = $null
+    try {
+        [void] (Read-Host "Reconnect telecom client manually, then press Enter to verify interface '$telecomInterface'")
+        $restoredState = Get-TelecomPathState -InterfaceAlias $telecomInterface -RoutePrefixes $telecomRoutePrefixes
+        if (-not $restoredState.InterfaceUp -or @($restoredState.ConfiguredRoutes).Count -eq 0) {
+            throw "Telecom path was not restored on interface '$telecomInterface'; reconnect it manually before continuing."
+        }
+    }
+    catch {
+        $restoreError = $_.Exception
+    }
+    if ($null -ne $restoreError) {
+        throw $restoreError
+    }
+    if ($null -ne $childCleanupError) {
+        throw $childCleanupError
     }
 }
 
 "NO_LEAK_EVIDENCE_WRITTEN: $resolvedOutputPath"
 "NO_LEAK_MONITOR_WRITTEN: $resolvedMonitorOutputPath"
+}
+finally {
+    if ($null -ne $probeLockStream) {
+        $probeLockStream.Dispose()
+    }
+}
