@@ -60,26 +60,45 @@ Describe 'Windows forwarding PoC operator documentation' {
         }
     }
 
-    It 'guards every native poc-probe invocation immediately with LASTEXITCODE' {
+    It 'guards every native invocation immediately with launch and exit signals' {
         if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
         $lines = @(Get-Content -LiteralPath $runbookPath)
         $commands = @()
 
         for ($index = 0; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -notmatch '(?i)\.\\bin\\poc-probe\.exe\s+(preflight|describe-config|inventory|probe|verdict)\b') {
-                continue
+            $command = $null
+            if ($lines[$index] -match '^make\s+(test|build)\s*$') {
+                $command = 'make ' + $Matches[1].ToLowerInvariant()
             }
-            $command = $Matches[1].ToLowerInvariant()
-            $commands += $command
-            ($index + 1 -lt $lines.Count) | Should Be $true
+            elseif ($lines[$index] -match '(?i)\.\\bin\\poc-probe\.exe\s+(preflight|describe-config|inventory|probe|verdict)\b') {
+                $command = 'poc-probe.exe ' + $Matches[1].ToLowerInvariant()
+            }
+            if ($null -eq $command) { continue }
 
-            $guard = $lines[$index + 1].Trim()
+            $commands += $command
+            ($index + 3 -lt $lines.Count) | Should Be $true
+
+            $launchCapture = $lines[$index + 1].Trim()
+            $launchMatch = [regex]::Match($launchCapture, '^\$(?<prefix>[A-Za-z][A-Za-z0-9]*)Succeeded\s*=\s*\$\?\s*$')
+            $launchMatch.Success | Should Be $true
+            $prefix = $launchMatch.Groups['prefix'].Value
+
+            $exitCapture = $lines[$index + 2].Trim()
+            $exitCapture | Should Match ('^\$' + [regex]::Escape($prefix) + 'ExitCode\s*=\s*\$LASTEXITCODE\s*$')
+
+            $guard = $lines[$index + 3].Trim()
             $escapedCommand = [regex]::Escape($command)
-            $guardPattern = '^if\s*\(\s*\$LASTEXITCODE\s*-ne\s*0\s*\)\s*\{\s*throw\s+[''\"]poc-probe\.exe ' + $escapedCommand + ' failed with exit code \$LASTEXITCODE\.[''\"]\s*\}\s*$'
+            $guardPattern = '^if\s*\(\s*-not\s+\$' + [regex]::Escape($prefix) + 'Succeeded\s+-or\s+\$' + [regex]::Escape($prefix) + 'ExitCode\s+-ne\s+0\s*\)\s*\{\s*throw\s+[''\"]' + $escapedCommand + ' failed to launch or exited with code \$' + [regex]::Escape($prefix) + 'ExitCode\.[''\"]\s*\}\s*$'
             $guard | Should Match $guardPattern
+
+            if ($command -eq 'make build') {
+                ($index + 4 -lt $lines.Count) | Should Be $true
+                $artifactGuard = $lines[$index + 4].Trim()
+                $artifactGuard | Should Match '^if\s*\(\s*-not\s*\(Test-Path\s+-LiteralPath\s+\.\\bin\\poc-probe\.exe\s+-PathType\s+Leaf\s*\)\s*\)\s*\{\s*throw\s+[''\"]make build did not produce bin\\poc-probe\.exe\.[''\"]\s*\}\s*$'
+            }
         }
 
-        ($commands -join ',') | Should Be 'preflight,describe-config,inventory,probe,inventory,verdict'
+        ($commands -join ',') | Should Be 'make test,make build,poc-probe.exe preflight,poc-probe.exe describe-config,poc-probe.exe inventory,poc-probe.exe probe,poc-probe.exe inventory,poc-probe.exe verdict'
     }
 
     It 'provides reproducible Go and Pester build targets' {

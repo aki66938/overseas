@@ -38,8 +38,14 @@ Pester 3 verbose form available on older Windows hosts.
 
 ~~~powershell
 make test
+$MakeTestSucceeded = $?
+$MakeTestExitCode = $LASTEXITCODE
+if (-not $MakeTestSucceeded -or $MakeTestExitCode -ne 0) { throw "make test failed to launch or exited with code $MakeTestExitCode." }
 make build
-Test-Path .\bin\poc-probe.exe
+$MakeBuildSucceeded = $?
+$MakeBuildExitCode = $LASTEXITCODE
+if (-not $MakeBuildSucceeded -or $MakeBuildExitCode -ne 0) { throw "make build failed to launch or exited with code $MakeBuildExitCode." }
+if (-not (Test-Path -LiteralPath .\bin\poc-probe.exe -PathType Leaf)) { throw 'make build did not produce bin\poc-probe.exe.' }
 ~~~
 
 Create the untracked runtime configuration once, then edit it only with the
@@ -50,9 +56,11 @@ Never use the sample hostname as an actual test target.
 if (-not (Test-Path -LiteralPath .\configs\poc.yaml -PathType Leaf)) {
     Copy-Item .\configs\poc.example.yaml .\configs\poc.yaml
 }
-notepad .\configs\poc.yaml
+# Edit .\configs\poc.yaml in an approved text editor, then save it.
 .\bin\poc-probe.exe preflight --config .\configs\poc.yaml
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe preflight failed with exit code $LASTEXITCODE." }
+$PocProbePreflightSucceeded = $?
+$PocProbePreflightExitCode = $LASTEXITCODE
+if (-not $PocProbePreflightSucceeded -or $PocProbePreflightExitCode -ne 0) { throw "poc-probe.exe preflight failed to launch or exited with code $PocProbePreflightExitCode." }
 Get-Content -LiteralPath .\configs\poc.yaml -Raw
 ~~~
 
@@ -73,7 +81,9 @@ $InventoryAfterPath = Join-Path $ArtifactsPath 'inventory-after.json'
 $VerdictPath = Join-Path $ArtifactsPath 'verdict.json'
 
 $ConfigMetadataJson = & .\bin\poc-probe.exe describe-config --config $ConfigPath
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe describe-config failed with exit code $LASTEXITCODE." }
+$PocProbeDescribeConfigSucceeded = $?
+$PocProbeDescribeConfigExitCode = $LASTEXITCODE
+if (-not $PocProbeDescribeConfigSucceeded -or $PocProbeDescribeConfigExitCode -ne 0) { throw "poc-probe.exe describe-config failed to launch or exited with code $PocProbeDescribeConfigExitCode." }
 $ConfigMetadata = $ConfigMetadataJson | ConvertFrom-Json
 $ConfigDigest = $ConfigMetadata.config_digest
 $TelecomRoutePrefixes = @($ConfigMetadata.telecom_route_prefixes)
@@ -158,7 +168,9 @@ deliberately retained if safe compensation cannot be verified.
 
 ~~~powershell
 .\bin\poc-probe.exe inventory --config $ConfigPath --run-id $RunId --out $InventoryBeforePath
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe inventory failed with exit code $LASTEXITCODE." }
+$PocProbeInventoryBeforeSucceeded = $?
+$PocProbeInventoryBeforeExitCode = $LASTEXITCODE
+if (-not $PocProbeInventoryBeforeSucceeded -or $PocProbeInventoryBeforeExitCode -ne 0) { throw "poc-probe.exe inventory failed to launch or exited with code $PocProbeInventoryBeforeExitCode." }
 .\scripts\windows\apply-poc.ps1 -SnapshotPath $SnapshotPath -WireGuardInterface $WireGuardInterface -TelecomInterface $TelecomInterface -EmployeeInterface $EmployeeInterface -WireGuardSubnet $WireGuardSubnet -InternalCidrs $InternalCidrs -Confirm:$false
 ~~~
 
@@ -175,7 +187,9 @@ with operator-supplied telecom-line evidence.
 
 ~~~powershell
 .\bin\poc-probe.exe probe --config $ConfigPath --run-id $RunId --out $ProbeUpPath
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe probe failed with exit code $LASTEXITCODE." }
+$PocProbeProbeSucceeded = $?
+$PocProbeProbeExitCode = $LASTEXITCODE
+if (-not $PocProbeProbeSucceeded -or $PocProbeProbeExitCode -ne 0) { throw "poc-probe.exe probe failed to launch or exited with code $PocProbeProbeExitCode." }
 ~~~
 
 Hash the exact compiled native binary immediately before the no-leak step. The
@@ -208,9 +222,13 @@ keep console access and escalate; do not declare normal networking restored.
 ~~~powershell
 .\scripts\windows\rollback-poc.ps1 -SnapshotPath $SnapshotPath -Confirm:$false
 .\bin\poc-probe.exe inventory --config $ConfigPath --run-id $RunId --out $InventoryAfterPath
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe inventory failed with exit code $LASTEXITCODE." }
+$PocProbeInventoryAfterSucceeded = $?
+$PocProbeInventoryAfterExitCode = $LASTEXITCODE
+if (-not $PocProbeInventoryAfterSucceeded -or $PocProbeInventoryAfterExitCode -ne 0) { throw "poc-probe.exe inventory failed to launch or exited with code $PocProbeInventoryAfterExitCode." }
 .\bin\poc-probe.exe verdict --config $ConfigPath --run-id $RunId --artifacts $ArtifactsPath --out $VerdictPath
-if ($LASTEXITCODE -ne 0) { throw "poc-probe.exe verdict failed with exit code $LASTEXITCODE." }
+$PocProbeVerdictSucceeded = $?
+$PocProbeVerdictExitCode = $LASTEXITCODE
+if (-not $PocProbeVerdictSucceeded -or $PocProbeVerdictExitCode -ne 0) { throw "poc-probe.exe verdict failed to launch or exited with code $PocProbeVerdictExitCode." }
 Get-Content -LiteralPath $VerdictPath -Raw | ConvertFrom-Json
 ~~~
 
