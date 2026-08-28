@@ -36,13 +36,14 @@ type ViewModel struct {
 	clipboard    clipboard
 	pollInterval time.Duration
 
-	mu        sync.Mutex
-	status    clientapi.Status
-	busy      bool
-	onChange  func(ViewState)
-	startOnce sync.Once
-	closeOnce sync.Once
-	closePoll chan struct{}
+	mu         sync.Mutex
+	status     clientapi.Status
+	busy       bool
+	busyAction string
+	onChange   func(ViewState)
+	startOnce  sync.Once
+	closeOnce  sync.Once
+	closePoll  chan struct{}
 }
 
 func NewViewModel(client serviceClient, clipboard clipboard, options ...ViewModelOption) *ViewModel {
@@ -120,6 +121,10 @@ func (v *ViewModel) Toggle(ctx context.Context) error {
 	}
 	current := v.status
 	v.busy = true
+	v.busyAction = busyActionConnect
+	if current.State == accessmodel.StateConnected {
+		v.busyAction = busyActionDisconnect
+	}
 	state := v.renderLocked()
 	v.mu.Unlock()
 	v.notify(state)
@@ -180,6 +185,9 @@ func (v *ViewModel) update(status clientapi.Status, busy bool) {
 	v.mu.Lock()
 	v.status = status
 	v.busy = busy
+	if !busy {
+		v.busyAction = ""
+	}
 	state := v.renderLocked()
 	v.mu.Unlock()
 	v.notify(state)
@@ -195,7 +203,23 @@ func (v *ViewModel) notify(state ViewState) {
 }
 
 func (v *ViewModel) renderLocked() ViewState {
-	if v.busy || v.status.State == accessmodel.StateConnecting {
+	if v.busy {
+		if v.busyAction == busyActionDisconnect {
+			return ViewState{
+				StatusText:    "正在关闭",
+				DetailText:    "",
+				ButtonText:    "正在关闭",
+				ButtonEnabled: false,
+			}
+		}
+		return ViewState{
+			StatusText:    "正在连接",
+			DetailText:    "",
+			ButtonText:    "正在连接",
+			ButtonEnabled: false,
+		}
+	}
+	if v.status.State == accessmodel.StateConnecting {
 		return ViewState{
 			StatusText:    "正在连接",
 			DetailText:    "",
@@ -227,6 +251,11 @@ func (v *ViewModel) renderLocked() ViewState {
 		}
 	}
 }
+
+const (
+	busyActionConnect    = "connect"
+	busyActionDisconnect = "disconnect"
+)
 
 func approvedMessage(status clientapi.Status) string {
 	switch status.ErrorCode {

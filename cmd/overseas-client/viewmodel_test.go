@@ -147,6 +147,71 @@ func TestViewModelSuppressesDoubleClickWhileOperationRuns(t *testing.T) {
 	}
 }
 
+func TestViewModelShowsDisconnectBusyStateAndThenDisconnected(t *testing.T) {
+	client := &fakeServiceClient{
+		statusResult:     clientapi.Status{State: accessmodel.StateConnected},
+		disconnectResult: clientapi.Status{State: accessmodel.StateDisconnected},
+		disconnectGate:   make(chan struct{}),
+		disconnectStart:  make(chan struct{}, 1),
+	}
+	vm := NewViewModel(client, nil)
+	vm.setStatus(client.statusResult)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := vm.Toggle(context.Background()); err != nil {
+			t.Errorf("Toggle() error = %v", err)
+		}
+	}()
+	<-client.disconnectStart
+
+	if got := vm.State(); got.StatusText != "正在关闭" || got.ButtonText != "正在关闭" || got.ButtonEnabled {
+		t.Fatalf("disconnect busy state = %#v", got)
+	}
+
+	close(client.disconnectGate)
+	<-done
+
+	if client.disconnectCalls() != 1 {
+		t.Fatalf("Disconnect() calls = %d, want 1", client.disconnectCalls())
+	}
+	if got := vm.State(); got.StatusText != "未连接" || got.ButtonText != "开启海外访问" || !got.ButtonEnabled {
+		t.Fatalf("final state = %#v", got)
+	}
+}
+
+func TestViewModelShowsDisconnectBusyStateAndThenError(t *testing.T) {
+	client := &fakeServiceClient{
+		statusResult:    clientapi.Status{State: accessmodel.StateConnected},
+		disconnectErr:   clientapi.ErrServiceUnavailable,
+		disconnectGate:  make(chan struct{}),
+		disconnectStart: make(chan struct{}, 1),
+	}
+	vm := NewViewModel(client, nil)
+	vm.setStatus(client.statusResult)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := vm.Toggle(context.Background()); err != nil {
+			t.Errorf("Toggle() error = %v", err)
+		}
+	}()
+	<-client.disconnectStart
+
+	if got := vm.State(); got.StatusText != "正在关闭" || got.ButtonText != "正在关闭" || got.ButtonEnabled {
+		t.Fatalf("disconnect busy state = %#v", got)
+	}
+
+	close(client.disconnectGate)
+	<-done
+
+	if got := vm.State(); got.StatusText != "连接失败" || got.DetailText != "无法连接海外访问服务器" || got.ButtonText != "重试" || !got.ButtonEnabled {
+		t.Fatalf("final error state = %#v", got)
+	}
+}
+
 func TestViewModelCloseLeavesServiceConnectionUnchanged(t *testing.T) {
 	client := &fakeServiceClient{statusResult: clientapi.Status{State: accessmodel.StateConnected}}
 	vm := NewViewModel(client, nil)
@@ -211,6 +276,8 @@ type fakeServiceClient struct {
 	disconnectCount   int
 	connectGate       chan struct{}
 	started           chan struct{}
+	disconnectGate    chan struct{}
+	disconnectStart   chan struct{}
 }
 
 func (f *fakeServiceClient) Status(context.Context) (clientapi.Status, error) {
@@ -239,9 +306,19 @@ func (f *fakeServiceClient) Connect(context.Context) (clientapi.Status, error) {
 
 func (f *fakeServiceClient) Disconnect(context.Context) (clientapi.Status, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.disconnectCount++
-	return f.disconnectResult, f.disconnectErr
+	gate := f.disconnectGate
+	started := f.disconnectStart
+	result := f.disconnectResult
+	err := f.disconnectErr
+	f.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if gate != nil {
+		<-gate
+	}
+	return result, err
 }
 
 func (f *fakeServiceClient) Diagnostics(context.Context) (clientapi.Diagnostics, error) {
