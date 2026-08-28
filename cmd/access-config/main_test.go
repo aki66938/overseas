@@ -66,6 +66,108 @@ func TestRunHashPolicyPrintsLowercaseSHA256(t *testing.T) {
 	}
 }
 
+func TestRunRenderServerWritesConfigAndAclHint(t *testing.T) {
+	policyPath := writePolicyFile(t, validPolicyYAML)
+	outputPath := filepath.Join(t.TempDir(), "server.json")
+
+	var stdout, stderr bytes.Buffer
+	code := run(
+		[]string{
+			"render-server",
+			"-in", policyPath,
+			"-node", "vm101",
+			"-listen", "0.0.0.0",
+			"-upstream", "127.0.0.1:8080",
+			"-out", outputPath,
+			"-secret-stdin",
+		},
+		bytes.NewBufferString("MDEyMzQ1Njc4OWFiY2RlZg==\n"),
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no error output", stderr.String())
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if matched := regexp.MustCompile(`"final":"telecom"`).Match(contents); !matched {
+		t.Fatalf("rendered config = %q, want telecom route final", string(contents))
+	}
+	if matched := regexp.MustCompile(`CONFIG_WRITTEN`).Match(stdout.Bytes()); !matched {
+		t.Fatalf("stdout = %q, want config write confirmation", stdout.String())
+	}
+	if matched := regexp.MustCompile(`APPLY_SERVICE_ONLY_ACL`).Match(stdout.Bytes()); !matched {
+		t.Fatalf("stdout = %q, want ACL hint", stdout.String())
+	}
+}
+
+func TestRunRenderClientWritesConfigAndAclHint(t *testing.T) {
+	policyPath := writePolicyFile(t, validPolicyYAML)
+	outputPath := filepath.Join(t.TempDir(), "client.json")
+
+	var stdout, stderr bytes.Buffer
+	code := run(
+		[]string{
+			"render-client",
+			"-in", policyPath,
+			"-node", "vm101",
+			"-out", outputPath,
+			"-secret-stdin",
+		},
+		bytes.NewBufferString("MDEyMzQ1Njc4OWFiY2RlZg==\n"),
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no error output", stderr.String())
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if matched := regexp.MustCompile(`"final":"tunnel"`).Match(contents); !matched {
+		t.Fatalf("rendered config = %q, want tunnel route final", string(contents))
+	}
+	if matched := regexp.MustCompile(`CONFIG_WRITTEN`).Match(stdout.Bytes()); !matched {
+		t.Fatalf("stdout = %q, want config write confirmation", stdout.String())
+	}
+	if matched := regexp.MustCompile(`APPLY_SERVICE_ONLY_ACL`).Match(stdout.Bytes()); !matched {
+		t.Fatalf("stdout = %q, want ACL hint", stdout.String())
+	}
+}
+
+func TestRunRenderCommandsRequireDedicatedSecretSource(t *testing.T) {
+	policyPath := writePolicyFile(t, validPolicyYAML)
+	outputPath := filepath.Join(t.TempDir(), "client.json")
+
+	var stdout, stderr bytes.Buffer
+	code := run(
+		[]string{
+			"render-client",
+			"-in", policyPath,
+			"-node", "vm101",
+			"-out", outputPath,
+		},
+		bytes.NewBuffer(nil),
+		&stdout,
+		&stderr,
+	)
+	if code != 2 {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if matched := regexp.MustCompile(`USAGE`).Match(stderr.Bytes()); !matched {
+		t.Fatalf("stderr = %q, want usage guidance", stderr.String())
+	}
+}
+
 func writePolicyFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "access-poc.yaml")

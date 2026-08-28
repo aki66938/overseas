@@ -1,0 +1,22 @@
+schema_version: 1
+mode: poc
+nodes:
+  - id: vm101
+    address: 172.20.9.15
+    port: 18443
+    priority: 10
+corporate_cidrs:
+  - 172.20.8.0/22
+corporate_dns:
+  - 172.20.10.1
+internal_suffixes:
+  - ad.intra.regen-bio.com
+  - svc.intra.regen-bio.com
+block_udp: true
+block_quic: true
+credential:
+  kind: dpapi-file
+  path: C:\ProgramData\RegenBio\OverseasAccess\credential.bin
+
+# Non-secret render inputs for the VM sing-box server:
+#   access-config render-server -in deploy/server/server-policy.example.yaml -node vm101 -listen 0.0.0.0 -upstream 127.0.0.1:8080 -out C:\ProgramData\RegenBio\OverseasAccessServer\config.json -secret-handle <inherited handle>
