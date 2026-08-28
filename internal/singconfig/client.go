@@ -50,9 +50,10 @@ type clientRouteConfig struct {
 }
 
 type clientDNSConfig struct {
-	Servers []dnsServer `json:"servers"`
-	Rules   []dnsRule   `json:"rules,omitempty"`
-	Final   string      `json:"final"`
+	Servers        []dnsServer `json:"servers"`
+	Rules          []dnsRule   `json:"rules,omitempty"`
+	Final          string      `json:"final"`
+	ReverseMapping bool        `json:"reverse_mapping"`
 }
 
 type dnsServer struct {
@@ -174,6 +175,11 @@ func RenderClient(input ClientInput) ([]byte, error) {
 					Outbound: "direct",
 				},
 				{
+					DomainSuffix: internalSuffixes,
+					Action:       "route",
+					Outbound:     "direct",
+				},
+				{
 					Network: []string{"udp"},
 					Port:    []int{443},
 					Action:  "reject",
@@ -191,9 +197,10 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Final: "tunnel",
 		},
 		DNS: clientDNSConfig{
-			Servers: dnsServers,
-			Rules:   dnsRules,
-			Final:   "public-dns",
+			Servers:        dnsServers,
+			Rules:          dnsRules,
+			Final:          "public-dns",
+			ReverseMapping: true,
 		},
 	}
 	return json.Marshal(config)
@@ -253,6 +260,9 @@ func canonicalCorporateDNS(values []string) ([]string, error) {
 		}
 		if addr.IsLoopback() || addr.IsMulticast() || addr.IsUnspecified() {
 			return nil, fmt.Errorf("corporate DNS must not contain loopback, multicast, or unspecified addresses")
+		}
+		if !addr.Is4() {
+			return nil, fmt.Errorf("corporate DNS must contain IPv4 addresses for the Windows PoC")
 		}
 		canonical := addr.String()
 		if _, exists := seen[canonical]; exists {

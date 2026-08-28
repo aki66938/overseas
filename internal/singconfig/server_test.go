@@ -108,9 +108,10 @@ type renderedConfig struct {
 		Rules []map[string]any `json:"rules"`
 	} `json:"route"`
 	DNS struct {
-		Servers []map[string]any `json:"servers"`
-		Rules   []map[string]any `json:"rules"`
-		Final   string           `json:"final"`
+		Servers        []map[string]any `json:"servers"`
+		Rules          []map[string]any `json:"rules"`
+		Final          string           `json:"final"`
+		ReverseMapping any              `json:"reverse_mapping"`
 	} `json:"dns"`
 }
 

@@ -59,11 +59,12 @@ type routeConfig struct {
 }
 
 type routeRule struct {
-	IPCIDR   []string `json:"ip_cidr,omitempty"`
-	Network  []string `json:"network,omitempty"`
-	Port     []int    `json:"port,omitempty"`
-	Action   string   `json:"action"`
-	Outbound string   `json:"outbound,omitempty"`
+	IPCIDR       []string `json:"ip_cidr,omitempty"`
+	DomainSuffix []string `json:"domain_suffix,omitempty"`
+	Network      []string `json:"network,omitempty"`
+	Port         []int    `json:"port,omitempty"`
+	Action       string   `json:"action"`
+	Outbound     string   `json:"outbound,omitempty"`
 }
 
 func RenderServer(input ServerInput) ([]byte, error) {

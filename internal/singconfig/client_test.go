@@ -53,16 +53,17 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 		t.Fatalf("outbound[1].network = %q, want tcp", got)
 	}
 
-	if len(config.Route.Rules) != 5 {
-		t.Fatalf("route.rules = %d, want 5", len(config.Route.Rules))
+	if len(config.Route.Rules) != 6 {
+		t.Fatalf("route.rules = %d, want 6", len(config.Route.Rules))
 	}
-	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[2], nil, []string{"udp"}, []int{443}, "")
-	assertRejectAction(t, config.Route.Rules[2])
-	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, nil, "")
+	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[2], nil, nil, nil, []string{"ad.intra.regen-bio.com"}, "direct")
+	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, []int{443}, nil, "")
 	assertRejectAction(t, config.Route.Rules[3])
-	assertRouteRule(t, config.Route.Rules[4], nil, []string{"tcp"}, nil, "tunnel")
+	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, nil, nil, "")
+	assertRejectAction(t, config.Route.Rules[4])
+	assertRouteRule(t, config.Route.Rules[5], nil, []string{"tcp"}, nil, nil, "tunnel")
 	if config.Route.Final != "tunnel" {
 		t.Fatalf("route.final = %q, want tunnel", config.Route.Final)
 	}
@@ -78,6 +79,9 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	}
 	if len(config.DNS.Rules) != 1 {
 		t.Fatalf("dns.rules = %d, want 1", len(config.DNS.Rules))
+	}
+	if got, ok := config.DNS.ReverseMapping.(bool); !ok || !got {
+		t.Fatalf("dns.reverse_mapping = %#v, want true", config.DNS.ReverseMapping)
 	}
 	rule := config.DNS.Rules[0]
 	assertStringSlice(t, rule["domain_suffix"], []string{"ad.intra.regen-bio.com"})
@@ -130,6 +134,18 @@ func TestRenderClientRejectsInvalidNodeOrCredential(t *testing.T) {
 			Method:           "2022-blake3-aes-128-gcm",
 			Password:         "AQIDBA==",
 		},
+		{
+			Node: accessmodel.Node{
+				ID:      "vm101",
+				Address: "172.20.9.15",
+				Port:    18443,
+			},
+			CorporateCIDRs:   []string{"172.20.8.0/22"},
+			CorporateDNS:     []string{"2001:db8::53"},
+			InternalSuffixes: []string{"ad.intra.regen-bio.com"},
+			Method:           "2022-blake3-aes-128-gcm",
+			Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
+		},
 	}
 
 	for i, input := range tests {
@@ -149,7 +165,7 @@ func mustRenderClient(t *testing.T, input singconfig.ClientInput) []byte {
 	return contents
 }
 
-func assertRouteRule(t *testing.T, rule map[string]any, wantCIDRs, wantNetwork []string, wantPorts []int, wantOutbound string) {
+func assertRouteRule(t *testing.T, rule map[string]any, wantCIDRs, wantNetwork []string, wantPorts []int, wantDomainSuffix []string, wantOutbound string) {
 	t.Helper()
 
 	if wantCIDRs == nil {
@@ -174,6 +190,14 @@ func assertRouteRule(t *testing.T, rule map[string]any, wantCIDRs, wantNetwork [
 		}
 	} else {
 		assertIntSlice(t, rule["port"], wantPorts)
+	}
+
+	if wantDomainSuffix == nil {
+		if _, ok := rule["domain_suffix"]; ok {
+			t.Fatalf("domain_suffix unexpectedly present in %#v", rule)
+		}
+	} else {
+		assertStringSlice(t, rule["domain_suffix"], wantDomainSuffix)
 	}
 
 	if wantOutbound == "" {
