@@ -51,7 +51,7 @@ $FirewallAllowEmployee = 'RegenBioOverseasAccess-AllowEmployee-In'
 $FirewallBlock8080 = 'RegenBioOverseasAccess-Block8080-Remote'
 $FirewallBlockManagement = 'RegenBioOverseasAccess-BlockManagement-Employee'
 $FirewallNames = @($FirewallAllowEmployee, $FirewallBlock8080, $FirewallBlockManagement)
-$ManagementPorts = '22,3389,5985,5986'
+$ManagementPorts = @('22', '3389', '5985', '5986')
 $OwnershipPrefix = 'RegenBioOverseasAccessServer;TransactionId='
 
 function ConvertTo-ServerJson {
@@ -229,13 +229,15 @@ function Test-PortSpecificationIncludes {
         [Parameter(Mandatory = $true)] [int] $Port
     )
 
-    foreach ($entry in @([string] $Specification -split ',')) {
-        $trimmed = $entry.Trim()
-        if ($trimmed -eq 'Any' -or $trimmed -eq [string] $Port) { return $true }
-        if ($trimmed -match '^(?<rangeStart>\d+)-(?<rangeEnd>\d+)$') {
-            $rangeStart = [int] $Matches.rangeStart
-            $rangeEnd = [int] $Matches.rangeEnd
-            if ($Port -ge $rangeStart -and $Port -le $rangeEnd) { return $true }
+    foreach ($specificationValue in @($Specification)) {
+        foreach ($entry in @([string] $specificationValue -split ',')) {
+            $trimmed = $entry.Trim()
+            if ($trimmed -eq 'Any' -or $trimmed -eq [string] $Port) { return $true }
+            if ($trimmed -match '^(?<rangeStart>\d+)-(?<rangeEnd>\d+)$') {
+                $rangeStart = [int] $Matches.rangeStart
+                $rangeEnd = [int] $Matches.rangeEnd
+                if ($Port -ge $rangeStart -and $Port -le $rangeEnd) { return $true }
+            }
         }
     }
     return $false
@@ -525,10 +527,10 @@ function Remove-OwnedService {
 }
 
 function Remove-OwnedDirectory {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
-        [Parameter(Mandatory = $true)] [string] $TransactionId,
-        [switch] $AllowEmptyUnmarked
+        [Parameter(Mandatory = $true)] [string] $TransactionId
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
@@ -539,8 +541,8 @@ function Remove-OwnedDirectory {
             throw "Refusing to remove directory with an invalid owner marker: $Path"
         }
     }
-    elseif (-not $AllowEmptyUnmarked -or @(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
-        throw "Refusing to remove unmarked nonempty directory: $Path"
+    else {
+        throw "Refusing to remove an unmarked directory: $Path"
     }
     Remove-Item -LiteralPath $Path -Recurse -Force -Confirm:$false -ErrorAction Stop
 }
@@ -574,16 +576,34 @@ function Compensate-InstallTransaction {
 
     if ($serviceRemovalProven) {
         if ($Owned.DataRoot -or (Test-Path -LiteralPath $DataRoot)) {
-            try { Remove-OwnedDirectory -Path $DataRoot -TransactionId $TransactionId -AllowEmptyUnmarked } catch { $errors.Add($_.Exception.Message) }
+            try { Remove-OwnedDirectory -Path $DataRoot -TransactionId $TransactionId } catch { $errors.Add($_.Exception.Message) }
         }
         if ($Owned.InstallRoot -or (Test-Path -LiteralPath $InstallRoot)) {
-            try { Remove-OwnedDirectory -Path $InstallRoot -TransactionId $TransactionId -AllowEmptyUnmarked } catch { $errors.Add($_.Exception.Message) }
+            try { Remove-OwnedDirectory -Path $InstallRoot -TransactionId $TransactionId } catch { $errors.Add($_.Exception.Message) }
         }
     }
 
     if ($errors.Count -ne 0) {
         throw ('Install compensation was incomplete: ' + ($errors -join '; '))
     }
+}
+
+function New-ManagementFirewallRule {
+    param([Parameter(Mandatory = $true)] [string] $OwnershipDescription)
+
+    New-NetFirewallRule `
+        -Name $FirewallBlockManagement `
+        -DisplayName 'RegenBio Overseas Access - block employee management access' `
+        -Description $OwnershipDescription `
+        -Direction Inbound `
+        -Action Block `
+        -Enabled True `
+        -Profile Any `
+        -Protocol TCP `
+        -LocalPort $ManagementPorts `
+        -RemoteAddress $ExpectedEmployeeCIDR `
+        -Confirm:$false `
+        -ErrorAction Stop | Out-Null
 }
 
 function Install-ServerTransaction {
@@ -760,19 +780,7 @@ function Install-ServerTransaction {
             -ErrorAction Stop | Out-Null
         $owned.FirewallRules.Add($FirewallBlock8080)
 
-        New-NetFirewallRule `
-            -Name $FirewallBlockManagement `
-            -DisplayName 'RegenBio Overseas Access - block employee management access' `
-            -Description $ownershipDescription `
-            -Direction Inbound `
-            -Action Block `
-            -Enabled True `
-            -Profile Any `
-            -Protocol TCP `
-            -LocalPort $ManagementPorts `
-            -RemoteAddress $EmployeeCIDR `
-            -Confirm:$false `
-            -ErrorAction Stop | Out-Null
+        New-ManagementFirewallRule -OwnershipDescription $ownershipDescription
         $owned.FirewallRules.Add($FirewallBlockManagement)
 
         Start-Service -Name $ServiceName -Confirm:$false -ErrorAction Stop
@@ -930,8 +938,8 @@ function Rollback-ServerTransaction {
         }
     }
 
-    Remove-OwnedDirectory -Path $DataRoot -TransactionId $transactionId -AllowEmptyUnmarked
-    Remove-OwnedDirectory -Path $InstallRoot -TransactionId $transactionId -AllowEmptyUnmarked
+    Remove-OwnedDirectory -Path $DataRoot -TransactionId $transactionId
+    Remove-OwnedDirectory -Path $InstallRoot -TransactionId $transactionId
     if ((Test-Path -LiteralPath $DataRoot) -or (Test-Path -LiteralPath $InstallRoot)) {
         throw 'Rollback could not prove removal of transaction-owned directories.'
     }

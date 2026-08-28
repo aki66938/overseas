@@ -463,12 +463,17 @@ Describe 'Transactional server behavioral refusal gates' {
             return [pscustomobject] @{ StatusCode = 204 }
         }
         Mock Get-NetFirewallRule {
-            if ($global:Task7NegativeScenario -eq 'Firewall' -and [string]::IsNullOrWhiteSpace([string] $Name)) {
+            if ($global:Task7NegativeScenario -in @('Firewall', 'FirewallMulti') -and [string]::IsNullOrWhiteSpace([string] $Name)) {
                 return $global:Task7BroadRule
             }
             return @()
         }
-        Mock Get-NetFirewallPortFilter { return [pscustomobject] @{ Protocol = 'TCP'; LocalPort = '18000-19000' } }
+        Mock Get-NetFirewallPortFilter {
+            if ($global:Task7NegativeScenario -eq 'FirewallMulti') {
+                return [pscustomobject] @{ Protocol = 'TCP'; LocalPort = @('443', '18443') }
+            }
+            return [pscustomobject] @{ Protocol = 'TCP'; LocalPort = '18000-19000' }
+        }
         Mock Get-NetFirewallApplicationFilter { return [pscustomobject] @{ Program = 'Any' } }
         Mock Get-NetFirewallServiceFilter { return [pscustomobject] @{ Service = 'RegenBioOverseasAccessServer' } }
         Mock Get-NetFirewallAddressFilter { return [pscustomobject] @{ RemoteAddress = 'Any' } }
@@ -493,7 +498,8 @@ Describe 'Transactional server behavioral refusal gates' {
             [pscustomobject] @{ Scenario = 'Owner8080'; Hash = $singHash; Pattern = 'loopback-only' },
             [pscustomobject] @{ Scenario = 'Connect'; Hash = $singHash; Pattern = 'CONNECT refused by test' },
             [pscustomobject] @{ Scenario = 'ServerPort'; Hash = $singHash; Pattern = 'already has a listener' },
-            [pscustomobject] @{ Scenario = 'Firewall'; Hash = $singHash; Pattern = 'can expose TCP 18443' }
+            [pscustomobject] @{ Scenario = 'Firewall'; Hash = $singHash; Pattern = 'can expose TCP 18443' },
+            [pscustomobject] @{ Scenario = 'FirewallMulti'; Hash = $singHash; Pattern = 'can expose TCP 18443' }
         )) {
             $global:Task7NegativeScenario = $case.Scenario
             $message = & $invokeInstall $case.Hash
@@ -502,5 +508,98 @@ Describe 'Transactional server behavioral refusal gates' {
 
         Assert-MockCalled New-Service -Times 0 -Exactly -Scope It
         Assert-MockCalled New-NetFirewallRule -Times 0 -Exactly -Scope It
+    }
+}
+
+Describe 'Server firewall and directory ownership units' {
+    It 'passes management ports to New-NetFirewallRule as four separate values' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
+        $definition = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'New-ManagementFirewallRule'
+        }, $true))[0]
+        $null -ne $definition | Should Be $true
+        if ($null -eq $definition) { return }
+        . ([scriptblock]::Create($definition.Extent.Text))
+
+        $managementAssignment = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq 'ManagementPorts'
+        }, $true))[0]
+        . ([scriptblock]::Create($managementAssignment.Extent.Text))
+
+        $FirewallBlockManagement = 'RegenBioOverseasAccess-BlockManagement-Employee'
+        $ExpectedEmployeeCIDR = '172.20.8.0/22'
+        Mock New-NetFirewallRule { return [pscustomobject] @{ Name = $Name } }
+
+        New-ManagementFirewallRule -OwnershipDescription 'RegenBioOverseasAccessServer;TransactionId=test' | Out-Null
+
+        Assert-MockCalled New-NetFirewallRule -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Name -eq 'RegenBioOverseasAccess-BlockManagement-Employee' -and
+            $Direction -eq 'Inbound' -and $Action -eq 'Block' -and
+            $RemoteAddress -eq '172.20.8.0/22' -and
+            (@($LocalPort) -join ',') -eq '22,3389,5985,5986' -and
+            @($LocalPort).Count -eq 4
+        }
+    }
+
+    It 'recognizes exact ports, ranges, and Any across CIM multi-value arrays' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
+        $definition = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Test-PortSpecificationIncludes'
+        }, $true))[0]
+        . ([scriptblock]::Create($definition.Extent.Text))
+        (Test-PortSpecificationIncludes -Specification @('443', '18443') -Port 18443) | Should Be $true
+        (Test-PortSpecificationIncludes -Specification @('80', '18000-19000') -Port 18443) | Should Be $true
+        (Test-PortSpecificationIncludes -Specification @('80', 'Any') -Port 18443) | Should Be $true
+        (Test-PortSpecificationIncludes -Specification @('443', '8443') -Port 18443) | Should Be $false
+    }
+
+    It 'never removes an empty directory whose transaction marker was not published' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
+        $definition = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Remove-OwnedDirectory'
+        }, $true))[0]
+        $unitDefinition = $definition.Extent.Text -replace '^function Remove-OwnedDirectory', 'function Invoke-RemoveOwnedDirectoryUnderTest'
+        . ([scriptblock]::Create($unitDefinition))
+        @($definition.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) -contains 'AllowEmptyUnmarked' | Should Be $false
+
+        $OwnerMarkerName = 'owner.json'
+        $transactionId = [guid]::NewGuid().ToString('D')
+        $partialDirectory = Join-Path $TestDrive 'created-before-marker'
+        New-Item -ItemType Directory -Path $partialDirectory | Out-Null
+
+        $failureMessage = ''
+        try {
+            Invoke-RemoveOwnedDirectoryUnderTest -Path $partialDirectory -TransactionId $transactionId
+        }
+        catch {
+            $failureMessage = $_.Exception.Message
+        }
+        $failureMessage | Should Match 'unmarked directory'
+        (Test-Path -LiteralPath $partialDirectory -PathType Container) | Should Be $true
+
+        $markedDirectory = Join-Path $TestDrive 'marked-owned-directory'
+        New-Item -ItemType Directory -Path $markedDirectory | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $markedDirectory $OwnerMarkerName),
+            ([ordered] @{ Kind = 'RegenBioOverseasAccessServerOwner'; TransactionId = $transactionId } | ConvertTo-Json),
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Invoke-RemoveOwnedDirectoryUnderTest -Path $markedDirectory -TransactionId $transactionId
+        (Test-Path -LiteralPath $markedDirectory) | Should Be $false
     }
 }
