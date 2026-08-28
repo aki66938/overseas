@@ -56,17 +56,21 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 		t.Fatalf("outbound[1].network = %q, want tcp", got)
 	}
 
-	if len(config.Route.Rules) != 6 {
-		t.Fatalf("route.rules = %d, want 6", len(config.Route.Rules))
+	if len(config.Route.Rules) != 7 {
+		t.Fatalf("route.rules = %d, want 7", len(config.Route.Rules))
 	}
 	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
 	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
 	assertRouteRule(t, config.Route.Rules[2], nil, nil, nil, []string{"ad.intra.regen-bio.com"}, "direct")
-	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, []int{443}, nil, "")
-	assertRejectAction(t, config.Route.Rules[3])
-	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, nil, nil, "")
+	assertRouteRule(t, config.Route.Rules[3], nil, nil, []int{53}, nil, "")
+	if got := stringValue(t, config.Route.Rules[3]["action"]); got != "hijack-dns" {
+		t.Fatalf("DNS action = %q, want hijack-dns", got)
+	}
+	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, []int{443}, nil, "")
 	assertRejectAction(t, config.Route.Rules[4])
-	assertRouteRule(t, config.Route.Rules[5], nil, []string{"tcp"}, nil, nil, "tunnel")
+	assertRouteRule(t, config.Route.Rules[5], nil, []string{"udp"}, nil, nil, "")
+	assertRejectAction(t, config.Route.Rules[5])
+	assertRouteRule(t, config.Route.Rules[6], nil, []string{"tcp"}, nil, nil, "tunnel")
 	if config.Route.Final != "tunnel" {
 		t.Fatalf("route.final = %q, want tunnel", config.Route.Final)
 	}
@@ -97,6 +101,28 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if config.DNS.Final != "public-dns" {
 		t.Fatalf("dns.final = %q, want public-dns", config.DNS.Final)
 	}
+}
+
+func TestClientHijacksSystemDNSBeforeRejectingPublicUDP(t *testing.T) {
+	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
+		Node:             accessmodel.Node{ID: "vm101", Address: "172.20.9.15", Port: 18443},
+		CorporateCIDRs:   []string{"172.20.8.0/22"},
+		CorporateDNS:     []string{"172.20.9.1"},
+		InternalSuffixes: []string{"ad.intra.regen-bio.com"},
+		Method:           "2022-blake3-aes-128-gcm",
+		Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
+	}))
+
+	for index, rule := range config.Route.Rules {
+		if action, _ := rule["action"].(string); action == "hijack-dns" {
+			assertIntSlice(t, rule["port"], []int{53})
+			if index >= len(config.Route.Rules)-2 {
+				t.Fatalf("DNS hijack rule appears after UDP rejection: index %d", index)
+			}
+			return
+		}
+	}
+	t.Fatal("route rules do not contain a DNS hijack action")
 }
 
 func TestRenderClientRejectsInvalidNodeOrCredential(t *testing.T) {
@@ -171,16 +197,20 @@ func TestRenderClientOmitsInternalSuffixDirectRuleWhenNoSuffixesConfigured(t *te
 		Password:       "MDEyMzQ1Njc4OWFiY2RlZg==",
 	}))
 
-	if len(config.Route.Rules) != 5 {
-		t.Fatalf("route.rules = %d, want 5", len(config.Route.Rules))
+	if len(config.Route.Rules) != 6 {
+		t.Fatalf("route.rules = %d, want 6", len(config.Route.Rules))
 	}
 	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
 	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[2], nil, []string{"udp"}, []int{443}, nil, "")
-	assertRejectAction(t, config.Route.Rules[2])
-	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, nil, nil, "")
+	assertRouteRule(t, config.Route.Rules[2], nil, nil, []int{53}, nil, "")
+	if got := stringValue(t, config.Route.Rules[2]["action"]); got != "hijack-dns" {
+		t.Fatalf("DNS action = %q, want hijack-dns", got)
+	}
+	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, []int{443}, nil, "")
 	assertRejectAction(t, config.Route.Rules[3])
-	assertRouteRule(t, config.Route.Rules[4], nil, []string{"tcp"}, nil, nil, "tunnel")
+	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, nil, nil, "")
+	assertRejectAction(t, config.Route.Rules[4])
+	assertRouteRule(t, config.Route.Rules[5], nil, []string{"tcp"}, nil, nil, "tunnel")
 	for _, rule := range config.Route.Rules {
 		if _, ok := rule["domain_suffix"]; ok {
 			t.Fatalf("unexpected domain_suffix direct rule in %#v", rule)

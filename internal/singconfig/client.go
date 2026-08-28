@@ -177,6 +177,10 @@ func RenderClient(input ClientInput) ([]byte, error) {
 					Outbound: "direct",
 				},
 				{
+					Port:   []int{53},
+					Action: "hijack-dns",
+				},
+				{
 					Network: []string{"udp"},
 					Port:    []int{443},
 					Action:  "reject",
