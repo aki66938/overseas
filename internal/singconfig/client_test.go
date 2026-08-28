@@ -42,6 +42,9 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if got := stringValue(t, direct["type"]); got != "direct" {
 		t.Fatalf("outbound[0].type = %q, want direct", got)
 	}
+	if got := stringValue(t, direct["domain_resolver"]); got != "corp-dns" {
+		t.Fatalf("outbound[0].domain_resolver = %q, want corp-dns", got)
+	}
 	tunnel := config.Outbounds[1]
 	if got := stringValue(t, tunnel["type"]); got != "shadowsocks" {
 		t.Fatalf("outbound[1].type = %q, want shadowsocks", got)

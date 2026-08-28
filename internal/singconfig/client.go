@@ -35,13 +35,14 @@ type clientInbound struct {
 }
 
 type clientOutbound struct {
-	Type       string `json:"type"`
-	Tag        string `json:"tag"`
-	Server     string `json:"server,omitempty"`
-	ServerPort uint16 `json:"server_port,omitempty"`
-	Method     string `json:"method,omitempty"`
-	Password   string `json:"password,omitempty"`
-	Network    string `json:"network,omitempty"`
+	Type           string `json:"type"`
+	Tag            string `json:"tag"`
+	Server         string `json:"server,omitempty"`
+	ServerPort     uint16 `json:"server_port,omitempty"`
+	Method         string `json:"method,omitempty"`
+	Password       string `json:"password,omitempty"`
+	Network        string `json:"network,omitempty"`
+	DomainResolver string `json:"domain_resolver,omitempty"`
 }
 
 type clientRouteConfig struct {
@@ -149,8 +150,9 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		}},
 		Outbounds: []clientOutbound{
 			{
-				Type: "direct",
-				Tag:  "direct",
+				Type:           "direct",
+				Tag:            "direct",
+				DomainResolver: directDomainResolverTag(corporateDNS),
 			},
 			{
 				Type:       "shadowsocks",
@@ -293,4 +295,11 @@ func canonicalInternalSuffixes(values []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func directDomainResolverTag(corporateDNS []string) string {
+	if len(corporateDNS) == 0 {
+		return ""
+	}
+	return "corp-dns"
 }

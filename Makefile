@@ -1,3 +1,5 @@
+export PATH := C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin;$(PATH)
+
 .PHONY: test build
 
 test:
