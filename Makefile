@@ -6,12 +6,19 @@ SIGNTOOL ?= signtool.exe
 SIGNING_CERT_THUMBPRINT ?=
 
 .PHONY: test build
+.PHONY: test-integration-preflight test-integration-live
 .PHONY: msi release-msi inspect-msi prepare-client-payload build-client-binaries
 .PHONY: generate-client-resources build-client verify-client-manifest build-server-service package-server-service test-server-install test-client-install
 
 test:
 	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('test','./...'); exit $$LASTEXITCODE"
 	pwsh -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester tests/powershell -Output Detailed } else { Invoke-Pester -Script tests/powershell -Verbose }"
+
+test-integration-preflight:
+	pwsh -NoProfile -Command "Remove-Item Env:OVERSEAS_ACCESS_INTEGRATION -ErrorAction SilentlyContinue; & '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('test','-count=1','./tests/integration'); exit $$LASTEXITCODE"
+
+test-integration-live:
+	pwsh -NoProfile -Command "if ($$env:OVERSEAS_ACCESS_INTEGRATION -ne '1') { throw 'Set OVERSEAS_ACCESS_INTEGRATION=1 explicitly before invoking the live target.' }; & '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('test','-count=1','-v','./tests/integration'); exit $$LASTEXITCODE"
 
 build:
 	$(MAKE) build-client-binaries
