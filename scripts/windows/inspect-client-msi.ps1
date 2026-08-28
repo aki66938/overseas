@@ -91,6 +91,29 @@ foreach ($sddl in $expectedSddl) { if (@($aclRows | Where-Object { $_[3] -eq $sd
 $propertyRows = @(Get-MsiTableRows 'Property')
 $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } | ForEach-Object { $_[1] })
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
-foreach ($table in @('CustomAction','ServiceInstall','ServiceControl','Registry','Wix4FirewallException','Upgrade')) { [void] @(Get-MsiTableRows $table) }
+$customActions = @(Get-MsiTableRows 'CustomAction')
+$packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackageTrust' -and $_[1] -eq '2' -and $_[2] -eq 'InstallerVerifierBinary' })
+$payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' })
+if ($packageTrustActions.Count -ne 1 -or $payloadTrustActions.Count -ne 1) { throw 'First-party trust custom actions are invalid.' }
+$packageThumbprintMatch = [regex]::Match([string] $packageTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
+$payloadThumbprintMatch = [regex]::Match([string] $payloadTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
+if (-not $packageThumbprintMatch.Success -or -not $payloadThumbprintMatch.Success) { throw 'Embedded corporate trust anchor is absent.' }
+$embeddedCorporateThumbprint = $packageThumbprintMatch.Groups[1].Value.ToUpperInvariant()
+if ($payloadThumbprintMatch.Groups[1].Value.ToUpperInvariant() -ne $embeddedCorporateThumbprint) { throw 'Package and payload trust anchors differ.' }
+if ($manifest.mode -eq 'release') {
+    if ($trustMode[0] -ne 'RELEASE_SIGNED' -or $embeddedCorporateThumbprint -eq ('0' * 40)) { throw 'Release trust metadata is invalid.' }
+    $msiSignature = Get-AuthenticodeSignature -LiteralPath $MsiPath
+    if ($msiSignature.Status -ne 'Valid' -or $null -eq $msiSignature.SignerCertificate -or $msiSignature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $embeddedCorporateThumbprint) {
+        throw 'Release MSI signature does not match its embedded trust anchor.'
+    }
+    if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or
+        $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $embeddedCorporateThumbprint) {
+        throw 'Release manifest signer does not match the embedded trust anchor.'
+    }
+}
+elseif ($trustMode[0] -ne 'INSPECT_ONLY_REFUSES_INSTALL' -or $embeddedCorporateThumbprint -ne ('0' * 40)) {
+    throw 'Inspect-only MSI does not contain the fail-closed trust sentinel.'
+}
+foreach ($table in @('ServiceInstall','ServiceControl','Registry','Wix4FirewallException','Upgrade')) { [void] @(Get-MsiTableRows $table) }
 $database.Dispose()
 [ordered] @{ msi_sha256 = (Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash; payload_count = $map.Count; mode = $manifest.mode; source_commit = $manifest.source_commit } | ConvertTo-Json -Compress

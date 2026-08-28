@@ -422,6 +422,9 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match '\$binaryForbiddenContent'
         $text | Should Match '\$textExtensions'
         $text | Should Match 'if\s*\(\(?\$textExtensions\s+-contains\s+\$file\.Extension'
+        $text | Should Match '\$embeddedCorporateThumbprint'
+        $text | Should Match 'manifest\.mode\s+-eq\s+''release''[\s\S]*Get-AuthenticodeSignature\s+-LiteralPath\s+\$MsiPath'
+        $text | Should Match 'SignerInfos\[0\]\.Certificate\.Thumbprint[\s\S]*embeddedCorporateThumbprint'
     }
 
     It 'exposes separate inspect-only and externally signed release MSI targets' {
