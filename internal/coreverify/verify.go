@@ -38,6 +38,7 @@ type signatureMetadata struct {
 }
 
 var (
+	lstatPath           = os.Lstat
 	inspectSecurity     = inspectSecurityWithPowerShell
 	inspectAuthenticode = inspectAuthenticodeWithPowerShell
 )
@@ -97,7 +98,7 @@ func Verify(path string, expectedSHA256 string, signerAllowlist []string) error 
 }
 
 func openRegularFileNoReparse(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
+	info, err := lstatPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}

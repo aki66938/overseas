@@ -5,10 +5,12 @@ package coreverify
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVerify(t *testing.T) {
@@ -114,11 +116,16 @@ func TestVerifyRejectsDirectory(t *testing.T) {
 }
 
 func TestVerifyRejectsReparsePoint(t *testing.T) {
-	targetPath, targetHash := writeTestPE(t)
-	linkPath := filepath.Join(t.TempDir(), "sing-box-link.exe")
-	if err := os.Symlink(targetPath, linkPath); err != nil {
-		t.Skipf("symlink creation unavailable: %v", err)
-	}
+	_, targetHash := writeTestPE(t)
+	reparsePath := filepath.Join(t.TempDir(), "sing-box-link.exe")
+
+	restoreLstat := installLstatTestSeam(func(path string) (fs.FileInfo, error) {
+		if path == reparsePath {
+			return fakeFileInfo{name: filepath.Base(reparsePath), mode: fs.ModeSymlink}, nil
+		}
+		return os.Lstat(path)
+	})
+	t.Cleanup(restoreLstat)
 
 	restore := installTestSeams(
 		func(string) (securityMetadata, error) { return securityMetadata{OwnerSID: "S-1-5-32-544"}, nil },
@@ -126,7 +133,7 @@ func TestVerifyRejectsReparsePoint(t *testing.T) {
 	)
 	t.Cleanup(restore)
 
-	err := Verify(linkPath, targetHash, nil)
+	err := Verify(reparsePath, targetHash, nil)
 	if err == nil || !strings.Contains(err.Error(), "reparse point") {
 		t.Fatalf("Verify() error = %v, want reparse-point rejection", err)
 	}
@@ -143,6 +150,14 @@ func installTestSeams(
 	return func() {
 		inspectSecurity = previousSecurity
 		inspectAuthenticode = previousSignature
+	}
+}
+
+func installLstatTestSeam(lstat func(string) (fs.FileInfo, error)) func() {
+	previousLstat := lstatPath
+	lstatPath = lstat
+	return func() {
+		lstatPath = previousLstat
 	}
 }
 
@@ -163,3 +178,15 @@ func writeTestPE(t *testing.T) (string, string) {
 	sum := sha256.Sum256(bytes)
 	return path, hex.EncodeToString(sum[:])
 }
+
+type fakeFileInfo struct {
+	name string
+	mode fs.FileMode
+}
+
+func (info fakeFileInfo) Name() string       { return info.name }
+func (info fakeFileInfo) Size() int64        { return 0 }
+func (info fakeFileInfo) Mode() fs.FileMode  { return info.mode }
+func (info fakeFileInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (info fakeFileInfo) IsDir() bool        { return info.mode.IsDir() }
+func (info fakeFileInfo) Sys() any           { return nil }

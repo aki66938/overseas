@@ -217,3 +217,91 @@ Note:
 - The prolonged step was the one-time immutable GitHub asset download. It was not a hanging test: `curl.exe -L -o artifacts\sing-box-1.13.19-windows-amd64.zip ...` took about 15 minutes 29 seconds because of slow transfer throughput.
 - The client-config regression was not in Task 3 itself; the real pinned `sing-box.exe check -c` surfaced a missing `domain_resolver` field in Task 2 output, and that is now fixed in source and covered by test.
 - The verifier currently accepts an unsigned pinned binary only when the caller provides no signer allowlist. That matches the observed `NotSigned` upstream state for `v1.13.19`.
+
+## Review follow-up: portability and deterministic reparse coverage
+
+Review item 1 root cause:
+
+- `Makefile` exported a workstation-specific Go path: `C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin`.
+- That made repository execution non-portable and blocked callers from injecting their own Go binary.
+
+Review item 2 root cause:
+
+- `TestVerifyRejectsReparsePoint` depended on `os.Symlink`, which can be unavailable without the required Windows privilege.
+- The skip avoided false failures, but it also meant the rejection path was not guaranteed to be exercised.
+
+### Review RED
+
+Portable Makefile structural RED:
+
+```powershell
+pwsh.exe -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester 'tests/powershell/Runbook.Tests.ps1' -Output Detailed } else { Invoke-Pester -Script 'tests/powershell/Runbook.Tests.ps1' -Verbose }"
+```
+
+Observed failure:
+
+- expected `^GO ?= go$`
+- file still contained the hardcoded `export PATH := C:/Users/Eleme/...`
+
+Deterministic reparse RED:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/coreverify
+```
+
+Observed failure:
+
+- `undefined: installLstatTestSeam`
+- the new deterministic test also exposed one unused local binding
+
+### Review GREEN
+
+Fixes applied:
+
+- Replaced the hardcoded path in `Makefile` with `GO ?= go` and switched targets to `$(GO)`.
+- Added a production test seam `lstatPath = os.Lstat` and used it from `openRegularFileNoReparse`.
+- Switched the reparse test to inject `fs.ModeSymlink` metadata through that seam, so the reparse rejection path runs even when symlink creation is unavailable.
+
+Focused GREEN commands:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/coreverify
+```
+
+```powershell
+pwsh.exe -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester 'tests/powershell/Runbook.Tests.ps1' -Output Detailed } else { Invoke-Pester -Script 'tests/powershell/Runbook.Tests.ps1' -Verbose }"
+```
+
+Results:
+
+- `internal/coreverify`: PASS
+- `Runbook.Tests.ps1`: PASS, `4` tests
+
+Regression after the review fixes:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./...
+```
+
+```powershell
+pwsh.exe -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester 'tests/powershell/FetchSingBox.Tests.ps1' -Output Detailed } else { Invoke-Pester -Script 'tests/powershell/FetchSingBox.Tests.ps1' -Verbose }"
+```
+
+```powershell
+powershell.exe -NoProfile -Command "Invoke-Pester -Script 'tests/powershell/FetchSingBox.Tests.ps1' -Verbose"
+```
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe build -trimpath -o bin\access-config.exe .\cmd\access-config
+```
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe build -trimpath -o bin\poc-probe.exe .\cmd\poc-probe
+```
+
+Results:
+
+- Full Go regression: PASS
+- Focused FetchSingBox Pester on `pwsh.exe`: PASS, `4` tests
+- Focused FetchSingBox Pester on `powershell.exe`: PASS, `4` tests
+- Direct builds: PASS

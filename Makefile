@@ -1,10 +1,10 @@
-export PATH := C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin;$(PATH)
+GO ?= go
 
 .PHONY: test build
 
 test:
-	go test ./...
+	$(GO) test ./...
 	pwsh -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester tests/powershell -Output Detailed } else { Invoke-Pester -Script tests/powershell -Verbose }"
 
 build:
-	go build -trimpath -o bin/poc-probe.exe ./cmd/poc-probe
+	$(GO) build -trimpath -o bin/poc-probe.exe ./cmd/poc-probe

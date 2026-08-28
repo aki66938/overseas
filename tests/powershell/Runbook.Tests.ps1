@@ -105,12 +105,13 @@ Describe 'Windows forwarding PoC operator documentation' {
         if (-not (Assert-DocumentationFileExists -Path $makefilePath)) { return }
         $makefile = Get-Content -LiteralPath $makefilePath -Raw
 
+        $makefile | Should Match '(?m)^GO\s+\?=\s+go\s*$'
         $makefile | Should Match '(?m)^\.PHONY:\s+test\s+build\s*$'
         $makefile | Should Match '(?m)^test:\s*$'
-        $makefile | Should Match ([regex]::Escape('go test ./...'))
+        $makefile | Should Match ([regex]::Escape('$(GO) test ./...'))
         $makefile | Should Match ([regex]::Escape('Invoke-Pester tests/powershell -Output Detailed'))
         $makefile | Should Match '(?m)^build:\s*$'
-        $makefile | Should Match ([regex]::Escape('go build -trimpath -o bin/poc-probe.exe ./cmd/poc-probe'))
+        $makefile | Should Match ([regex]::Escape('$(GO) build -trimpath -o bin/poc-probe.exe ./cmd/poc-probe'))
     }
 
     It 'keeps generated configuration and evidence out of source control' {
