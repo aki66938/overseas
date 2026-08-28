@@ -537,6 +537,7 @@ Describe 'Transactional Windows client installer' {
         $script:firewallState = @{}
         $script:createCount = 0
         $script:failAt = 0
+        $script:publishConcurrentRuleOnFailure = $false
         function Test-Get-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); if ($script:firewallState.ContainsKey($Name)) { return ($script:firewallState[$Name].Rule) } }
         function Test-Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.App) } }
         function Test-Get-NetFirewallPortFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Port) } }
@@ -544,10 +545,8 @@ Describe 'Transactional Windows client installer' {
         function Test-Get-NetFirewallServiceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.ServiceFilter) } }
         function Test-Get-NetFirewallInterfaceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.InterfaceFilter) } }
         function Test-Get-NetFirewallSecurityFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.SecurityFilter) } }
-        function Test-New-NetFirewallRule {
-            param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled,$PolicyStore)
-            $script:createCount++
-            if ($script:failAt -eq $script:createCount) { throw 'injected firewall creation failure' }
+        function New-TestFirewallRecord {
+            param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled)
             $record = [pscustomobject]@{}
             $record | Add-Member Rule ([pscustomobject]@{ Name=$Name; DisplayName=$DisplayName; Group=$Group; Direction=$Direction; Action=$Action; Enabled=$Enabled; Profile=$Profile })
             $record.Rule | Add-Member App ([pscustomobject]@{ Program=$Program; Package='Any' })
@@ -556,6 +555,18 @@ Describe 'Transactional Windows client installer' {
             $record.Rule | Add-Member ServiceFilter ([pscustomobject]@{ Service='Any' })
             $record.Rule | Add-Member InterfaceFilter ([pscustomobject]@{ InterfaceType='Any'; InterfaceAlias='Any' })
             $record.Rule | Add-Member SecurityFilter ([pscustomobject]@{ Authentication='NotRequired'; Encryption='NotRequired'; LocalUser='Any'; RemoteUser='Any'; RemoteMachine='Any'; OverrideBlockRules=$false })
+            return $record
+        }
+        function Test-New-NetFirewallRule {
+            param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled,$PolicyStore)
+            $script:createCount++
+            if ($script:failAt -eq $script:createCount) {
+                if ($script:publishConcurrentRuleOnFailure) {
+                    $script:firewallState[$Name] = New-TestFirewallRecord -Name $Name -DisplayName 'Foreign concurrent rule' -Group 'Foreign.Owner' -Direction Outbound -Action Block -Program 'C:\Foreign\foreign.exe' -Protocol $Protocol -Profile Any -Enabled $true
+                }
+                throw 'injected firewall creation failure'
+            }
+            $record = New-TestFirewallRecord -Name $Name -DisplayName $DisplayName -Group $Group -Direction $Direction -Action $Action -Program $Program -Protocol $Protocol -Profile $Profile -Enabled $Enabled
             $script:firewallState[$Name] = $record
         }
         function Test-Remove-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); [void]$script:firewallState.Remove($Name) }
@@ -581,6 +592,27 @@ Describe 'Transactional Windows client installer' {
         $script:firewallState.Count | Should Be 1
         & $lifecycle 'rollback'
         $script:firewallState.Count | Should Be 0
+
+        # A foreign process wins the same-name race after our absence proof and failed create.
+        $script:createCount = 0; $script:failAt = 2; $script:publishConcurrentRuleOnFailure = $true
+        [IO.File]::WriteAllText((Join-Path $data 'msi-firewall-owned.json'), '{"schema_version":2,"product_id":"RegenBioOverseasAccess","owned_rules":[],"current_operation":null}')
+        { & $lifecycle 'install' } | Should Throw 'injected firewall creation failure'
+        { & $lifecycle 'rollback' } | Should Throw 'exactly match'
+        $script:firewallState.ContainsKey('RegenBioOverseasAccess-AllowCoreTCP-Out') | Should Be $true
+        (Test-Path -LiteralPath (Join-Path $data 'msi-firewall-owned.json') -PathType Leaf) | Should Be $true
+        $concurrentJournal = Get-Content -LiteralPath (Join-Path $data 'msi-firewall-owned.json') -Raw | ConvertFrom-Json
+        $concurrentJournal.current_operation | Should Not BeNullOrEmpty
+
+        # A created rule is replaced or drifts before rollback; name alone is not ownership proof.
+        $script:firewallState.Clear(); $script:createCount = 0; $script:failAt = 2; $script:publishConcurrentRuleOnFailure = $false
+        [IO.File]::WriteAllText((Join-Path $data 'msi-firewall-owned.json'), '{"schema_version":2,"product_id":"RegenBioOverseasAccess","owned_rules":[],"current_operation":null}')
+        { & $lifecycle 'install' } | Should Throw 'injected firewall creation failure'
+        $script:firewallState['RegenBioOverseasAccess-AllowAgent-Out'].Rule.App.Program = 'C:\Foreign\replacement.exe'
+        { & $lifecycle 'rollback' } | Should Throw 'exactly match'
+        $script:firewallState.ContainsKey('RegenBioOverseasAccess-AllowAgent-Out') | Should Be $true
+        (Test-Path -LiteralPath (Join-Path $data 'msi-firewall-owned.json') -PathType Leaf) | Should Be $true
+        $driftJournal = Get-Content -LiteralPath (Join-Path $data 'msi-firewall-owned.json') -Raw | ConvertFrom-Json
+        @($driftJournal.current_operation.rules | Where-Object { $_.name -eq 'RegenBioOverseasAccess-AllowCoreTCP-Out' -and $_.rollback_state -eq 'resolved' }).Count | Should Be 1
     }
 
     It 'publishes both sensitive runtime files through schema-v2 intents and finalization' {

@@ -76,6 +76,7 @@ function Read-FirewallJournal{
     if([string]$value.current_operation.id -notmatch '^[0-9a-fA-F-]{36}$' -or [string]$value.current_operation.state -notin @('applying','committed')){throw 'Invalid firewall operation journal.'}
     foreach($entry in @($value.current_operation.rules)){
       if([string]$entry.disposition -notin @('intended','created','preexisting') -or -not(Test-SameDefinition $entry (Get-Definition ([string]$entry.name)))){throw 'Invalid firewall operation entry.'}
+      if($entry.PSObject.Properties.Name -contains 'rollback_state' -and [string]$entry.rollback_state -notin @('pending','resolved')){throw 'Invalid firewall rollback state.'}
     }
   }
   return $value
@@ -127,7 +128,7 @@ if($mode -eq 'install'){
   $value.current_operation=[ordered]@{id=[guid]::NewGuid().ToString('D');state='applying';rules=@()}
   Write-FirewallJournal $value
   foreach($definition in $definitions){
-    $entry=[ordered]@{name=$definition.name;display_name=$definition.display_name;program=$definition.program;protocol=$definition.protocol;local_port=$definition.local_port;remote_port=$definition.remote_port;local_address=$definition.local_address;remote_address=$definition.remote_address;service=$definition.service;interface_type=$definition.interface_type;authentication=$definition.authentication;encryption=$definition.encryption;local_user=$definition.local_user;remote_user=$definition.remote_user;remote_machine=$definition.remote_machine;override_block_rules=$definition.override_block_rules;disposition='intended';absent_before=$null}
+    $entry=[ordered]@{name=$definition.name;display_name=$definition.display_name;program=$definition.program;protocol=$definition.protocol;local_port=$definition.local_port;remote_port=$definition.remote_port;local_address=$definition.local_address;remote_address=$definition.remote_address;service=$definition.service;interface_type=$definition.interface_type;authentication=$definition.authentication;encryption=$definition.encryption;local_user=$definition.local_user;remote_user=$definition.remote_user;remote_machine=$definition.remote_machine;override_block_rules=$definition.override_block_rules;disposition='intended';absent_before=$null;rollback_state='pending'}
     $value.current_operation.rules+=,$entry
     Write-FirewallJournal $value
     $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
@@ -156,13 +157,18 @@ if($mode -eq 'rollback'){
   $entries=@($value.current_operation.rules)
   [array]::Reverse($entries)
   foreach($entry in $entries){
+    if($entry.PSObject.Properties.Name -contains 'rollback_state' -and $entry.rollback_state -eq 'resolved'){continue}
     $createdNow=$entry.disposition -eq 'created' -or ($entry.disposition -eq 'intended' -and $entry.absent_before -eq $true)
     if(-not $createdNow){continue}
     $definition=Get-Definition ([string]$entry.name)
-    $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
-    if($raw.Count -gt 1){throw 'Created firewall rule name is ambiguous during rollback.'}
-    if($raw.Count -eq 1){Remove-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction Stop}
+    $exact=Get-ExactFirewallRule $definition
+    if($null -ne $exact){
+      Remove-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction Stop
+      if(@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue).Count -ne 0){throw 'Created firewall rule deletion could not be proven.'}
+    }
     Remove-OwnedDefinition $value $definition
+    $entry.rollback_state='resolved'
+    Write-FirewallJournal $value
   }
   $value.current_operation=$null
   if(@($value.owned_rules).Count -eq 0){Remove-Item -LiteralPath $journal -Force}else{Write-FirewallJournal $value}
