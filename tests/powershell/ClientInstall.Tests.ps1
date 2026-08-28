@@ -433,6 +433,7 @@ Describe 'Transactional Windows client installer' {
         $text = Get-Content -LiteralPath $makefilePath -Raw
         $text | Should Match '(?m)^release-msi:'
         $text | Should Match 'SIGNING_CERT_THUMBPRINT'
+        $text | Should Match 'CLIENT_RELEASE_MSI\s*\?=.*RELEASE_SIGNED\.msi'
         $text | Should Match 'build-client-artifacts\.ps1'
         $text | Should Match 'inspect-client-msi\.ps1'
     }

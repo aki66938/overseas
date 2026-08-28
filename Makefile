@@ -4,6 +4,7 @@ WIX_UTIL_EXT ?= WixToolset.Util.wixext/4.0.6
 WIX_FIREWALL_EXT ?= WixToolset.Firewall.wixext/4.0.6
 CLIENT_PAYLOAD_DIR ?= build/msi
 CLIENT_MSI ?= dist/OverseasAccessSetup.msi
+CLIENT_RELEASE_MSI ?= dist/OverseasAccessSetup-RELEASE_SIGNED.msi
 DTF ?= WixToolset.Dtf.WindowsInstaller.dll
 SIGNTOOL ?= signtool.exe
 SIGNING_CERT_THUMBPRINT ?=
@@ -57,4 +58,4 @@ inspect-msi: msi
 
 release-msi: build-client-binaries
 	pwsh -NoProfile -Command "if ('$(SIGNING_CERT_THUMBPRINT)' -notmatch '^[A-Fa-f0-9]{40}$$') { throw 'SIGNING_CERT_THUMBPRINT is required for release-msi.' }"
-	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -WixPath '$(WIX)' -UtilExtensionPath '$(WIX_UTIL_EXT)' -DtfPath '$(DTF)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_MSI)'
+	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -WixPath '$(WIX)' -UtilExtensionPath '$(WIX_UTIL_EXT)' -DtfPath '$(DTF)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_RELEASE_MSI)'
