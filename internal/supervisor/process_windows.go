@@ -12,10 +12,8 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -24,6 +22,7 @@ import (
 
 var (
 	ErrUnsupported      = errors.New("process supervision is unsupported on this platform")
+	ErrVerifierRequired = errors.New("executable verifier is required")
 	ErrAlreadyStarted   = errors.New("process has already been started")
 	ErrNotStarted       = errors.New("process has not been started")
 	ErrReadyTimeout     = errors.New("process readiness timed out")
@@ -36,6 +35,57 @@ var (
 type ExitError struct {
 	Code        int
 	BeforeReady bool
+}
+
+// CleanupError reports that fail-closed teardown encountered one or more
+// native failures. It never contains child output or configuration content.
+type CleanupError struct {
+	Err error
+}
+
+func (e *CleanupError) Error() string { return "supervised process cleanup failed: " + e.Err.Error() }
+func (e *CleanupError) Unwrap() error { return e.Err }
+
+type nativeProcess struct {
+	process windows.Handle
+	thread  windows.Handle
+	pid     uint32
+	logDone chan struct{}
+}
+
+type processOps struct {
+	createKillOnCloseJob func() (windows.Handle, error)
+	launchSuspended      func(string, string, io.Writer, func(string) error) (*nativeProcess, error)
+	assignProcessToJob   func(windows.Handle, windows.Handle) error
+	resumeThread         func(windows.Handle) error
+	terminateProcess     func(windows.Handle, uint32) error
+	terminateJob         func(windows.Handle, uint32) error
+	closeJob             func(windows.Handle) error
+	closeHandle          func(windows.Handle) error
+	waitProcess          func(windows.Handle, time.Duration) error
+	waitJobEmpty         func(windows.Handle, time.Duration) error
+	exitCode             func(windows.Handle) (int, error)
+	sendBreak            func(uint32) error
+}
+
+var defaultProcessOps = processOps{
+	createKillOnCloseJob: createKillOnCloseJob,
+	launchSuspended:      launchSuspendedProcess,
+	assignProcessToJob:   windows.AssignProcessToJobObject,
+	resumeThread: func(thread windows.Handle) error {
+		_, err := windows.ResumeThread(thread)
+		return err
+	},
+	terminateProcess: windows.TerminateProcess,
+	terminateJob:     windows.TerminateJobObject,
+	closeJob:         windows.CloseHandle,
+	closeHandle:      windows.CloseHandle,
+	waitProcess:      waitForProcess,
+	waitJobEmpty:     waitForJobEmpty,
+	exitCode:         processExitCode,
+	sendBreak: func(pid uint32) error {
+		return windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, pid)
+	},
 }
 
 func (e *ExitError) Error() string {
@@ -51,21 +101,28 @@ type Process struct {
 	LogWriter    io.Writer
 	Secrets      []string
 	MaxLogBytes  int
+	// VerifyExecutable must perform the caller's pinned hash and signer checks.
+	// Start invokes it immediately before native process creation.
+	VerifyExecutable func(string) error
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	job      windows.Handle
-	done     chan struct{}
-	waitErr  error
-	started  bool
-	ready    bool
-	stopping bool
-	redactor *streamRedactor
+	mu          sync.Mutex
+	proc        *nativeProcess
+	job         windows.Handle
+	done        chan struct{}
+	waitErr     error
+	started     bool
+	ready       bool
+	stopping    bool
+	redactor    *streamRedactor
+	ops         *processOps
+	cleanupDone chan struct{}
+	cleanupErr  error
 }
 
 // Start launches exe directly with exactly "run -c <absolute-config>". It
-// never invokes a shell. The executable must have been verified by the caller
-// before Start; Start additionally rejects ambiguous or reparse-point paths.
+// never invokes a shell. Start requires VerifyExecutable and invokes it inside
+// the suspended-launch boundary immediately before CreateProcess. It also
+// rejects ambiguous or reparse-point paths.
 func (p *Process) Start(ctx context.Context, exe, config string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -77,6 +134,9 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 	}
 	if err := validateLaunchPath(config); err != nil {
 		return ErrUnsafePath
+	}
+	if p.VerifyExecutable == nil {
+		return ErrVerifierRequired
 	}
 
 	probe := p.ReadyProbe
@@ -90,34 +150,36 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 	}
 	p.redactor = newStreamRedactor(p.LogWriter, p.Secrets, logLimit)
 
-	job, err := createKillOnCloseJob()
+	ops := p.ops
+	if ops == nil {
+		ops = &defaultProcessOps
+	}
+	job, err := ops.createKillOnCloseJob()
 	if err != nil {
 		return fmt.Errorf("start supervised process: create job: %w", err)
 	}
-	cmd := exec.Command(exe, "run", "-c", config)
-	cmd.Stdout = p.redactor
-	cmd.Stderr = p.redactor
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
-	if err := cmd.Start(); err != nil {
-		_ = windows.CloseHandle(job)
+	proc, err := ops.launchSuspended(exe, config, p.redactor, p.VerifyExecutable)
+	if err != nil {
+		_ = ops.closeJob(job)
 		p.redactor.Flush()
 		return fmt.Errorf("start supervised process: launch: %w", err)
 	}
-	processHandle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
-	if err == nil {
-		err = windows.AssignProcessToJobObject(job, processHandle)
-		_ = windows.CloseHandle(processHandle)
-	}
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = windows.CloseHandle(job)
+	if err := ops.assignProcessToJob(job, proc.process); err != nil {
+		cleanupErr := abortSuspendedProcess(ops, job, proc, false)
 		p.redactor.Flush()
-		return fmt.Errorf("start supervised process: assign job: %w", err)
+		return errors.Join(fmt.Errorf("start supervised process: assign job: %w", err), cleanupErr)
 	}
+	if err := ops.resumeThread(proc.thread); err != nil {
+		cleanupErr := abortSuspendedProcess(ops, job, proc, true)
+		p.redactor.Flush()
+		return errors.Join(fmt.Errorf("start supervised process: resume: %w", err), cleanupErr)
+	}
+	_ = ops.closeHandle(proc.thread)
+	proc.thread = 0
 
-	p.cmd = cmd
+	p.proc = proc
 	p.job = job
+	p.ops = ops
 	p.done = make(chan struct{})
 	p.started = true
 	go p.waitLoop()
@@ -150,8 +212,7 @@ func (p *Process) Ready(ctx context.Context) error {
 	timeout := p.ReadyTimeout
 	p.mu.Unlock()
 	if probe == nil {
-		p.terminateForFailure()
-		return ErrNoReadinessProbe
+		return errors.Join(ErrNoReadinessProbe, p.terminateForFailure())
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -160,9 +221,23 @@ func (p *Process) Ready(ctx context.Context) error {
 	defer cancel()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
+	probeResult := make(chan error, 1)
+	probeInFlight := false
+	startProbe := func() {
+		probeInFlight = true
+		go func() {
+			probeResult <- probe(readyCtx)
+		}()
+	}
+	startProbe()
 
 	for {
-		if err := probe(readyCtx); err == nil {
+		select {
+		case err := <-probeResult:
+			probeInFlight = false
+			if err != nil {
+				continue
+			}
 			p.mu.Lock()
 			select {
 			case <-done:
@@ -174,17 +249,18 @@ func (p *Process) Ready(ctx context.Context) error {
 				p.mu.Unlock()
 				return nil
 			}
-		}
-		select {
 		case <-done:
 			return p.Wait()
 		case <-readyCtx.Done():
-			p.terminateForFailure()
+			cleanupErr := p.terminateForFailure()
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return errors.Join(ctx.Err(), cleanupErr)
 			}
-			return ErrReadyTimeout
+			return errors.Join(ErrReadyTimeout, cleanupErr)
 		case <-ticker.C:
+			if !probeInFlight {
+				startProbe()
+			}
 		}
 	}
 }
@@ -199,7 +275,19 @@ func (p *Process) Stop(ctx context.Context) error {
 	}
 	done := p.done
 	if p.stopping {
+		cleanupDone := p.cleanupDone
 		p.mu.Unlock()
+		if cleanupDone != nil {
+			select {
+			case <-cleanupDone:
+				p.mu.Lock()
+				err := p.cleanupErr
+				p.mu.Unlock()
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		select {
 		case <-done:
 			return nil
@@ -215,32 +303,23 @@ func (p *Process) Stop(ctx context.Context) error {
 	default:
 	}
 	p.stopping = true
-	pid := p.cmd.Process.Pid
+	pid := p.proc.pid
 	grace := p.StopTimeout
 	p.mu.Unlock()
 	if grace <= 0 {
 		grace = 3 * time.Second
 	}
 
-	_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+	_ = p.ops.sendBreak(pid)
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {
 	case <-done:
 		return nil
 	case <-timer.C:
-		p.terminateJob()
+		return p.terminateForFailure()
 	case <-ctx.Done():
-		p.terminateJob()
-	}
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(5 * time.Second):
-		return errors.New("supervised process did not exit after job termination")
+		return errors.Join(ctx.Err(), p.terminateForFailure())
 	}
 }
 
@@ -253,60 +332,126 @@ func (p *Process) Wait() error {
 		return ErrNotStarted
 	}
 	done := p.done
+	cleanupDone := p.cleanupDone
 	p.mu.Unlock()
 	<-done
+	if cleanupDone != nil {
+		<-cleanupDone
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.waitErr
+	return errors.Join(p.waitErr, p.cleanupErr)
 }
 
 func (p *Process) waitLoop() {
-	err := p.cmd.Wait()
-	p.redactor.Flush()
-
+	err := p.ops.waitProcess(p.proc.process, -1)
+	code, codeErr := p.ops.exitCode(p.proc.process)
+	if codeErr != nil {
+		err = errors.Join(err, codeErr)
+	}
 	p.mu.Lock()
 	job := p.job
 	p.job = 0
-	if !p.stopping {
-		code := 0
-		if p.cmd.ProcessState != nil {
-			code = p.cmd.ProcessState.ExitCode()
-		}
-		p.waitErr = &ExitError{Code: code, BeforeReady: !p.ready}
-	} else {
-		p.waitErr = nil
+	cleanupDone := p.cleanupDone
+	stopping := p.stopping
+	beforeReady := !p.ready
+	p.mu.Unlock()
+	var closeErr error
+	if job != 0 {
+		closeErr = p.ops.closeJob(job)
 	}
-	_ = err // ExitError deliberately exposes only sanitized exit state.
+	var logErr error
+	if p.proc.logDone != nil {
+		select {
+		case <-p.proc.logDone:
+		case <-time.After(time.Second):
+			logErr = errors.New("log capture did not close after process job cleanup")
+		}
+	}
+	p.redactor.Flush()
+	var waitErr error
+	if !stopping {
+		waitErr = &ExitError{Code: code, BeforeReady: beforeReady}
+	}
+	if err != nil {
+		waitErr = errors.Join(waitErr, fmt.Errorf("wait for supervised process: %w", err))
+	}
+	if closeErr != nil || logErr != nil {
+		waitErr = errors.Join(waitErr, &CleanupError{Err: errors.Join(
+			wrapError("close process job", closeErr),
+			logErr,
+		)})
+	}
+	p.mu.Lock()
+	p.waitErr = waitErr
 	close(p.done)
 	p.mu.Unlock()
-	if job != 0 {
-		_ = windows.CloseHandle(job)
+	if cleanupDone != nil {
+		<-cleanupDone
 	}
+	_ = p.ops.closeHandle(p.proc.process)
 }
 
-func (p *Process) terminateForFailure() {
+func (p *Process) terminateForFailure() error {
 	p.mu.Lock()
 	if !p.started {
 		p.mu.Unlock()
-		return
+		return nil
+	}
+	if p.cleanupDone != nil {
+		cleanupDone := p.cleanupDone
+		p.mu.Unlock()
+		<-cleanupDone
+		p.mu.Lock()
+		err := p.cleanupErr
+		p.mu.Unlock()
+		return err
 	}
 	p.stopping = true
-	done := p.done
-	p.mu.Unlock()
-	p.terminateJob()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-	}
-}
-
-func (p *Process) terminateJob() {
-	p.mu.Lock()
+	p.cleanupDone = make(chan struct{})
+	cleanupDone := p.cleanupDone
 	job := p.job
+	p.job = 0
+	proc := p.proc
+	ops := p.ops
 	p.mu.Unlock()
-	if job != 0 {
-		_ = windows.TerminateJobObject(job, 1)
+
+	var cleanupFailures []error
+	jobClosed := false
+	jobTerminated := false
+	if job == 0 {
+		cleanupFailures = append(cleanupFailures, errors.New("process job handle was unavailable during teardown"))
+	} else if err := ops.terminateJob(job, 1); err != nil {
+		cleanupFailures = append(cleanupFailures, fmt.Errorf("terminate process job: %w", err))
+		if closeErr := ops.closeJob(job); closeErr != nil {
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("close process job fallback: %w", closeErr))
+		}
+		jobClosed = true
+	} else {
+		jobTerminated = true
 	}
+	if err := ops.waitProcess(proc.process, 5*time.Second); err != nil {
+		cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm root process termination: %w", err))
+	}
+	if jobTerminated {
+		if err := ops.waitJobEmpty(job, 5*time.Second); err != nil {
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm process job is empty: %w", err))
+		}
+	}
+	if job != 0 && !jobClosed {
+		if err := ops.closeJob(job); err != nil {
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("close terminated process job: %w", err))
+		}
+	}
+	var cleanupErr error
+	if len(cleanupFailures) != 0 {
+		cleanupErr = &CleanupError{Err: errors.Join(cleanupFailures...)}
+	}
+	p.mu.Lock()
+	p.cleanupErr = cleanupErr
+	close(cleanupDone)
+	p.mu.Unlock()
+	return cleanupErr
 }
 
 func createKillOnCloseJob() (windows.Handle, error) {
@@ -326,6 +471,193 @@ func createKillOnCloseJob() (windows.Handle, error) {
 		return 0, err
 	}
 	return job, nil
+}
+
+func launchSuspendedProcess(exe, config string, output io.Writer, verify func(string) error) (*nativeProcess, error) {
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	closeFiles := func() {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+	}
+	if err := windows.SetHandleInformation(windows.Handle(pipeW.Fd()), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
+		closeFiles()
+		return nil, err
+	}
+	nul, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		closeFiles()
+		return nil, err
+	}
+	defer nul.Close()
+	if err := windows.SetHandleInformation(windows.Handle(nul.Fd()), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
+		closeFiles()
+		return nil, err
+	}
+	attributes, err := windows.NewProcThreadAttributeList(1)
+	if err != nil {
+		closeFiles()
+		return nil, err
+	}
+	defer attributes.Delete()
+	handles := []windows.Handle{windows.Handle(pipeW.Fd()), windows.Handle(nul.Fd())}
+	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0])); err != nil {
+		closeFiles()
+		return nil, err
+	}
+	si := windows.StartupInfoEx{
+		StartupInfo: windows.StartupInfo{
+			Cb:        uint32(unsafe.Sizeof(windows.StartupInfoEx{})),
+			Flags:     windows.STARTF_USESTDHANDLES,
+			StdInput:  handles[1],
+			StdOutput: handles[0],
+			StdErr:    handles[0],
+		},
+		ProcThreadAttributeList: attributes.List(),
+	}
+	exeUTF16, err := windows.UTF16PtrFromString(exe)
+	if err != nil {
+		closeFiles()
+		return nil, err
+	}
+	commandLine, err := windows.UTF16PtrFromString(windows.ComposeCommandLine([]string{exe, "run", "-c", config}))
+	if err != nil {
+		closeFiles()
+		return nil, err
+	}
+	var info windows.ProcessInformation
+	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
+	if err := verify(exe); err != nil {
+		closeFiles()
+		return nil, fmt.Errorf("verify executable: %w", err)
+	}
+	if err := windows.CreateProcess(exeUTF16, commandLine, nil, nil, true, flags, nil, nil, &si.StartupInfo, &info); err != nil {
+		closeFiles()
+		return nil, err
+	}
+	_ = pipeW.Close()
+	logDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(output, pipeR)
+		_ = pipeR.Close()
+		close(logDone)
+	}()
+	return &nativeProcess{process: info.Process, thread: info.Thread, pid: info.ProcessId, logDone: logDone}, nil
+}
+
+func abortSuspendedProcess(ops *processOps, job windows.Handle, proc *nativeProcess, assigned bool) error {
+	var errs []error
+	jobClosed := false
+	if assigned {
+		if err := ops.terminateJob(job, 1); err != nil {
+			errs = append(errs, fmt.Errorf("terminate suspended job: %w", err))
+			if closeErr := ops.closeJob(job); closeErr != nil {
+				errs = append(errs, fmt.Errorf("close suspended job fallback: %w", closeErr))
+			}
+			jobClosed = true
+		}
+	} else if err := ops.terminateProcess(proc.process, 1); err != nil {
+		errs = append(errs, fmt.Errorf("terminate suspended process: %w", err))
+	}
+	if err := ops.waitProcess(proc.process, 5*time.Second); err != nil {
+		errs = append(errs, fmt.Errorf("wait for suspended process termination: %w", err))
+	}
+	if proc.thread != 0 {
+		if err := ops.closeHandle(proc.thread); err != nil {
+			errs = append(errs, fmt.Errorf("close suspended thread: %w", err))
+		}
+	}
+	if err := ops.closeHandle(proc.process); err != nil {
+		errs = append(errs, fmt.Errorf("close suspended process: %w", err))
+	}
+	if !jobClosed {
+		if err := ops.closeJob(job); err != nil {
+			errs = append(errs, fmt.Errorf("close suspended job: %w", err))
+		}
+	}
+	if proc.logDone != nil {
+		select {
+		case <-proc.logDone:
+		case <-time.After(time.Second):
+			errs = append(errs, errors.New("log capture did not close after suspended-process cleanup"))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func wrapError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func waitForProcess(process windows.Handle, timeout time.Duration) error {
+	waitMillis := uint32(windows.INFINITE)
+	if timeout >= 0 {
+		if timeout <= 0 {
+			waitMillis = 0
+		} else if timeout >= time.Duration(^uint32(0)-1)*time.Millisecond {
+			waitMillis = uint32(windows.INFINITE - 1)
+		} else {
+			waitMillis = uint32((timeout + time.Millisecond - 1) / time.Millisecond)
+		}
+	}
+	result, err := windows.WaitForSingleObject(process, waitMillis)
+	if err != nil {
+		return err
+	}
+	if result == uint32(windows.WAIT_TIMEOUT) {
+		return context.DeadlineExceeded
+	}
+	if result != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("unexpected wait result %d", result)
+	}
+	return nil
+}
+
+func processExitCode(process windows.Handle) (int, error) {
+	var code uint32
+	if err := windows.GetExitCodeProcess(process, &code); err != nil {
+		return 0, err
+	}
+	return int(code), nil
+}
+
+type jobBasicAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+func waitForJobEmpty(job windows.Handle, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		var info jobBasicAccountingInformation
+		if err := windows.QueryInformationJobObject(
+			job,
+			windows.JobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&info)),
+			uint32(unsafe.Sizeof(info)),
+			nil,
+		); err != nil {
+			return err
+		}
+		if info.ActiveProcesses == 0 {
+			return nil
+		}
+		if timeout <= 0 || time.Now().After(deadline) {
+			return context.DeadlineExceeded
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func validateLaunchPath(path string) error {

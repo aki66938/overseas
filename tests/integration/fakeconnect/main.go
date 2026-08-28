@@ -16,6 +16,8 @@ type config struct {
 	Mode          string `json:"mode"`
 	ReadyFile     string `json:"ready_file"`
 	ChildPIDFile  string `json:"child_pid_file"`
+	StartedFile   string `json:"started_file"`
+	EscapedFile   string `json:"escaped_file"`
 	Secret        string `json:"secret"`
 	SuppressReady bool   `json:"suppress_ready"`
 	LogRepeat     int    `json:"log_repeat"`
@@ -71,6 +73,46 @@ func main() {
 		}
 		markReady(cfg)
 		waitForStop()
+	case "escape-immediately":
+		if cfg.StartedFile != "" {
+			_ = os.WriteFile(cfg.StartedFile, []byte("started"), 0o600)
+		}
+		if os.Getenv("FAKECONNECT_ESCAPE_CHILD") == "1" {
+			if cfg.EscapedFile != "" {
+				_ = os.WriteFile(cfg.EscapedFile, []byte("escaped"), 0o600)
+			}
+			waitForStop()
+			return
+		}
+		child := exec.Command(os.Args[0], "run", "-c", os.Args[3])
+		child.Env = append(os.Environ(), "FAKECONNECT_ESCAPE_CHILD=1")
+		if err := child.Start(); err != nil {
+			os.Exit(66)
+		}
+		waitForStop()
+	case "exit-with-descendant":
+		if os.Getenv("FAKECONNECT_LOG_CHILD") == "1" {
+			interrupt := make(chan os.Signal, 1)
+			signal.Notify(interrupt, os.Interrupt)
+			go func() {
+				for range interrupt {
+				}
+			}()
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		child := exec.Command(os.Args[0], "run", "-c", os.Args[3])
+		child.Env = append(os.Environ(), "FAKECONNECT_LOG_CHILD=1")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(66)
+		}
+		if cfg.ChildPIDFile != "" {
+			_ = os.WriteFile(cfg.ChildPIDFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		}
+		os.Exit(31)
 	default:
 		os.Exit(64)
 	}

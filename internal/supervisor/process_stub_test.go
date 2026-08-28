@@ -9,7 +9,7 @@ import (
 )
 
 func TestProcessIsUnsupported(t *testing.T) {
-	var p Process
+	p := Process{VerifyExecutable: func(string) error { return nil }}
 	if err := p.Start(context.Background(), "/bin/false", "/tmp/config"); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Start error = %v, want ErrUnsupported", err)
 	}
