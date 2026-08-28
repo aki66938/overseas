@@ -1,106 +1,164 @@
-# Task 4 Report — Reversible Windows Forwarding Scripts
+# Task 4 Report — Secret Storage and Fail-Closed Process Supervisor
 
-## Final status
+Date: 2026-08-28
 
-Task 4 and both safety-review rounds are implemented in the assigned linked worktree. This report supersedes the earlier accumulated Task 4 notes and describes the final code only.
+Base commit: `f47ddd922494f5db2359d3b355139b8276b7e636`
 
-No production networking script was executed. Pester replaced the Windows networking cmdlets with stateful mocks, so development and verification did not change any real adapter, route, forwarding, firewall, or WinNAT state.
+Implementation commit message: `feat: protect credentials and supervise sing-box`. The exact hash is reported in the handoff because this report is part of that commit.
 
-Destination authorization remains at the binding enforcement boundary specified by the user: the telecom/operator whitelist. Task 4 deliberately does not duplicate that policy with a brittle resolved-IP firewall list. The probe CLI tests only configured `approved_targets`; the Windows rules provide interface-scoped fail-closed behavior.
+## Status
 
-## Final implementation
+Task 4 is implemented in the assigned `windows-forwarding-poc` worktree. No real network configuration, remote host, VM, route, DNS, adapter, firewall, or service mutation was performed. Process tests launch only the repository's deterministic `fakeconnect` helper in temporary directories.
 
-- `snapshot.ps1` validates three distinct canonical interface indexes, captures the baseline inventories, builds a schema-v2 SHA-256 envelope, writes through a flushed create-new temporary file, atomically publishes it, and cleans a failed temporary publication. It returns a path only after publication.
-- `apply-poc.ps1` accepts one transaction-level `ShouldProcess` decision. It validates snapshot freshness and integrity, computer/interface identity, sole employee-owned active IPv4 default route, current address/route/internal-CIDR overlap, other CGNAT use, empty WinNAT state, and absence of owned firewall state before mutation.
-- Apply creates the employee-interface outbound `RemoteAddress Internet` block first, then two interface-scoped allow rules, verifies their exact identity/direction/action/scope/interface/description/Profile Any in `ActiveStore`, creates the exact NAT, and enables forwarding only on WireGuard and telecom.
-- Apply compensation removes permissive rules first, removes NAT, restores attempted forwarding, and positively re-reads all WinNAT and both forwarding baselines. The employee public-Internet block is removed last only when NAT is absent and both forwarding baselines are proven. Otherwise it remains and the thrown error contains an explicit `EMERGENCY` state. A mutation that reports failure after changing state is covered.
-- `rollback-poc.ps1` accepts one transaction-level `ShouldProcess` decision. A hash-valid, transaction-bound recovery snapshot does not expire, although future timestamps, wrong computer, edited payloads, adapter/default-route drift, mismatched subnet metadata, and foreign/conflicting state are still rejected.
-- Rollback is resumable and idempotent. It accepts each owned NAT/rule already absent and either applied or already-baseline forwarding, derives/binds the subnet through snapshot routes plus the current WireGuard address and any remaining owned metadata, and removes only exact owned names. Markerless forwarding drift is rejected as potentially unrelated state. A missing `ActiveStore` guard triggers emergency cleanup rather than aborting; any effective rule that remains must still match exactly, including Profile Any.
-- Rollback `-WhatIf` succeeds from the pristine snapshot baseline and reports the complete intended owned cleanup/forwarding restore without calling a mutator.
-- Every inner mutating cmdlet in snapshot, apply, compensation, and rollback explicitly receives `-Confirm:$false` after the single outer transaction decision. There are no selective safety skips.
-- The required portable-Go gate exposed a pre-existing Windows clock-resolution flake: a successful loopback dial could measure `0s`. `internal/probe/probe.go` now preserves its positive-latency result invariant by reporting the minimum representable duration (1 ns) only for a successful non-positive measurement. Approved-target selection and dialing policy are unchanged.
+## Implementation
 
-## TDD evidence
+### Machine-scoped secret storage
 
-The second-review behavior tests were added before production changes. The Pester 3.4 RED run against review-fix commit `de4b877` was:
+- Added Windows-only `secret.StoreMachine` and `secret.LoadMachine` backed by `CryptProtectData` / `CryptUnprotectData`.
+- `StoreMachine` uses `CRYPTPROTECT_LOCAL_MACHINE` and optional entropy fixed to `RegenBio/OverseasAccess/v1`.
+- The input plaintext slice is zeroed on every return path. DPAPI ciphertext and entropy working buffers are also zeroed after use; DPAPI output memory is zeroed before `LocalFree`.
+- Writes use a cryptographically random create-new temporary file in the destination directory, flush and close it, then use Windows replace-existing rename semantics.
+- The temporary file receives the protected DACL at creation time, avoiding a permissive create-then-tighten window. The DACL is `D:P(A;;FA;;;SY)(A;;FA;;;BA)`: protected, full control for SYSTEM and Builtin Administrators only.
+- Read, DPAPI, and write errors contain operation context but never plaintext or ciphertext content. Missing-file identity remains available through `errors.Is(err, os.ErrNotExist)`.
+- The non-Windows implementation returns `ErrUnsupported`; its store stub still zeroes the caller's plaintext buffer.
 
-```text
-RED: Total=23 Passed=16 Failed=7
+### Windows process supervision
+
+- Added single-use `supervisor.Process` with the required `Start`, `Ready`, `Stop`, and `Wait` methods.
+- `Start` rejects relative, non-canonical, missing, non-regular, symlink, and other reparse-point executable/config paths.
+- The executable is invoked directly with exactly `run -c <absolute-config>`; no shell is involved.
+- The supervisor creates a Windows job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigns the child, and uses a new process group for graceful control-break signaling.
+- `Ready` supports a deterministic injected local probe for unit/integration use. With no injected probe, it reads the sing-box TUN `interface_name` from the absolute config and probes local interface presence.
+- Readiness timeout terminates the complete job before returning `ErrReadyTimeout`.
+- Unexpected exits return typed `*supervisor.ExitError` with only exit code and before-ready state; command line, config, and log content are not included.
+- `Stop` first requests graceful shutdown via `CTRL_BREAK_EVENT`, then terminates the job after the configured grace period. Repeated controlled stops are idempotent.
+- Stdout and stderr share a concurrency-safe streaming redactor that handles secrets split across writes and bounds emitted log bytes. Configured values are replaced with `[REDACTED]`.
+- The non-Windows process implementation exposes the same portable shape and returns `ErrUnsupported`.
+
+### Deterministic helper
+
+- Added `tests/integration/fakeconnect/main.go`.
+- It accepts only `run -c <absolute-config>` and supports the required `ready`, `exit-before-ready`, `hang-on-stop`, and `write-secret` modes.
+- The hang mode can spawn a descendant so job-object tree termination is tested against a real Windows child process.
+
+## RED → GREEN evidence
+
+### Secret RED
+
+After adding the Windows DPAPI contract tests first:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/secret
 ```
 
-The seven expected failures were emergency compensation block retention, Profile Any enforcement, expired recovery use, missing-ActiveStore emergency cleanup, partial-rollback retry, nested confirmation suppression, and pristine-baseline rollback preview. The pre-existing stale-apply test remained green, proving the age exemption was scoped to recovery only.
+Result: FAIL as expected. The compiler reported `undefined: StoreMachine`, `undefined: LoadMachine`, and `undefined: zero` because the package implementation did not yet exist.
 
-Final self-review added a markerless-forwarding regression before its guard. Its RED evidence was:
+### Secret GREEN
 
-```text
-SELF_REVIEW_RED Total=27 Passed=26 Failed=1
+After implementing DPAPI, secure temporary-file creation, atomic replacement, and stubs:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/secret
 ```
 
-The completed Pester 3.4 suite contains 27 mocked/behavioral and AST tests. In addition to the RED cases, it covers both NAT-removal and forwarding-restoration compensation failures, a cmdlet error after partial mutation, exact rollback scope, preservation of an unrelated same-group rule, markerless forwarding drift, apply failure compensation, edited/stale apply snapshots, canonical-index alias collisions, internal/address/route/CGNAT overlap, sole default-route ownership, existing WinNAT rejection, inactive apply policy, internal-route preservation, atomic snapshot cleanup/publication, and transaction-level WhatIf behavior.
+Result: PASS. Covered same-machine round trip, corrupt ciphertext, missing file identity, replacement/no leaked temporary file, DACL inspection, regular-file mode, and caller plaintext zeroing.
 
-The Go timing flake was reproduced before its fix with the portable toolchain:
+### Supervisor RED
 
-```text
-go test ./internal/probe -run TestRunSuccessfulHTTPSProbe -count=20
-7 of 20 iterations failed: TCPLatency = 0s, want positive
+After adding the process lifecycle tests and the test helper first:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/supervisor
 ```
 
-After the minimum-duration fix, the focused gate passed 100 consecutive iterations:
+Result: FAIL as expected. The compiler reported missing `Process`, `ErrReadyTimeout`, `ExitError`, `ErrAlreadyStarted`, and `ErrUnsafePath`.
 
-```text
-ok corp.example/overseas-access-gateway/internal/probe (count=100)
+### Supervisor GREEN
+
+After implementing Windows process/job supervision and portable stubs:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -v ./internal/supervisor
 ```
 
-## Final verification evidence
+Result: PASS. Covered readiness timeout termination, typed exit-before-ready failure, graceful-timeout escalation, descendant job termination, idempotent stop, bounded secret-redacted logs, second-start rejection, and absolute regular path enforcement.
 
-Windows PowerShell 5.1.28000.1643 with Pester 3.4.0:
+The escalation test deliberately registers a control-break handler in `fakeconnect`, proves `Stop` waits through the grace interval, and then waits for the descendant process handle to enter the signaled state after job termination.
 
-```text
-PS5_PESTER Total=27 Passed=27 Failed=0
+## Verification
+
+Required focused gate:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./internal/secret ./internal/supervisor ./tests/integration/fakeconnect
 ```
 
-PowerShell 7.6.4 with Pester 3.4.0:
+Result: PASS.
 
-```text
-PWSH_PESTER Total=27 Passed=27 Failed=0
+Full Go regression:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test ./...
 ```
 
-Portable Go 1.27 regression suite (`C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe test ./... -count=1`):
+Result: PASS for all existing and new packages.
 
-```text
-ok corp.example/overseas-access-gateway/cmd/poc-probe
-ok corp.example/overseas-access-gateway/internal/config
-ok corp.example/overseas-access-gateway/internal/inventory
-ok corp.example/overseas-access-gateway/internal/probe
+Lifecycle repetition:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -count=10 ./internal/secret ./internal/supervisor
 ```
 
-PowerShell parser verification:
+Result: PASS for all 10 repetitions.
 
-```text
-AST scripts/windows/snapshot.ps1 errors=0
-AST scripts/windows/apply-poc.ps1 errors=0
-AST scripts/windows/poc-networking-common.ps1 errors=0
-AST scripts/windows/rollback-poc.ps1 errors=0
-AST tests/powershell/PocNetworking.Tests.ps1 errors=0
+Static analysis:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe vet ./...
 ```
 
-Source/diff gates:
+Result: PASS.
 
-```text
-APPLY_SHOULDPROCESS=1
-ROLLBACK_SHOULDPROCESS=1
-PROHIBITED_PATTERN_SCAN=none
-git diff --check: exit 0
+Non-Windows compile gate:
+
+```powershell
+$env:GOOS='linux'
+$env:GOARCH='amd64'
+go test -c ./internal/secret
+go test -c ./internal/supervisor
+go build ./tests/integration/fakeconnect
 ```
 
-The prohibited scan covers `LocalAddress`, firewall-profile changes, `netsh`, group-wide firewall removal, and unscoped NAT removal.
+Result: PASS. Temporary cross-build artifacts were removed after verification.
 
-## Remaining concern
+Source gate:
 
-The evidence is mock/AST/unit-test evidence, not a live Windows networking integration result. Task 7 must still use the operator-controlled gate to validate the host's actual `Internet` keyword classification, local-policy merge into `ActiveStore`, WinNAT behavior, telecom path, rollback preview, and physical-disconnect no-leak result. No control-plane or employee-client rollout is authorized until that gate reports `PASS`.
+```powershell
+git diff --cached --check
+```
 
-## Commit lineage
+Result before commit: PASS.
 
-- `e0320bf feat: add reversible Windows PoC networking`
-- `de4b877 fix: harden Windows PoC networking transactions`
-- Second-review commit: `fix: make Windows recovery fail-closed and resumable` (the exact hash is reported in the handoff because the report is part of that commit).
+## Self-review
+
+- Confirmed DPAPI machine scope and exact entropy binding.
+- Confirmed the restrictive DACL is supplied to `CreateFile` at creation, not applied after plaintext-derived data is written.
+- Confirmed all caller-provided plaintext and intermediate buffers are zeroed where Go/Windows ownership permits.
+- Confirmed no error path formats plaintext, ciphertext, configured secrets, config contents, or child output.
+- Confirmed process invocation uses `exec.Command(exe, "run", "-c", config)` and never a shell.
+- Confirmed job assignment, graceful timeout, whole-tree termination, and descendant death against real Windows processes.
+- Confirmed redaction is streaming-safe across write boundaries and output is capped.
+- Confirmed Task 1–3 and the old PoC regression suite remain green.
+
+## Remaining concerns / integration obligations
+
+1. `Process.Start` enforces an absolute regular non-reparse path, but the hash/Authenticode decision remains the caller's responsibility. Task 5 must call the existing `internal/coreverify.Verify` immediately before `Start` and must not expose an alternate unverified launch path.
+2. `go test -race` could not run with the portable toolchain because it reports `-race requires cgo; enable cgo by setting CGO_ENABLED=1`, and this environment has no configured C compiler. Focused tests, 10 lifecycle repetitions, full regression, vet, and cross-compilation all pass; race instrumentation remains an external verification item.
+
+## Commit
+
+```text
+feat: protect credentials and supervise sing-box
+```
+
+The exact commit hash is reported in the handoff because this report is included in the commit itself.
