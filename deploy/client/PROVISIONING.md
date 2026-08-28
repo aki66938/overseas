@@ -30,4 +30,3 @@ $response = '{"id":"deployment-proof","action":"status"}'
 ```
 
 The example broker name documents the required interface; deployment must substitute the organization's approved broker that can write the JSON directly to the inherited pipe.
-
