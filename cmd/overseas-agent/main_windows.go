@@ -58,7 +58,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), serviceStopTimeout)
 	recovery := s.controller.Recover(recoveryContext)
 	cancelRecovery()
-	if recovery.State == accessmodel.StateFailed {
+	if recovery.State != accessmodel.StateDisconnected {
 		changes <- svc.Status{State: svc.StopPending}
 		return true, serviceExitRestore
 	}
@@ -86,7 +86,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				return false, 0
 			}
 			changes <- svc.Status{State: svc.StopPending}
-			if status := disconnectWithTimeout(s.controller); status.State == accessmodel.StateFailed {
+			if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
 				return true, serviceExitRestore
 			}
 			return true, serviceExitPipe
@@ -97,7 +97,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 func (s *serviceHandler) stop(changes chan<- svc.Status, cancelPipe context.CancelFunc) (bool, uint32) {
 	changes <- svc.Status{State: svc.StopPending}
 	cancelPipe()
-	if status := disconnectWithTimeout(s.controller); status.State == accessmodel.StateFailed {
+	if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
 		return true, serviceExitRestore
 	}
 	return false, 0

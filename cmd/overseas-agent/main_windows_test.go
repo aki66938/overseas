@@ -61,6 +61,36 @@ func TestServiceStopReturnsSuccessAfterRestoration(t *testing.T) {
 	}
 }
 
+func TestServiceStopRequiresDisconnectedTerminalState(t *testing.T) {
+	for _, state := range []accessmodel.ConnectionState{
+		accessmodel.StateConnecting,
+		accessmodel.StateConnected,
+		accessmodel.StateFailed,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			controller := &fakeServiceController{
+				recoverStatus:    agent.Status{State: accessmodel.StateDisconnected},
+				disconnectStatus: agent.Status{State: state, ErrorCode: agent.ErrorCanceled},
+			}
+			handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}}
+			requests := make(chan svc.ChangeRequest, 1)
+			changes := make(chan svc.Status, 4)
+			result := make(chan serviceResult, 1)
+			go func() {
+				specific, code := handler.Execute(nil, requests, changes)
+				result <- serviceResult{specific: specific, code: code}
+			}()
+
+			waitForRunning(t, changes)
+			requests <- svc.ChangeRequest{Cmd: svc.Stop}
+			got := <-result
+			if !got.specific || got.code == 0 {
+				t.Fatalf("Execute() for %s = serviceSpecific %v, code %d", state, got.specific, got.code)
+			}
+		})
+	}
+}
+
 func TestServiceStartupFailsWhenRestartReconciliationFails(t *testing.T) {
 	controller := &fakeServiceController{
 		recoverStatus: agent.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed},

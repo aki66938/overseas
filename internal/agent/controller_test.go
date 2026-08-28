@@ -225,6 +225,73 @@ func TestControllerRecoveryRetriesRestorationIdempotently(t *testing.T) {
 	}
 }
 
+func TestControllerStopFailureRetainsLeakBlockAndSkipsRestore(t *testing.T) {
+	network := newFakeNetwork()
+	process := newFakeProcess()
+	controller := newTestController(network, process, testDependencies(nil))
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	process.stopErr = errors.New("could not prove process tree termination")
+
+	got := controller.Disconnect(context.Background())
+
+	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Disconnect() = %#v", got)
+	}
+	if network.restoreCalls != 0 {
+		t.Fatalf("Restore() calls = %d, want 0", network.restoreCalls)
+	}
+	if !network.isBlocked() {
+		t.Fatal("process stop failure removed the public leak block")
+	}
+	if retry := controller.Connect(context.Background()); retry.State != accessmodel.StateFailed || retry.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Connect() after unproven stop = %#v", retry)
+	}
+	if process.startCalls != 1 {
+		t.Fatalf("Start() calls after unproven stop = %d, want 1", process.startCalls)
+	}
+}
+
+func TestControllerStartupFailureWithUnprovenStopRetainsLeakBlock(t *testing.T) {
+	network := newFakeNetwork()
+	network.activateErr = errors.New("route activation failed")
+	process := newFakeProcess()
+	process.stopErr = errors.New("could not prove process tree termination")
+	controller := newTestController(network, process, testDependencies(nil))
+
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRouteActivationFailed {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	got := controller.Disconnect(context.Background())
+
+	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Disconnect() = %#v", got)
+	}
+	if network.restoreCalls != 0 || !network.isBlocked() {
+		t.Fatalf("startup stop failure restored network: restore calls=%d blocked=%v", network.restoreCalls, network.isBlocked())
+	}
+	if process.stopCalls != 2 {
+		t.Fatalf("Stop() calls = %d, want initial attempt plus disconnect retry", process.stopCalls)
+	}
+}
+
+func TestControllerTUNIdentityFailureRemainsFailClosed(t *testing.T) {
+	network := newFakeNetwork()
+	network.readyErr = errors.New("new TUN identity was not proven")
+	process := newFakeProcess()
+	controller := newTestController(network, process, testDependencies(nil))
+
+	got := controller.Connect(context.Background())
+
+	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorCoreNotReady {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	if !network.isBlocked() || network.activateCalls != 0 || process.stopCalls != 1 {
+		t.Fatalf("identity failure state: blocked=%v activate=%d stop=%d", network.isBlocked(), network.activateCalls, process.stopCalls)
+	}
+}
+
 func TestControllerRouteActivationFailureRemainsFailClosed(t *testing.T) {
 	network := newFakeNetwork()
 	network.activateErr = errors.New("route failed")
@@ -321,6 +388,7 @@ type fakeNetwork struct {
 	reconcileCalls int
 	restoreErrors  []error
 	activateErr    error
+	readyErr       error
 	log            []string
 	trace          *callTrace
 }
@@ -362,6 +430,12 @@ func (f *fakeNetwork) ActivateTUNRoutes(context.Context) error {
 		f.active = true
 	}
 	return f.activateErr
+}
+
+func (f *fakeNetwork) WaitTUNReady(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readyErr
 }
 
 func (f *fakeNetwork) Restore(_ context.Context, _ any) error {
@@ -408,6 +482,7 @@ type fakeProcess struct {
 	waitErr      error
 	exitOnce     sync.Once
 	startCalls   int
+	stopCalls    int
 	log          []string
 	trace        *callTrace
 	startContext context.Context
@@ -451,6 +526,7 @@ func (f *fakeProcess) Ready(ctx context.Context) error {
 
 func (f *fakeProcess) Stop(context.Context) error {
 	f.mu.Lock()
+	f.stopCalls++
 	f.log = append(f.log, "stop")
 	if f.trace != nil {
 		f.trace.record("stop")

@@ -52,6 +52,7 @@ type Credential struct {
 type NetworkManager interface {
 	Capture(context.Context) (any, error)
 	InstallPublicTCPBlock(context.Context) error
+	WaitTUNReady(context.Context) error
 	ActivateTUNRoutes(context.Context) error
 	Restore(context.Context, any) error
 	Reconcile(context.Context) error
@@ -256,6 +257,12 @@ func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
 	if err := contextError(ctx); err != nil {
 		return failure(ErrorCanceled), false
 	}
+	c.mu.Lock()
+	processMayStillBeRunning := c.processStarted
+	c.mu.Unlock()
+	if processMayStillBeRunning {
+		return failure(ErrorRestoreFailed), true
+	}
 	if err := c.deps.ValidatePolicy(c.policy); err != nil {
 		return failure(ErrorInvalidPolicy), false
 	}
@@ -324,18 +331,22 @@ func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
 	}
 	started := true
 	if err := c.process.Ready(ctx); err != nil {
-		_ = c.process.Stop(context.Background())
-		return failure(codeForContext(ctx, ErrorCoreNotReady)), false
+		return failure(codeForContext(ctx, ErrorCoreNotReady)), c.stopCouldNotBeProven()
+	}
+	if err := c.network.WaitTUNReady(ctx); err != nil {
+		return failure(codeForContext(ctx, ErrorCoreNotReady)), c.stopCouldNotBeProven()
 	}
 	if err := contextError(ctx); err != nil {
-		_ = c.process.Stop(context.Background())
-		return failure(ErrorCanceled), false
+		return failure(ErrorCanceled), c.stopCouldNotBeProven()
 	}
 	if err := c.network.ActivateTUNRoutes(ctx); err != nil {
-		_ = c.process.Stop(context.Background())
-		return failure(ErrorRouteActivationFailed), false
+		return failure(ErrorRouteActivationFailed), c.stopCouldNotBeProven()
 	}
 	return Status{State: accessmodel.StateConnected, Message: "海外访问已连接"}, started
+}
+
+func (c *Controller) stopCouldNotBeProven() bool {
+	return c.process.Stop(context.Background()) != nil
 }
 
 func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
@@ -350,6 +361,11 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	if started && c.process != nil {
 		stopErr = c.process.Stop(ctx)
 	}
+	if stopErr != nil {
+		// Restoring routes, DNS, or the leak block is unsafe until the whole
+		// supervised process tree is proven terminated.
+		return failure(ErrorRestoreFailed), false
+	}
 	if hasSnapshot {
 		if c.network == nil || c.network.Restore(ctx, snapshot) != nil {
 			return failure(ErrorRestoreFailed), false
@@ -358,9 +374,6 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 		if c.network == nil || c.network.Reconcile(ctx) != nil {
 			return failure(ErrorRestoreFailed), false
 		}
-	}
-	if stopErr != nil {
-		return failure(ErrorRestoreFailed), false
 	}
 	return Status{State: accessmodel.StateDisconnected, Message: "海外访问已关闭"}, true
 }
