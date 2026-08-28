@@ -16,6 +16,7 @@ import (
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
 	"corp.example/overseas-access-gateway/internal/coreverify"
+	"corp.example/overseas-access-gateway/internal/runtimeowner"
 	"corp.example/overseas-access-gateway/internal/secret"
 	"corp.example/overseas-access-gateway/internal/singconfig"
 	"corp.example/overseas-access-gateway/internal/supervisor"
@@ -230,6 +231,9 @@ func writeConfigAtomic(path string, contents []byte) error {
 		return err
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	if err := runtimeowner.Record(path); err != nil {
 		return err
 	}
 	keep = true

@@ -19,6 +19,9 @@ type payloadInput struct {
 type trustVerifier interface {
 	verifyPackage(msi, thumbprint string) error
 	verifyPayload(payloadInput) error
+	installFirewall() error
+	removeFirewall() error
+	cleanupRuntime() error
 }
 
 func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
@@ -33,6 +36,24 @@ func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 		input := payloadInput{ProgramFiles: args[2], ProgramData: args[4], Manifest: args[6], Signature: args[8], Thumbprint: args[10]}
 		if err := verifier.verifyPayload(input); err != nil {
 			_, _ = fmt.Fprintln(errorOutput, "installed payload verification failed")
+			return 1
+		}
+		return 0
+	case len(args) == 1 && args[0] == "firewall-install":
+		if err := verifier.installFirewall(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "installer firewall operation failed")
+			return 1
+		}
+		return 0
+	case len(args) == 1 && args[0] == "firewall-remove":
+		if err := verifier.removeFirewall(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "installer firewall operation failed")
+			return 1
+		}
+		return 0
+	case len(args) == 1 && args[0] == "runtime-cleanup":
+		if err := verifier.cleanupRuntime(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "runtime cleanup failed")
 			return 1
 		}
 		return 0

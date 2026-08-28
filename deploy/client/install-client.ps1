@@ -24,6 +24,7 @@ $InstallOwnerPath = Join-Path $InstallRoot $RootOwnerFileName
 $DataOwnerPath = Join-Path $DataRoot $RootOwnerFileName
 $OwnerPath = $DataOwnerPath
 $CredentialPath = Join-Path $DataRoot 'credential.bin'
+$RuntimeOwnershipPath = Join-Path $DataRoot 'runtime-owned.json'
 $ShortcutPath = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\RegenBio Overseas Access.lnk'
 $PipePath = '\\.\pipe\RegenBioOverseasAccess'
 $TunAlias = 'RegenBioOverseasAccess'
@@ -576,6 +577,27 @@ function Remove-OwnedService {
     Invoke-ScChecked -Arguments @('delete', $ServiceName)
 }
 
+function Clear-OwnedSensitiveRuntimeFiles {
+    if (-not (Test-Path -LiteralPath $RuntimeOwnershipPath -PathType Leaf)) { return }
+    $ledger = Get-Content -LiteralPath $RuntimeOwnershipPath -Raw | ConvertFrom-Json
+    if ($ledger.schema_version -ne 1) { throw 'Runtime ownership ledger is invalid.' }
+    foreach ($expected in @('credential.bin', 'sing-box.json')) {
+        if ((Test-Path -LiteralPath (Join-Path $DataRoot $expected) -PathType Leaf) -and @($ledger.files) -notcontains $expected) {
+            throw "Sensitive runtime file '$expected' is not ownership-proven."
+        }
+    }
+    foreach ($name in @($ledger.files)) {
+        if ($name -notin @('credential.bin', 'sing-box.json')) { throw 'Runtime ownership ledger contains a foreign path.' }
+        $path = Join-Path $DataRoot $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $length = (Get-Item -LiteralPath $path).Length
+            [IO.File]::WriteAllBytes($path, (New-Object byte[] $length))
+            Remove-Item -LiteralPath $path -Force
+        }
+        if (Test-Path -LiteralPath $path) { throw "Sensitive runtime residue '$name' remains." }
+    }
+}
+
 function Remove-OwnedDirectory {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -689,6 +711,7 @@ function Undo-ClientTransaction {
         Remove-OwnedFirewallRules
         Remove-OwnedShortcut
         Remove-OwnedService
+        Clear-OwnedSensitiveRuntimeFiles
         foreach ($root in @($InstallRoot, $DataRoot)) {
             if (Test-ValidRootMarker -Root $root) {
                 Remove-OwnedPayloadFiles -Root $root
@@ -803,6 +826,8 @@ function Uninstall-ClientTransaction {
         Remove-OwnedFirewallRules
         Remove-OwnedShortcut
         Remove-OwnedService
+        Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanup' -PendingResource $RuntimeOwnershipPath
+        Clear-OwnedSensitiveRuntimeFiles
         foreach ($root in @($InstallRoot, $DataRoot)) {
             if (Test-Path -LiteralPath $root -PathType Container) {
                 Remove-OwnedPayloadFiles -Root $root
@@ -815,6 +840,7 @@ function Uninstall-ClientTransaction {
         Assert-OwnedFirewallAbsent
         if (Test-Path -LiteralPath $ShortcutPath) { throw 'Owned shortcut residue remains.' }
         Write-TransactionPhase -Path $JournalPath -Phase 'ResidueProven'
+        if (Test-Path -LiteralPath $RuntimeOwnershipPath -PathType Leaf) { Remove-Item -LiteralPath $RuntimeOwnershipPath -Force }
         foreach ($root in @($InstallRoot, $DataRoot)) {
             if (Test-Path -LiteralPath $root -PathType Container) {
                 Remove-RootOwnershipMarker -Root $root
@@ -825,7 +851,7 @@ function Uninstall-ClientTransaction {
         Remove-Item -LiteralPath $JournalPath -Force
     }
     catch {
-        Write-TransactionPhase -Path $JournalPath -Phase 'UninstallIncomplete'
+        Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanupIncomplete'
         throw
     }
 }

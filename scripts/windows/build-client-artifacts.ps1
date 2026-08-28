@@ -11,9 +11,14 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$target = [IO.Path]::GetFullPath((Join-Path $repo $OutputDirectory))
+$finalTarget = [IO.Path]::GetFullPath((Join-Path $repo $OutputDirectory))
+$temporary = if ($Mode -eq 'Release') { $finalTarget + '.release-' + [guid]::NewGuid().ToString('N') + '.tmp' } else { $finalTarget }
+$target = $temporary
 if (-not $target.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe artifact output directory.' }
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
+$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+$goExecutable = Join-Path $workspace ('.tools\go' + $lock.go.version + '\go\bin\go.exe')
+$wixPackages = Join-Path $workspace ('.tools\wix' + $lock.wix.version)
 $certificate = $null
 if ($Mode -eq 'Release') {
     if ($SigningCertificateThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Release requires a corporate signing certificate thumbprint.' }
@@ -27,6 +32,10 @@ if ($workingTreeStatus.Count -ne 0) { throw 'Artifact builds require a clean Git
 function Assert-Hash([string] $Path, [string] $Expected) {
     if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Expected.ToLowerInvariant()) { throw "Locked hash mismatch for '$([IO.Path]::GetFileName($Path))'." }
 }
+if (-not (Test-Path -LiteralPath $goExecutable) -or (& $goExecutable version) -notmatch ('go' + [regex]::Escape($lock.go.version))) { throw 'Locked Go toolchain is absent or mismatched.' }
+Assert-Hash -Path (Join-Path $wixPackages ('WixToolset.Sdk.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.sdk_sha256
+Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.util.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.util_sha256
+Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.firewall.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.firewall_sha256
 
 function Write-DetachedCms([string] $ContentPath, [string] $SignaturePath) {
     Add-Type -AssemblyName System.Security
@@ -38,6 +47,7 @@ function Write-DetachedCms([string] $ContentPath, [string] $SignaturePath) {
     [IO.File]::WriteAllText($SignaturePath, [Convert]::ToBase64String($cms.Encode()), [Text.Encoding]::ASCII)
 }
 
+try {
 if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
 New-Item -ItemType Directory -Path $target | Out-Null
 $scratch = Join-Path $target '.extract'
@@ -85,6 +95,16 @@ if ($Mode -eq 'Release') {
 
 $sourceCommit = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Could not bind artifacts to the Git commit.' }
+$sbom = [ordered] @{
+    schema_version = 1; format = 'RegenBio-client-sbom'; source_commit = $sourceCommit
+    components = @(
+        [ordered] @{ name = 'sing-box'; version = $lock.sing_box.version; license_file = 'sing-box-LICENSE.txt'; source = $lock.sing_box.source },
+        [ordered] @{ name = 'Wintun'; version = $lock.wintun.version; license = 'Wintun Prebuilt Binaries License'; attribution = 'Wintun Prebuilt Binaries License'; license_file = 'wintun-LICENSE.txt'; source = $lock.wintun.source }
+    )
+}
+[IO.File]::WriteAllText((Join-Path $target 'client-sbom.json'), ($sbom | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+$sumLines = @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name })
+[IO.File]::WriteAllLines((Join-Path $target 'SHA256SUMS'), $sumLines, (New-Object Text.UTF8Encoding($false)))
 $dataNames = @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')
 $firstParty = @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe')
 $files = @()
@@ -109,15 +129,14 @@ if ($Mode -eq 'Release') {
 }
 else { [IO.File]::WriteAllText($signaturePath, 'INSPECT-ONLY-NOT-SIGNED', [Text.Encoding]::ASCII) }
 
-$sbom = [ordered] @{
-    schema_version = 1; format = 'RegenBio-client-sbom'; source_commit = $sourceCommit
-    components = @(
-        [ordered] @{ name = 'sing-box'; version = $lock.sing_box.version; license_file = 'sing-box-LICENSE.txt'; source = $lock.sing_box.source },
-        [ordered] @{ name = 'Wintun'; version = $lock.wintun.version; license = 'GPL-2.0'; attribution = 'Wintun is distributed under the GPLv2'; license_file = 'wintun-LICENSE.txt'; source = $lock.wintun.source }
-    )
-}
-[IO.File]::WriteAllText((Join-Path $target 'client-sbom.json'), ($sbom | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
-$sumLines = @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name })
-[IO.File]::WriteAllLines((Join-Path $target 'SHA256SUMS'), $sumLines, (New-Object Text.UTF8Encoding($false)))
 Remove-Item -LiteralPath $scratch -Recurse -Force
+if ($Mode -eq 'Release') {
+    if (Test-Path -LiteralPath $finalTarget) { throw 'Final release path already exists.' }
+    Move-Item -LiteralPath $temporary -Destination $finalTarget # atomic publish on one volume
+    $target = $finalTarget
+}
 [ordered] @{ mode = $Mode; source_commit = $sourceCommit; output = $target; signing_thumbprint = $(if ($certificate) { $certificate[0].Thumbprint } else { $null }) } | ConvertTo-Json -Compress
+}
+finally {
+    if ($Mode -eq 'Release' -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+}

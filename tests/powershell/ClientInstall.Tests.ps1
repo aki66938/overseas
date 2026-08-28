@@ -7,6 +7,7 @@ $buildLockPath = Join-Path $repoRoot 'deploy\client\build-lock.json'
 $checksumsLockPath = Join-Path $repoRoot 'deploy\client\checksums.lock'
 $artifactBuilderPath = Join-Path $repoRoot 'scripts\windows\build-client-artifacts.ps1'
 $msiInspectorPath = Join-Path $repoRoot 'scripts\windows\inspect-client-msi.ps1'
+$releasePublisherPath = Join-Path $repoRoot 'scripts\windows\publish-client-release.ps1'
 
 function Get-ClientInstallFailureMessage {
     param([Parameter(Mandatory = $true)][scriptblock] $Action)
@@ -334,7 +335,8 @@ Describe 'Transactional Windows client installer' {
             $files | Should Match ([regex]::Escape($file))
         }
         $combined = $product + "`n" + $files
-        $combined | Should Not Match '(?i)credential\.bin|password|secret|token|private.?key|\.pfx|\.pem'
+        $combined | Should Not Match '(?i)<File[^>]*(credential\.bin|password|secret|token|private.?key|\.pfx|\.pem)'
+        $combined | Should Not Match '(?i)<Property[^>]*(credential|password|secret|token|pin)'
         $combined | Should Not Match '(?i)DownloadUrl|https?://(?!wixtoolset\.org/schemas/)'
         $combined | Should Not Match '<CustomAction[^>]*(ExeCommand|CommandLine)[^>]*(credential|password|secret|token|pin)'
     }
@@ -433,5 +435,50 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'SIGNING_CERT_THUMBPRINT'
         $text | Should Match 'build-client-artifacts\.ps1'
         $text | Should Match 'inspect-client-msi\.ps1'
+    }
+
+    It 'owns and resumably removes dynamic sensitive runtime files after process termination' {
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $product = Get-Content -LiteralPath $productPath -Raw
+        $script | Should Match 'runtime-owned\.json'
+        $script | Should Match 'credential\.bin'
+        $script | Should Match 'sing-box\.json'
+        $script | Should Match 'Clear-OwnedSensitiveRuntimeFiles'
+        $script.IndexOf('Remove-OwnedService') | Should BeLessThan $script.IndexOf('Clear-OwnedSensitiveRuntimeFiles')
+        $script | Should Match 'SensitiveCleanupIncomplete'
+        $files | Should Match '<RemoveFile[^>]*Name="credential\.bin"'
+        $files | Should Match '<RemoveFile[^>]*Name="sing-box\.json"'
+        $product | Should Match 'CleanupOwnedRuntime'
+    }
+
+    It 'passes deferred verification only through CustomActionData and sequences first-party firewall rollback' {
+        $product = Get-Content -LiteralPath $productPath -Raw
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $product | Should Match '<SetProperty[^>]*Id="VerifyInstalledPayload"'
+        $product | Should Match 'ExeCommand="\[CustomActionData\]"'
+        $product | Should Match 'RollbackClientFirewall'
+        $product | Should Match 'InstallClientFirewall'
+        $files | Should Not Match 'fire:FirewallException'
+        $files | Should Not Match 'xmlns:fire'
+    }
+
+    It 'enforces exact trust-root coverage locked tools and atomic release publication' {
+        $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw
+        $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw
+        $builder | Should Match 'go\.version'
+        $builder | Should Match 'wix\.sdk_sha256'
+        $builder | Should Match 'Move-Item[^\r\n]*publish'
+        $builder | Should Match 'finally[\s\S]*Remove-Item[^\r\n]*temporary'
+        $builder | Should Match 'Wintun Prebuilt Binaries License'
+        $inspector | Should Match 'trustRootNames'
+        $inspector | Should Match 'Compare-Object[^\r\n]*coveredNames[^\r\n]*payloadNames'
+        $inspector | Should Match 'InstallClientFirewall.*InstallServices'
+        (Test-Path -LiteralPath $releasePublisherPath -PathType Leaf) | Should Be $true
+        if (Test-Path -LiteralPath $releasePublisherPath) {
+            $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+            $publisher | Should Match 'build-client-artifacts\.ps1[\s\S]*wix[\s\S]*signtool[\s\S]*inspect-client-msi\.ps1[\s\S]*Move-Item'
+            $publisher | Should Match 'finally[\s\S]*Remove-Item'
+        }
     }
 }

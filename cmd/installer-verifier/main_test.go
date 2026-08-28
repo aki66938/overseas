@@ -28,6 +28,9 @@ func (f *fakeTrustVerifier) verifyPayload(input payloadInput) error {
 	}
 	return f.err
 }
+func (f *fakeTrustVerifier) installFirewall() error { return f.err }
+func (f *fakeTrustVerifier) removeFirewall() error  { return f.err }
+func (f *fakeTrustVerifier) cleanupRuntime() error  { return f.err }
 
 func TestRunPackageRequiresExactArgumentsAndPropagatesTrustFailure(t *testing.T) {
 	for _, args := range [][]string{

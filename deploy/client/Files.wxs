@@ -1,6 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
-     xmlns:fire="http://wixtoolset.org/schemas/v4/wxs/firewall">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Fragment>
     <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
       <Component Id="InstallFolderAcl" Guid="2F06E3D6-B884-4D89-B63F-E692FB45D51E" Bitness="always64">
@@ -10,17 +9,7 @@
       </Component>
 
       <Component Id="AgentService" Guid="9C616B69-09D6-4430-9B5E-E93994734695" Bitness="always64">
-        <File Id="AgentExe" Source="overseas-agent.exe" KeyPath="yes" Checksum="yes">
-          <fire:FirewallException
-              Id="AgentOutboundRule"
-              Name="RegenBioOverseasAccess-AllowAgent-Out"
-              Description="RegenBio Overseas Access agent outbound control traffic"
-              Outbound="yes"
-              Protocol="tcp"
-              Scope="any"
-              Profile="all"
-              IgnoreFailure="no" />
-        </File>
+        <File Id="AgentExe" Source="overseas-agent.exe" KeyPath="yes" Checksum="yes" />
         <ServiceInstall
               Id="AgentServiceInstall"
               Name="RegenBioOverseasAccessAgent"
@@ -65,26 +54,7 @@
       </Component>
 
       <Component Id="CoreRuntime" Guid="114DB7B9-FF83-4682-B2AC-411B9A6E6F36" Bitness="always64">
-        <File Id="SingBoxExe" Source="sing-box.exe" KeyPath="yes" Checksum="yes">
-          <fire:FirewallException
-              Id="CoreTcpOutboundRule"
-              Name="RegenBioOverseasAccess-AllowCoreTCP-Out"
-              Description="RegenBio Overseas Access core TCP traffic"
-              Outbound="yes"
-              Protocol="tcp"
-              Scope="any"
-              Profile="all"
-              IgnoreFailure="no" />
-          <fire:FirewallException
-              Id="CoreUdpOutboundRule"
-              Name="RegenBioOverseasAccess-AllowCoreUDP-Out"
-              Description="RegenBio Overseas Access core UDP traffic"
-              Outbound="yes"
-              Protocol="udp"
-              Scope="any"
-              Profile="all"
-              IgnoreFailure="no" />
-        </File>
+        <File Id="SingBoxExe" Source="sing-box.exe" KeyPath="yes" Checksum="yes" />
         <File Id="CoreManifest" Source="sing-box.manifest.json" Checksum="yes" />
         <File Id="CronetRuntime" Source="libcronet.dll" Checksum="yes" />
         <File Id="TunDriver" Source="wintun.dll" Checksum="yes" />
@@ -105,6 +75,9 @@
         <CreateFolder>
           <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
         </CreateFolder>
+        <RemoveFile Id="RemoveOwnedCredential" Name="credential.bin" On="uninstall" />
+        <RemoveFile Id="RemoveOwnedRenderedConfig" Name="sing-box.json" On="uninstall" />
+        <RemoveFile Id="RemoveRuntimeOwnershipLedger" Name="runtime-owned.json" On="uninstall" />
       </Component>
       <Component Id="SignedPolicy" Guid="119915E6-1504-4D49-9EF0-9D76454629C6" Bitness="always64">
         <File Id="AgentPolicy" Source="agent.yaml" KeyPath="yes" Checksum="yes" />

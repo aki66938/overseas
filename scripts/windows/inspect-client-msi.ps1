@@ -27,6 +27,10 @@ $map = [ordered] @{
 $extracted = Get-ChildItem -LiteralPath (Join-Path $output 'files\File') -File
 if (Compare-Object @($map.Keys | Sort-Object) @($extracted.Name | Sort-Object)) { throw 'MSI file-table allowlist mismatch.' }
 $manifest = Get-Content -LiteralPath (Join-Path $StagingPath 'artifact-manifest.json') -Raw | ConvertFrom-Json
+$trustRootNames = @('artifact-manifest.json','artifact-manifest.json.p7s')
+$coveredNames = @($manifest.files | ForEach-Object { [string] $_.name }) + $trustRootNames
+$payloadNames = @($map.Values)
+if (Compare-Object @($coveredNames | Sort-Object -Unique) @($payloadNames | Sort-Object -Unique)) { throw 'Signed trust-root coverage does not exactly match MSI payloads.' }
 foreach ($id in $map.Keys) {
     $source = Join-Path $StagingPath $map[$id]
     $packaged = Join-Path $output ('files\File\' + $id)
@@ -84,6 +88,7 @@ foreach ($row in @(Get-MsiTableRows 'InstallExecuteSequence')) { $sequence[[stri
 if ($sequence.VerifyPackageTrust -ge $sequence.InstallInitialize) { throw 'VerifyPackageTrust must precede InstallInitialize.' }
 if ($sequence.MsiSafeRemove -ge $sequence.StopServices) { throw 'MsiSafeRemove must precede StopServices.' }
 if ($sequence.VerifyInstalledPayload -ge $sequence.InstallServices -or $sequence.VerifyInstalledPayload -le $sequence.InstallFiles) { throw 'VerifyInstalledPayload must follow InstallFiles and precede InstallServices.' }
+if ($sequence.InstallClientFirewall -le $sequence.VerifyInstalledPayload -or $sequence.InstallClientFirewall -ge $sequence.InstallServices) { throw 'InstallClientFirewall must follow VerifyInstalledPayload and precede InstallServices.' }
 if ($sequence.RemoveExistingProducts -le $sequence.InstallInitialize) { throw 'Major upgrade removal ordering is unsafe.' }
 $aclRows = @(Get-MsiTableRows 'MsiLockPermissionsEx')
 $expectedSddl = @('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)', 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -93,10 +98,11 @@ $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } |
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')
 $packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackageTrust' -and $_[1] -eq '2' -and $_[2] -eq 'InstallerVerifierBinary' })
-$payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' })
-if ($packageTrustActions.Count -ne 1 -or $payloadTrustActions.Count -ne 1) { throw 'First-party trust custom actions are invalid.' }
+$payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq '[CustomActionData]' })
+$payloadDataActions = @($customActions | Where-Object { $_[1] -eq '51' -and $_[2] -eq 'VerifyInstalledPayload' })
+if ($packageTrustActions.Count -ne 1 -or $payloadTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 1) { throw 'First-party trust custom actions are invalid.' }
 $packageThumbprintMatch = [regex]::Match([string] $packageTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
-$payloadThumbprintMatch = [regex]::Match([string] $payloadTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
+$payloadThumbprintMatch = [regex]::Match([string] $payloadDataActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
 if (-not $packageThumbprintMatch.Success -or -not $payloadThumbprintMatch.Success) { throw 'Embedded corporate trust anchor is absent.' }
 $embeddedCorporateThumbprint = $packageThumbprintMatch.Groups[1].Value.ToUpperInvariant()
 if ($payloadThumbprintMatch.Groups[1].Value.ToUpperInvariant() -ne $embeddedCorporateThumbprint) { throw 'Package and payload trust anchors differ.' }
@@ -114,6 +120,6 @@ if ($manifest.mode -eq 'release') {
 elseif ($trustMode[0] -ne 'INSPECT_ONLY_REFUSES_INSTALL' -or $embeddedCorporateThumbprint -ne ('0' * 40)) {
     throw 'Inspect-only MSI does not contain the fail-closed trust sentinel.'
 }
-foreach ($table in @('ServiceInstall','ServiceControl','Registry','Wix4FirewallException','Upgrade')) { [void] @(Get-MsiTableRows $table) }
+foreach ($table in @('ServiceInstall','ServiceControl','Registry','RemoveFile','Upgrade')) { [void] @(Get-MsiTableRows $table) }
 $database.Dispose()
 [ordered] @{ msi_sha256 = (Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash; payload_count = $map.Count; mode = $manifest.mode; source_commit = $manifest.source_commit } | ConvertTo-Json -Compress

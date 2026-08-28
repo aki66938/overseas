@@ -57,6 +57,4 @@ inspect-msi: msi
 
 release-msi: build-client-binaries
 	pwsh -NoProfile -Command "if ('$(SIGNING_CERT_THUMBPRINT)' -notmatch '^[A-Fa-f0-9]{40}$$') { throw 'SIGNING_CERT_THUMBPRINT is required for release-msi.' }"
-	pwsh -NoProfile -File scripts/windows/build-client-artifacts.ps1 -Mode Release -OutputDirectory '$(CLIENT_PAYLOAD_DIR)' -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -SignToolPath '$(SIGNTOOL)'
-	pwsh -NoProfile -Command "New-Item -ItemType Directory -Path (Split-Path -Parent '$(CLIENT_MSI)') -Force | Out-Null; & '$(WIX)' build deploy/client/Product.wxs deploy/client/Files.wxs -d CorporateSigningThumbprint='$(SIGNING_CERT_THUMBPRINT)' -d PackageTrustMode='RELEASE_SIGNED' -bindpath '$(CLIENT_PAYLOAD_DIR)' -arch x64 -ext '$(WIX_UTIL_EXT)' -ext '$(WIX_FIREWALL_EXT)' -intermediateFolder build/wixobj-release -pdbtype none -out '$(CLIENT_MSI)'; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }; & '$(SIGNTOOL)' sign /fd SHA256 /sha1 '$(SIGNING_CERT_THUMBPRINT)' '$(CLIENT_MSI)'; exit $$LASTEXITCODE"
-	pwsh -NoProfile -File scripts/windows/inspect-client-msi.ps1 -MsiPath '$(CLIENT_MSI)' -StagingPath '$(CLIENT_PAYLOAD_DIR)' -WixPath '$(WIX)' -DtfPath '$(DTF)'
+	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -WixPath '$(WIX)' -UtilExtensionPath '$(WIX_UTIL_EXT)' -DtfPath '$(DTF)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_MSI)'
