@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,6 +115,28 @@ func TestMachineStoreRestrictsFileACL(t *testing.T) {
 		if strings.Contains(sddl, forbidden) {
 			t.Fatalf("ACL %q grants forbidden principal %q", sddl, forbidden)
 		}
+	}
+}
+
+func TestMachineExactCrashAfterFlushLeavesOnlyCallerJournaledPath(t *testing.T) {
+	if path := os.Getenv("SECRET_EXACT_CRASH_PATH"); path != "" {
+		machineFileSyncedHook = func(string) { os.Exit(99) }
+		_ = StoreMachineExact(path, []byte("crash-test-secret"))
+		t.Fatal("flush crash hook did not terminate child")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".credential.bin.publish-11111111111111111111111111111111.tmp")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMachineExactCrashAfterFlushLeavesOnlyCallerJournaledPath$")
+	cmd.Env = append(os.Environ(), "SECRET_EXACT_CRASH_PATH="+path)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("crash child unexpectedly succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("exact store left unjournaled sibling paths: %v", entryNames(entries))
 	}
 }
 

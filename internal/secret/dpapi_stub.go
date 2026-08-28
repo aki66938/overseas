@@ -15,6 +15,13 @@ func StoreMachine(_ string, plaintext []byte) error {
 	return ErrUnsupported
 }
 
+func StoreMachineExact(_ string, plaintext []byte) error {
+	for i := range plaintext {
+		plaintext[i] = 0
+	}
+	return ErrUnsupported
+}
+
 func LoadMachine(_ string) ([]byte, error) {
 	return nil, ErrUnsupported
 }

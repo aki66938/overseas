@@ -499,6 +499,7 @@ Describe 'Transactional Windows client installer' {
         $verifier | Should Match "'preexisting'"
         $verifier | Should Match 'Get-NetFirewallApplicationFilter'
         $verifier | Should Match 'Get-NetFirewallPortFilter'
+        $verifier | Should Match 'Get-NetFirewallSecurityFilter'
         $verifier | Should Match 'Write-FirewallJournal'
         $verifier | Should Match "icacls\.exe[^\r\n]*/inheritance:r[^\r\n]*S-1-5-18[^\r\n]*S-1-5-32-544"
         $verifier.IndexOf('Write-FirewallJournal') | Should BeLessThan $verifier.IndexOf('New-NetFirewallRule')
@@ -529,7 +530,7 @@ Describe 'Transactional Windows client installer' {
         $lifecycleText = $match.Groups[1].Value.Replace("`$data='C:\ProgramData\RegenBio\OverseasAccess'", "`$data='" + $data.Replace("'", "''") + "'")
         $lifecycleText = $lifecycleText -replace '& "\$env:WINDIR\\System32\\icacls\.exe"[^\r\n]*', '$global:LASTEXITCODE=0'
         $lifecycleText = $lifecycleText -replace 'exit 0', 'return'
-        foreach ($command in @('Get-NetFirewallRule','Get-NetFirewallApplicationFilter','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetFirewallServiceFilter','Get-NetFirewallInterfaceFilter','New-NetFirewallRule','Remove-NetFirewallRule')) {
+        foreach ($command in @('Get-NetFirewallRule','Get-NetFirewallApplicationFilter','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetFirewallServiceFilter','Get-NetFirewallInterfaceFilter','Get-NetFirewallSecurityFilter','New-NetFirewallRule','Remove-NetFirewallRule')) {
             $lifecycleText = $lifecycleText.Replace($command, ('Test-' + $command))
         }
         $lifecycle = [scriptblock]::Create($lifecycleText)
@@ -542,6 +543,7 @@ Describe 'Transactional Windows client installer' {
         function Test-Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Address) } }
         function Test-Get-NetFirewallServiceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.ServiceFilter) } }
         function Test-Get-NetFirewallInterfaceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.InterfaceFilter) } }
+        function Test-Get-NetFirewallSecurityFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.SecurityFilter) } }
         function Test-New-NetFirewallRule {
             param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled,$PolicyStore)
             $script:createCount++
@@ -553,6 +555,7 @@ Describe 'Transactional Windows client installer' {
             $record.Rule | Add-Member Address ([pscustomobject]@{ LocalAddress='Any'; RemoteAddress='Any' })
             $record.Rule | Add-Member ServiceFilter ([pscustomobject]@{ Service='Any' })
             $record.Rule | Add-Member InterfaceFilter ([pscustomobject]@{ InterfaceType='Any'; InterfaceAlias='Any' })
+            $record.Rule | Add-Member SecurityFilter ([pscustomobject]@{ Authentication='NotRequired'; Encryption='NotRequired'; LocalUser='Any'; RemoteUser='Any'; RemoteMachine='Any'; OverrideBlockRules=$false })
             $script:firewallState[$Name] = $record
         }
         function Test-Remove-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); [void]$script:firewallState.Remove($Name) }
@@ -567,6 +570,9 @@ Describe 'Transactional Windows client installer' {
         $script:createCount | Should Be 3
         & $lifecycle 'rollback' # repair rollback preserves rules created by the prior install
         $script:firewallState.Count | Should Be 3
+        $script:firewallState['RegenBioOverseasAccess-AllowAgent-Out'].Rule.SecurityFilter.Authentication = 'Required'
+        { & $lifecycle 'uninstall' } | Should Throw 'exactly match'
+        $script:firewallState['RegenBioOverseasAccess-AllowAgent-Out'].Rule.SecurityFilter.Authentication = 'NotRequired'
         & $lifecycle 'uninstall'
         $script:firewallState.Count | Should Be 0
 
@@ -589,7 +595,9 @@ Describe 'Transactional Windows client installer' {
         $owner | Should Match 'lockRuntimeOwnership'
         $owner | Should Match 'func Publish\('
         $credential | Should Match 'runtimeowner\.Publish\('
-        $credential.IndexOf('runtimeowner.Publish(') | Should BeLessThan $credential.IndexOf('secret.StoreMachine(')
+        $credential | Should Match 'secret\.StoreMachineExact\('
+        $credential | Should Not Match 'secret\.StoreMachine\('
+        $credential.IndexOf('runtimeowner.Publish(') | Should BeLessThan $credential.IndexOf('secret.StoreMachineExact(')
         $config | Should Match 'runtimeowner\.Publish\('
         $config.IndexOf('runtimeowner.Publish(') | Should BeLessThan $config.IndexOf('os.OpenFile(')
         $verifier | Should Match ([regex]::Escape("`$s=@('credential.bin','sing-box.json')"))

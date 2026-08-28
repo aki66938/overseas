@@ -27,17 +27,9 @@ var ErrUnsupported = errors.New("machine secret storage is unsupported on this p
 // StoreMachine DPAPI-encrypts plaintext for the local machine and atomically
 // replaces path. The caller's plaintext buffer is zeroed before return.
 func StoreMachine(path string, plaintext []byte) error {
-	defer zero(plaintext)
 	if path == "" {
 		return errors.New("store machine secret: empty path")
 	}
-
-	ciphertext, err := protectMachine(plaintext)
-	if err != nil {
-		return fmt.Errorf("store machine secret: protect data: %w", err)
-	}
-	defer zero(ciphertext)
-
 	dir := filepath.Dir(path)
 	tempPath, file, err := createRestrictedTemp(dir)
 	if err != nil {
@@ -50,20 +42,52 @@ func StoreMachine(path string, plaintext []byte) error {
 			_ = os.Remove(tempPath)
 		}
 	}()
-
-	if _, err := file.Write(ciphertext); err != nil {
-		return fmt.Errorf("store machine secret: write temporary file: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("store machine secret: flush temporary file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("store machine secret: close temporary file: %w", err)
+	if err := writeProtectedMachineFile(file, tempPath, plaintext); err != nil {
+		return err
 	}
 	if err := windows.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("store machine secret: replace destination: %w", err)
 	}
 	keep = true
+	return nil
+}
+
+// StoreMachineExact writes a machine-DPAPI blob to exactly path using
+// CREATE_NEW. It creates no sibling staging path and is intended for callers
+// that have already journaled and allocated the exact publication pathname.
+func StoreMachineExact(path string, plaintext []byte) error {
+	if path == "" {
+		zero(plaintext)
+		return errors.New("store machine secret: empty path")
+	}
+	file, err := createRestrictedFile(path)
+	if err != nil {
+		zero(plaintext)
+		return fmt.Errorf("store machine secret: create exact file: %w", err)
+	}
+	defer file.Close()
+	return writeProtectedMachineFile(file, path, plaintext)
+}
+
+var machineFileSyncedHook = func(string) {}
+
+func writeProtectedMachineFile(file *os.File, path string, plaintext []byte) error {
+	defer zero(plaintext)
+	ciphertext, err := protectMachine(plaintext)
+	if err != nil {
+		return fmt.Errorf("store machine secret: protect data: %w", err)
+	}
+	defer zero(ciphertext)
+	if _, err := file.Write(ciphertext); err != nil {
+		return fmt.Errorf("store machine secret: write file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("store machine secret: flush file: %w", err)
+	}
+	machineFileSyncedHook(path)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("store machine secret: close file: %w", err)
+	}
 	return nil
 }
 
@@ -127,42 +151,42 @@ func copyAndFree(blob windows.DataBlob) []byte {
 }
 
 func createRestrictedTemp(dir string) (string, *os.File, error) {
-	sd, err := windows.SecurityDescriptorFromString(machineSecretSDDL)
-	if err != nil {
-		return "", nil, err
-	}
-	sa := &windows.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: sd,
-	}
-
 	for range 32 {
 		var random [16]byte
 		if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
 			return "", nil, err
 		}
 		path := filepath.Join(dir, ".credential-"+hex.EncodeToString(random[:])+".tmp")
-		pathUTF16, err := windows.UTF16PtrFromString(path)
-		if err != nil {
-			return "", nil, err
-		}
-		handle, err := windows.CreateFile(
-			pathUTF16,
-			windows.GENERIC_READ|windows.GENERIC_WRITE,
-			0,
-			sa,
-			windows.CREATE_NEW,
-			windows.FILE_ATTRIBUTE_NORMAL,
-			0,
-		)
+		file, err := createRestrictedFile(path)
 		if err == nil {
-			return path, os.NewFile(uintptr(handle), path), nil
+			return path, file, nil
 		}
 		if !errors.Is(err, windows.ERROR_FILE_EXISTS) && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 			return "", nil, err
 		}
 	}
 	return "", nil, errors.New("could not allocate unique temporary file")
+}
+
+func createRestrictedFile(path string) (*os.File, error) {
+	sd, err := windows.SecurityDescriptorFromString(machineSecretSDDL)
+	if err != nil {
+		return nil, err
+	}
+	sa := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}
+
+	pathUTF16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(pathUTF16, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
 }
 
 func zero(data []byte) {

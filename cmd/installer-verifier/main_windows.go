@@ -40,9 +40,9 @@ $data='C:\ProgramData\RegenBio\OverseasAccess'
 $journal=Join-Path $data 'msi-firewall-owned.json'
 $group='RegenBioOverseasAccess.Installer'
 $definitions=@(
-  [ordered]@{name='RegenBioOverseasAccess-AllowAgent-Out';display_name='RegenBioOverseasAccess-AllowAgent-Out';program='C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'},
-  [ordered]@{name='RegenBioOverseasAccess-AllowCoreTCP-Out';display_name='RegenBioOverseasAccess-AllowCoreTCP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'},
-  [ordered]@{name='RegenBioOverseasAccess-AllowCoreUDP-Out';display_name='RegenBioOverseasAccess-AllowCoreUDP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='UDP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'}
+  [ordered]@{name='RegenBioOverseasAccess-AllowAgent-Out';display_name='RegenBioOverseasAccess-AllowAgent-Out';program='C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any';authentication='NotRequired';encryption='NotRequired';local_user='Any';remote_user='Any';remote_machine='Any';override_block_rules='False'},
+  [ordered]@{name='RegenBioOverseasAccess-AllowCoreTCP-Out';display_name='RegenBioOverseasAccess-AllowCoreTCP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any';authentication='NotRequired';encryption='NotRequired';local_user='Any';remote_user='Any';remote_machine='Any';override_block_rules='False'},
+  [ordered]@{name='RegenBioOverseasAccess-AllowCoreUDP-Out';display_name='RegenBioOverseasAccess-AllowCoreUDP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='UDP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any';authentication='NotRequired';encryption='NotRequired';local_user='Any';remote_user='Any';remote_machine='Any';override_block_rules='False'}
 )
 function Test-SameDefinition($left,$right){
   return [string]::Equals([string]$left.name,[string]$right.name,[StringComparison]::OrdinalIgnoreCase) -and
@@ -54,7 +54,13 @@ function Test-SameDefinition($left,$right){
     [string]::Equals([string]$left.local_address,[string]$right.local_address,[StringComparison]::OrdinalIgnoreCase) -and
     [string]::Equals([string]$left.remote_address,[string]$right.remote_address,[StringComparison]::OrdinalIgnoreCase) -and
     [string]::Equals([string]$left.service,[string]$right.service,[StringComparison]::OrdinalIgnoreCase) -and
-    [string]::Equals([string]$left.interface_type,[string]$right.interface_type,[StringComparison]::OrdinalIgnoreCase)
+    [string]::Equals([string]$left.interface_type,[string]$right.interface_type,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.authentication,[string]$right.authentication,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.encryption,[string]$right.encryption,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.local_user,[string]$right.local_user,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.remote_user,[string]$right.remote_user,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.remote_machine,[string]$right.remote_machine,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.override_block_rules,[string]$right.override_block_rules,[StringComparison]::OrdinalIgnoreCase)
 }
 function Get-Definition([string]$name){
   $matches=@($definitions|Where-Object{$_.name -eq $name})
@@ -94,10 +100,11 @@ function Get-ExactFirewallRule($definition){
   $addresses=@($rule|Get-NetFirewallAddressFilter)
   $services=@($rule|Get-NetFirewallServiceFilter)
   $interfaces=@($rule|Get-NetFirewallInterfaceFilter)
-  if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1){
-    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=[string]$interfaces[0].InterfaceType}
+  $security=@($rule|Get-NetFirewallSecurityFilter)
+  if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1 -and $security.Count -eq 1){
+    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=[string]$interfaces[0].InterfaceType;authentication=[string]$security[0].Authentication;encryption=[string]$security[0].Encryption;local_user=[string]$security[0].LocalUser;remote_user=[string]$security[0].RemoteUser;remote_machine=[string]$security[0].RemoteMachine;override_block_rules=[string]$security[0].OverrideBlockRules}
   }else{$observed=$null}
-  if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or
+  if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or $security.Count -ne 1 -or
     $rule.Group -ne $group -or $rule.DisplayName -ne $definition.display_name -or
     [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Allow' -or
     [string]$rule.Enabled -ne 'True' -or [string]$rule.Profile -ne 'Any' -or
@@ -120,7 +127,7 @@ if($mode -eq 'install'){
   $value.current_operation=[ordered]@{id=[guid]::NewGuid().ToString('D');state='applying';rules=@()}
   Write-FirewallJournal $value
   foreach($definition in $definitions){
-    $entry=[ordered]@{name=$definition.name;display_name=$definition.display_name;program=$definition.program;protocol=$definition.protocol;local_port=$definition.local_port;remote_port=$definition.remote_port;local_address=$definition.local_address;remote_address=$definition.remote_address;service=$definition.service;interface_type=$definition.interface_type;disposition='intended';absent_before=$null}
+    $entry=[ordered]@{name=$definition.name;display_name=$definition.display_name;program=$definition.program;protocol=$definition.protocol;local_port=$definition.local_port;remote_port=$definition.remote_port;local_address=$definition.local_address;remote_address=$definition.remote_address;service=$definition.service;interface_type=$definition.interface_type;authentication=$definition.authentication;encryption=$definition.encryption;local_user=$definition.local_user;remote_user=$definition.remote_user;remote_machine=$definition.remote_machine;override_block_rules=$definition.override_block_rules;disposition='intended';absent_before=$null}
     $value.current_operation.rules+=,$entry
     Write-FirewallJournal $value
     $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
