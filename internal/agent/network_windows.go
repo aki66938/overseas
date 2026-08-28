@@ -5,6 +5,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -34,18 +35,21 @@ const (
 	networkOperationActivate  = "activate"
 	networkOperationRestore   = "restore"
 
-	windowsTUNInterface       = "RegenBioOverseasAccess"
-	windowsTUNAddress         = "172.19.0.1/30"
-	windowsTUNDNS             = "172.19.0.2"
-	windowsTCPBlockRule       = "RegenBioOverseasAccess.BlockPublicTCP"
-	windowsQUICBlockRule      = "RegenBioOverseasAccess.BlockQUIC"
-	windowsUDPBlockRule       = "RegenBioOverseasAccess.BlockPublicUDP"
-	windowsDNSUDPBlockRule    = "RegenBioOverseasAccess.BlockUnapprovedDNSUDP"
-	windowsDNSTCPBlockRule    = "RegenBioOverseasAccess.BlockUnapprovedDNSTCP"
-	windowsEmergencyBlockRule = "RegenBioOverseasAccess.BlockPublicEmergency"
-	windowsFirewallGroup      = "RegenBioOverseasAccess.Managed"
-	windowsOwnedRouteMetric   = 4096
-	windowsGuardRouteMetric   = 8192
+	windowsTUNInterface           = "RegenBioOverseasAccess"
+	windowsTUNAddress             = "172.19.0.1/30"
+	windowsTUNDNS                 = "172.19.0.2"
+	windowsTCPBlockRule           = "RegenBioOverseasAccess.BlockPublicTCP"
+	windowsQUICBlockRule          = "RegenBioOverseasAccess.BlockQUIC"
+	windowsUDPBlockRule           = "RegenBioOverseasAccess.BlockPublicUDP"
+	windowsDNSUDPBlockRule        = "RegenBioOverseasAccess.BlockUnapprovedDNSUDP"
+	windowsDNSTCPBlockRule        = "RegenBioOverseasAccess.BlockUnapprovedDNSTCP"
+	windowsEmergencyBlockRule     = "RegenBioOverseasAccess.BlockPublicEmergency"
+	windowsFirewallGroup          = "RegenBioOverseasAccess.Managed"
+	windowsOwnedRouteMetric       = 4096
+	windowsGuardRouteMetric       = 8192
+	windowsLoopbackInterfaceIndex = 1
+	windowsSnapshotPhaseCaptured  = "captured"
+	windowsSnapshotPhaseTUNOwned  = "tun-owned"
 )
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
@@ -111,6 +115,8 @@ type WindowsNetworkSnapshot struct {
 	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses"`
 	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses"`
 	RouteMetric               int                        `json:"RouteMetric"`
+	OwnershipPhase            string                     `json:"OwnershipPhase"`
+	IntegritySHA256           string                     `json:"IntegritySHA256"`
 }
 
 type windowsNetworkInput struct {
@@ -180,7 +186,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		return nodes[left].Priority < nodes[right].Priority
 	})
 	nodeAddresses := make([]string, 0, len(nodes))
-	excluded4 := standardNonPublicIPv4Prefixes()
+	excluded4 := canonicalNonGlobalIPv4Prefixes()
 	excluded6 := standardNonPublicIPv6Prefixes()
 	for _, node := range nodes {
 		nodeAddress, err := netip.ParseAddr(node.Address)
@@ -262,6 +268,7 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 	}
 	snapshot.Version = 1
 	snapshot.RouteMetric = windowsOwnedRouteMetric
+	snapshot.OwnershipPhase = windowsSnapshotPhaseCaptured
 	snapshot.BlockedRemoteAddresses = append([]string(nil), m.blockedPrefixes...)
 	snapshot.DNSBlockedRemoteAddresses = append([]string(nil), m.dnsBlockedPrefixes...)
 	if snapshot.GuardInterfaceIndex <= 0 {
@@ -271,10 +278,10 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 		route.InterfaceIndex = snapshot.GuardInterfaceIndex
 		snapshot.GuardRoutes = append(snapshot.GuardRoutes, route)
 	}
-	if err := validateWindowsSnapshot(snapshot); err != nil {
+	if err := sealWindowsSnapshot(&snapshot); err != nil {
 		return nil, err
 	}
-	if err := validateCapturedNodeRoutes(snapshot.NodeRoutes, m.nodeAddresses); err != nil {
+	if err := m.validateWindowsSnapshot(snapshot); err != nil {
 		return nil, err
 	}
 	if len(snapshot.OwnedFirewallRulesPresent) != 0 {
@@ -420,11 +427,11 @@ func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) 
 
 func (m *WindowsNetworkManager) armEmergencyProtection(ctx context.Context) error {
 	installErr := m.installEmergencyProtection(context.WithoutCancel(ctx))
+	// The ordinary adapter monitor and emergency monitor share one lifecycle.
+	// Install first, then transition monitors; the ordinary reconciliation
+	// explicitly preserves an emergency rule installed during this handoff.
+	m.stopProtection()
 	m.mu.Lock()
-	if m.protectionCancel != nil {
-		m.mu.Unlock()
-		return installErr
-	}
 	monitorContext, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	m.protectionCancel = cancel
@@ -513,6 +520,11 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	}
 	m.current.OwnedTUN = &identity
 	m.current.OwnedRoutes = ownedRoutes
+	m.current.OwnershipPhase = windowsSnapshotPhaseTUNOwned
+	if err := sealWindowsSnapshot(m.current); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	if err := m.store.Save(m.statePath, *m.current); err != nil {
 		m.mu.Unlock()
 		return err
@@ -535,14 +547,17 @@ func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	snapshot, err := asWindowsSnapshot(value)
 	if err != nil {
-		return err
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
-	m.stopProtection()
 	m.mu.Lock()
 	if m.current != nil {
 		snapshot = *m.current
 	}
 	m.mu.Unlock()
+	if err := m.validateWindowsSnapshot(snapshot); err != nil {
+		return errors.Join(err, m.armEmergencyProtection(ctx))
+	}
+	m.stopProtection()
 	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
@@ -556,7 +571,6 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 }
 
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
-	m.stopProtection()
 	m.mu.Lock()
 	snapshot, err := m.store.Load(m.statePath)
 	if errors.Is(err, errSnapshotNotFound) {
@@ -568,12 +582,10 @@ func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	m.mu.Unlock()
-	if err := validateWindowsSnapshot(snapshot); err != nil {
+	if err := m.validateWindowsSnapshot(snapshot); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
-	if err := validateCapturedNodeRoutes(snapshot.NodeRoutes, m.nodeAddresses); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
+	m.stopProtection()
 	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
@@ -658,6 +670,9 @@ func asWindowsSnapshot(value any) (WindowsNetworkSnapshot, error) {
 }
 
 func validateWindowsSnapshot(snapshot WindowsNetworkSnapshot) error {
+	if err := validateWindowsSnapshotIntegrity(snapshot); err != nil {
+		return err
+	}
 	if snapshot.Version != 1 || len(snapshot.Interfaces) == 0 {
 		return errors.New("captured network state is incomplete")
 	}
@@ -697,6 +712,138 @@ func validateWindowsSnapshot(snapshot WindowsNetworkSnapshot) error {
 		}
 	}
 	return nil
+}
+
+func (m *WindowsNetworkManager) validateWindowsSnapshot(snapshot WindowsNetworkSnapshot) error {
+	if err := validateWindowsSnapshot(snapshot); err != nil {
+		return err
+	}
+	if err := validateCapturedNodeRoutes(snapshot.NodeRoutes, m.nodeAddresses); err != nil {
+		return err
+	}
+	if snapshot.GuardInterfaceIndex != windowsLoopbackInterfaceIndex {
+		return errors.New("captured route guard does not use the expected loopback identity")
+	}
+	if !equalStringSlices(snapshot.BlockedRemoteAddresses, m.blockedPrefixes) || !equalStringSlices(snapshot.DNSBlockedRemoteAddresses, m.dnsBlockedPrefixes) {
+		return errors.New("captured firewall prefix ownership is invalid")
+	}
+	expectedGuard := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes))
+	for _, value := range m.blockedPrefixes {
+		family := addressFamilyForPrefix(value)
+		nextHop := "0.0.0.0"
+		if family == "IPv6" {
+			nextHop = "::"
+		}
+		expectedGuard = append(expectedGuard, WindowsOwnedRoute{
+			AddressFamily:     family,
+			DestinationPrefix: value,
+			InterfaceIndex:    windowsLoopbackInterfaceIndex,
+			NextHop:           nextHop,
+			RouteMetric:       windowsGuardRouteMetric,
+		})
+	}
+	if err := validateExactOwnedRouteSet(snapshot.GuardRoutes, expectedGuard, "guard"); err != nil {
+		return err
+	}
+
+	switch snapshot.OwnershipPhase {
+	case windowsSnapshotPhaseCaptured:
+		if snapshot.OwnedTUN != nil || len(snapshot.OwnedRoutes) != 0 {
+			return errors.New("captured snapshot contains unexpected TUN ownership")
+		}
+		return nil
+	case windowsSnapshotPhaseTUNOwned:
+		if snapshot.OwnedTUN == nil {
+			return errors.New("TUN-owned snapshot is missing its adapter identity")
+		}
+	default:
+		return errors.New("captured network ownership phase is invalid")
+	}
+	if err := validateTUNIdentity(*snapshot.OwnedTUN, snapshot.BaselineAdapterGuids); err != nil {
+		return err
+	}
+	expectedOwned := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+len(snapshot.NodeRoutes))
+	for _, value := range m.blockedPrefixes {
+		if addressFamilyForPrefix(value) != "IPv4" {
+			continue
+		}
+		expectedOwned = append(expectedOwned, WindowsOwnedRoute{
+			AddressFamily:     "IPv4",
+			DestinationPrefix: value,
+			InterfaceIndex:    snapshot.OwnedTUN.InterfaceIndex,
+			NextHop:           "0.0.0.0",
+			RouteMetric:       windowsOwnedRouteMetric,
+		})
+	}
+	for _, route := range snapshot.NodeRoutes {
+		if route.BypassRequired {
+			expectedOwned = append(expectedOwned, WindowsOwnedRoute{
+				AddressFamily:     "IPv4",
+				DestinationPrefix: route.NodeAddress + "/32",
+				InterfaceIndex:    route.InterfaceIndex,
+				NextHop:           route.NextHop,
+				RouteMetric:       route.RouteMetric,
+			})
+		}
+	}
+	return validateExactOwnedRouteSet(snapshot.OwnedRoutes, expectedOwned, "TUN")
+}
+
+func sealWindowsSnapshot(snapshot *WindowsNetworkSnapshot) error {
+	snapshot.IntegritySHA256 = ""
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode network snapshot integrity payload: %w", err)
+	}
+	snapshot.IntegritySHA256 = fmt.Sprintf("%x", sha256.Sum256(payload))
+	return nil
+}
+
+func validateWindowsSnapshotIntegrity(snapshot WindowsNetworkSnapshot) error {
+	want := snapshot.IntegritySHA256
+	if len(want) != sha256.Size*2 {
+		return errors.New("captured network snapshot integrity marker is missing")
+	}
+	if err := sealWindowsSnapshot(&snapshot); err != nil {
+		return err
+	}
+	if snapshot.IntegritySHA256 != want {
+		return errors.New("captured network snapshot integrity check failed")
+	}
+	return nil
+}
+
+func validateExactOwnedRouteSet(actual, expected []WindowsOwnedRoute, label string) error {
+	if len(actual) != len(expected) {
+		return fmt.Errorf("captured %s route ownership count is invalid", label)
+	}
+	want := make(map[WindowsOwnedRoute]struct{}, len(expected))
+	for _, route := range expected {
+		want[route] = struct{}{}
+	}
+	seen := make(map[WindowsOwnedRoute]struct{}, len(actual))
+	for _, route := range actual {
+		if _, duplicate := seen[route]; duplicate {
+			return fmt.Errorf("captured %s route ownership contains a duplicate", label)
+		}
+		seen[route] = struct{}{}
+		if _, ok := want[route]; !ok {
+			return fmt.Errorf("captured %s route ownership tuple is invalid", label)
+		}
+	}
+	return nil
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCapturedNodeRoutes(routes []WindowsNodeRouteSnapshot, expected []string) error {
@@ -878,10 +1025,13 @@ func subtractIPv4Prefix(candidate, exclusion netip.Prefix) []netip.Prefix {
 	return append(result, subtractIPv4Prefix(second, exclusion)...)
 }
 
-func standardNonPublicIPv4Prefixes() []netip.Prefix {
+// canonicalNonGlobalIPv4Prefixes mirrors the IANA IPv4 Special-Purpose
+// Address Registry's Globally Reachable column. The 192.0.0.0/24 parent is
+// non-global except for its two globally reachable anycast /32 assignments.
+func canonicalNonGlobalIPv4Prefixes() []netip.Prefix {
 	values := []string{
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "192.88.99.0/24",
 		"192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
 		"224.0.0.0/4", "240.0.0.0/4",
 	}
@@ -889,6 +1039,15 @@ func standardNonPublicIPv4Prefixes() []netip.Prefix {
 	for _, value := range values {
 		prefixes = append(prefixes, netip.MustParsePrefix(value))
 	}
+	ietfProtocolAssignments := []netip.Prefix{netip.MustParsePrefix("192.0.0.0/24")}
+	for _, globallyReachable := range []string{"192.0.0.9/32", "192.0.0.10/32"} {
+		next := make([]netip.Prefix, 0, len(ietfProtocolAssignments)+8)
+		for _, candidate := range ietfProtocolAssignments {
+			next = append(next, subtractIPv4Prefix(candidate, netip.MustParsePrefix(globallyReachable))...)
+		}
+		ietfProtocolAssignments = next
+	}
+	prefixes = append(prefixes, ietfProtocolAssignments...)
 	return prefixes
 }
 
@@ -1043,7 +1202,7 @@ const blockNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
 $remote = @($i.BlockedRemoteAddresses)
 $dnsRemote = @($i.DNSBlockedRemoteAddresses)
-$desired = @([string]$i.FirewallRuleNames[3], [string]$i.FirewallRuleNames[4])
+$desired = @([string]$i.FirewallRuleNames[3], [string]$i.FirewallRuleNames[4], [string]$i.FirewallRuleNames[5])
 function Test-ManagedAdapterRule([string]$name, [string]$alias) {
   $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
   if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
