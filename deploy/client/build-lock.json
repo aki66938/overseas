@@ -1,8 +1,20 @@
 {
-  "schema_version": 1,
-  "go": { "version": "1.27.0" },
+  "schema_version": 2,
+  "go": {
+    "version": "1.27.0",
+    "executable_path": ".tools/go1.27.0/go/bin/go.exe",
+    "executable_sha256": "7d828191ba32519a9c9361789ab647486236ed45c660889196c7770a8ff1985c"
+  },
   "wix": {
     "version": "4.0.6",
+    "executable_path": ".tools/wix4.0.6/sdk/tools/net472/x64/wix.exe",
+    "executable_sha256": "dd46c03852e0360d711b150c2e01162ac098c556e12d55adf592c607fcc0f0d7",
+    "util_extension_path": ".tools/wix4.0.6/util/wixext4/WixToolset.Util.wixext.dll",
+    "util_extension_sha256": "ac1a603904dc8debe1d263322c53b058b7156cef115f00de29a3e33c56218816",
+    "firewall_extension_path": ".tools/wix4.0.6/firewall/wixext4/WixToolset.Firewall.wixext.dll",
+    "firewall_extension_sha256": "11684d6fb73269a745cd7b0d93d5894c45beab3cfe829d98be24eb4b38bae2e6",
+    "dtf_path": ".tools/wix4.0.6/sdk/tools/net472/WixToolset.Dtf.WindowsInstaller.dll",
+    "dtf_sha256": "cdd7f34dda1180f21205543c8ee836c5be66060d94441172366bce078e1cdb87",
     "sdk_sha256": "029c37c6490a810f61bcd375dd661ace04c328640a9dadaef1e7149bc14ff0f6",
     "util_sha256": "541168d58c299dd8d62e92ea1877489756cfa73a27fd6ec855cd6341c8447562",
     "firewall_sha256": "1a852369fb9c5ea9aa83d29ac40c9bf4d2564b5e516955e28643d6471de56239"

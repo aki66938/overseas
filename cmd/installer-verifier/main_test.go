@@ -8,9 +8,12 @@ import (
 )
 
 type fakeTrustVerifier struct {
-	packageCalls int
-	payloadCalls int
-	err          error
+	packageCalls   int
+	payloadCalls   int
+	installCalls   int
+	rollbackCalls  int
+	uninstallCalls int
+	err            error
 }
 
 func (f *fakeTrustVerifier) verifyPackage(msi, thumbprint string) error {
@@ -28,9 +31,10 @@ func (f *fakeTrustVerifier) verifyPayload(input payloadInput) error {
 	}
 	return f.err
 }
-func (f *fakeTrustVerifier) installFirewall() error { return f.err }
-func (f *fakeTrustVerifier) removeFirewall() error  { return f.err }
-func (f *fakeTrustVerifier) cleanupRuntime() error  { return f.err }
+func (f *fakeTrustVerifier) installFirewall() error   { f.installCalls++; return f.err }
+func (f *fakeTrustVerifier) rollbackFirewall() error  { f.rollbackCalls++; return f.err }
+func (f *fakeTrustVerifier) uninstallFirewall() error { f.uninstallCalls++; return f.err }
+func (f *fakeTrustVerifier) cleanupRuntime() error    { return f.err }
 
 func TestRunPackageRequiresExactArgumentsAndPropagatesTrustFailure(t *testing.T) {
 	for _, args := range [][]string{
@@ -73,5 +77,28 @@ func TestRunPayloadRequiresEveryFixedInput(t *testing.T) {
 		if got := run(args, fake, io.Discard); got == 0 || fake.payloadCalls != 0 {
 			t.Fatalf("missing argument %d: exit=%d calls=%d", index, got, fake.payloadCalls)
 		}
+	}
+}
+
+func TestRunRoutesFirewallInstallRollbackAndUninstallSeparately(t *testing.T) {
+	tests := []struct {
+		command string
+		want    [3]int
+	}{
+		{command: "firewall-install", want: [3]int{1, 0, 0}},
+		{command: "firewall-rollback", want: [3]int{0, 1, 0}},
+		{command: "firewall-uninstall", want: [3]int{0, 0, 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			fake := &fakeTrustVerifier{}
+			if got := run([]string{test.command}, fake, io.Discard); got != 0 {
+				t.Fatalf("run exit = %d", got)
+			}
+			got := [3]int{fake.installCalls, fake.rollbackCalls, fake.uninstallCalls}
+			if got != test.want {
+				t.Fatalf("firewall calls = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

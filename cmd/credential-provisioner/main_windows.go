@@ -13,10 +13,9 @@ func main() {
 	info, err := os.Stdin.Stat()
 	inputIsTerminal := err != nil || info.Mode()&os.ModeCharDevice != 0
 	store := func(path string, data []byte) error {
-		if err := secret.StoreMachine(path, data); err != nil {
-			return err
-		}
-		return runtimeowner.Record(path)
+		return runtimeowner.Publish(path, func(temporaryPath string) error {
+			return secret.StoreMachine(temporaryPath, data)
+		})
 	}
 	os.Exit(runProvisioner(os.Args[1:], os.Stdin, inputIsTerminal, os.Stdout, os.Stderr, store))
 }

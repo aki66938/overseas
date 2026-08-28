@@ -34,15 +34,165 @@ func (windowsTrustVerifier) verifyPayload(input payloadInput) error {
 	return runPowerShell(script, input.ProgramFiles, input.ProgramData, input.Manifest, input.Signature, input.Thumbprint)
 }
 
-func (windowsTrustVerifier) installFirewall() error {
-	const script = `$ErrorActionPreference='Stop'; $g='RegenBioOverseasAccess.Installer'; $r=@(@('RegenBioOverseasAccess-AllowAgent-Out','C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe','TCP'),@('RegenBioOverseasAccess-AllowCoreTCP-Out','C:\Program Files\RegenBio\OverseasAccess\sing-box.exe','TCP'),@('RegenBioOverseasAccess-AllowCoreUDP-Out','C:\Program Files\RegenBio\OverseasAccess\sing-box.exe','UDP')); foreach($x in $r){if(Get-NetFirewallRule -Name $x[0] -ErrorAction SilentlyContinue){exit 31};New-NetFirewallRule -Name $x[0] -DisplayName $x[0] -Group $g -Direction Outbound -Action Allow -Program $x[1] -Protocol $x[2] -Profile Any -PolicyStore PersistentStore|Out-Null}`
-	return runPowerShell(script)
+const firewallLifecycleScript = `$ErrorActionPreference='Stop'
+$mode=$args[0]
+$data='C:\ProgramData\RegenBio\OverseasAccess'
+$journal=Join-Path $data 'msi-firewall-owned.json'
+$group='RegenBioOverseasAccess.Installer'
+$definitions=@(
+  [ordered]@{name='RegenBioOverseasAccess-AllowAgent-Out';display_name='RegenBioOverseasAccess-AllowAgent-Out';program='C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'},
+  [ordered]@{name='RegenBioOverseasAccess-AllowCoreTCP-Out';display_name='RegenBioOverseasAccess-AllowCoreTCP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='TCP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'},
+  [ordered]@{name='RegenBioOverseasAccess-AllowCoreUDP-Out';display_name='RegenBioOverseasAccess-AllowCoreUDP-Out';program='C:\Program Files\RegenBio\OverseasAccess\sing-box.exe';protocol='UDP';local_port='Any';remote_port='Any';local_address='Any';remote_address='Any';service='Any';interface_type='Any'}
+)
+function Test-SameDefinition($left,$right){
+  return [string]::Equals([string]$left.name,[string]$right.name,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.display_name,[string]$right.display_name,[StringComparison]::Ordinal) -and
+    [string]::Equals([string]$left.program,[string]$right.program,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.protocol,[string]$right.protocol,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.local_port,[string]$right.local_port,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.remote_port,[string]$right.remote_port,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.local_address,[string]$right.local_address,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.remote_address,[string]$right.remote_address,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.service,[string]$right.service,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$left.interface_type,[string]$right.interface_type,[StringComparison]::OrdinalIgnoreCase)
 }
-func (windowsTrustVerifier) removeFirewall() error {
-	const script = `$ErrorActionPreference='Stop'; foreach($n in @('RegenBioOverseasAccess-AllowAgent-Out','RegenBioOverseasAccess-AllowCoreTCP-Out','RegenBioOverseasAccess-AllowCoreUDP-Out')){$r=@(Get-NetFirewallRule -Name $n -PolicyStore PersistentStore -ErrorAction SilentlyContinue);foreach($x in $r){if($x.Group -ne 'RegenBioOverseasAccess.Installer'){exit 32};Remove-NetFirewallRule -Name $n -PolicyStore PersistentStore}}`
-	return runPowerShell(script)
+function Get-Definition([string]$name){
+  $matches=@($definitions|Where-Object{$_.name -eq $name})
+  if($matches.Count -ne 1){throw 'Unknown firewall definition.'}
+  return $matches[0]
+}
+function Read-FirewallJournal{
+  if(!(Test-Path -LiteralPath $journal -PathType Leaf)){return $null}
+  $value=Get-Content -LiteralPath $journal -Raw|ConvertFrom-Json
+  if($value.schema_version -ne 2 -or $value.product_id -ne 'RegenBioOverseasAccess' -or $null -eq $value.owned_rules){throw 'Invalid firewall ownership journal.'}
+  foreach($owned in @($value.owned_rules)){if(-not(Test-SameDefinition $owned (Get-Definition ([string]$owned.name)))){throw 'Invalid owned firewall definition.'}}
+  if($null -ne $value.current_operation){
+    if([string]$value.current_operation.id -notmatch '^[0-9a-fA-F-]{36}$' -or [string]$value.current_operation.state -notin @('applying','committed')){throw 'Invalid firewall operation journal.'}
+    foreach($entry in @($value.current_operation.rules)){
+      if([string]$entry.disposition -notin @('intended','created','preexisting') -or -not(Test-SameDefinition $entry (Get-Definition ([string]$entry.name)))){throw 'Invalid firewall operation entry.'}
+    }
+  }
+  return $value
+}
+function Write-FirewallJournal($value){
+  if(!(Test-Path -LiteralPath $data -PathType Container)){throw 'Protected product data directory is absent.'}
+  $temporary=$journal+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+  try{
+    [IO.File]::WriteAllText($temporary,($value|ConvertTo-Json -Depth 12),(New-Object Text.UTF8Encoding($false)))
+    & "$env:WINDIR\System32\icacls.exe" $temporary '/inheritance:r' '/grant:r' '*S-1-5-18:(F)' '*S-1-5-32-544:(F)'|Out-Null
+    if($LASTEXITCODE -ne 0){throw 'Could not protect firewall ownership journal.'}
+    Move-Item -LiteralPath $temporary -Destination $journal -Force
+  }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
+}
+function Get-ExactFirewallRule($definition){
+  $rules=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
+  if($rules.Count -eq 0){return $null}
+  if($rules.Count -ne 1){throw 'Firewall rule name is ambiguous.'}
+  $rule=$rules[0]
+  $applications=@($rule|Get-NetFirewallApplicationFilter)
+  $ports=@($rule|Get-NetFirewallPortFilter)
+  $addresses=@($rule|Get-NetFirewallAddressFilter)
+  $services=@($rule|Get-NetFirewallServiceFilter)
+  $interfaces=@($rule|Get-NetFirewallInterfaceFilter)
+  if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1){
+    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=[string]$interfaces[0].InterfaceType}
+  }else{$observed=$null}
+  if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or
+    $rule.Group -ne $group -or $rule.DisplayName -ne $definition.display_name -or
+    [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Allow' -or
+    [string]$rule.Enabled -ne 'True' -or [string]$rule.Profile -ne 'Any' -or
+    -not [string]::Equals([string]$applications[0].Package,'Any',[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([string]$interfaces[0].InterfaceAlias,'Any',[StringComparison]::OrdinalIgnoreCase) -or -not(Test-SameDefinition $observed $definition)){
+    throw 'Firewall rule does not exactly match the product definition.'
+  }
+  return $rule
+}
+function Test-JournalOwnsDefinition($value,$definition){
+  return @($value.owned_rules|Where-Object{Test-SameDefinition $_ $definition}).Count -eq 1
+}
+function Remove-OwnedDefinition($value,$definition){
+  $value.owned_rules=@($value.owned_rules|Where-Object{-not(Test-SameDefinition $_ $definition)})
+}
+if($mode -eq 'install'){
+  $value=Read-FirewallJournal
+  if($null -eq $value){$value=[ordered]@{schema_version=2;product_id='RegenBioOverseasAccess';owned_rules=@();current_operation=$null}}
+  elseif($null -ne $value.current_operation -and $value.current_operation.state -eq 'applying'){throw 'An unfinished firewall operation blocks install.'}
+  $value.current_operation=[ordered]@{id=[guid]::NewGuid().ToString('D');state='applying';rules=@()}
+  Write-FirewallJournal $value
+  foreach($definition in $definitions){
+    $entry=[ordered]@{name=$definition.name;display_name=$definition.display_name;program=$definition.program;protocol=$definition.protocol;local_port=$definition.local_port;remote_port=$definition.remote_port;local_address=$definition.local_address;remote_address=$definition.remote_address;service=$definition.service;interface_type=$definition.interface_type;disposition='intended';absent_before=$null}
+    $value.current_operation.rules+=,$entry
+    Write-FirewallJournal $value
+    $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
+    if($raw.Count -ne 0){
+      [void](Get-ExactFirewallRule $definition)
+      if(-not(Test-JournalOwnsDefinition $value $definition)){throw 'Exact pre-existing firewall rule lacks product ownership proof.'}
+      $entry.absent_before=$false
+      $entry.disposition='preexisting'
+    }else{
+      $entry.absent_before=$true
+      Write-FirewallJournal $value
+      New-NetFirewallRule -Name $definition.name -DisplayName $definition.display_name -Group $group -Direction Outbound -Action Allow -Program $definition.program -Protocol $definition.protocol -Profile Any -Enabled True -PolicyStore PersistentStore|Out-Null
+      [void](Get-ExactFirewallRule $definition)
+      $entry.disposition='created'
+      if(-not(Test-JournalOwnsDefinition $value $definition)){$value.owned_rules+=,$definition}
+    }
+    Write-FirewallJournal $value
+  }
+  $value.current_operation.state='committed'
+  Write-FirewallJournal $value
+  exit 0
+}
+if($mode -eq 'rollback'){
+  $value=Read-FirewallJournal
+  if($null -eq $value -or $null -eq $value.current_operation){exit 0}
+  $entries=@($value.current_operation.rules)
+  [array]::Reverse($entries)
+  foreach($entry in $entries){
+    $createdNow=$entry.disposition -eq 'created' -or ($entry.disposition -eq 'intended' -and $entry.absent_before -eq $true)
+    if(-not $createdNow){continue}
+    $definition=Get-Definition ([string]$entry.name)
+    $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
+    if($raw.Count -gt 1){throw 'Created firewall rule name is ambiguous during rollback.'}
+    if($raw.Count -eq 1){Remove-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction Stop}
+    Remove-OwnedDefinition $value $definition
+  }
+  $value.current_operation=$null
+  if(@($value.owned_rules).Count -eq 0){Remove-Item -LiteralPath $journal -Force}else{Write-FirewallJournal $value}
+  exit 0
+}
+if($mode -eq 'uninstall'){
+  $value=Read-FirewallJournal
+  if($null -eq $value){
+    foreach($definition in $definitions){if(@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue).Count -ne 0){throw 'Firewall ownership proof is absent.'}}
+    exit 0
+  }
+	foreach($definition in $definitions){
+	  $raw=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
+	  if($raw.Count -eq 0){continue}
+	  [void](Get-ExactFirewallRule $definition)
+	  $currentRules=@()
+	  if($null -ne $value.current_operation){$currentRules=@($value.current_operation.rules)}
+	  $currentCreated=@($currentRules|Where-Object{(Test-SameDefinition $_ $definition) -and ($_.disposition -eq 'created' -or ($_.disposition -eq 'intended' -and $_.absent_before -eq $true))}).Count -eq 1
+    if(-not(Test-JournalOwnsDefinition $value $definition) -and -not $currentCreated){throw 'Firewall rule is not product-owned.'}
+    Remove-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction Stop
+  }
+  foreach($definition in $definitions){if(@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue).Count -ne 0){throw 'Product firewall residue remains.'}}
+  Remove-Item -LiteralPath $journal -Force
+  exit 0
+}
+throw 'Unsupported firewall lifecycle mode.'`
+
+func (windowsTrustVerifier) installFirewall() error {
+	return runPowerShell(firewallLifecycleScript, "install")
+}
+func (windowsTrustVerifier) rollbackFirewall() error {
+	return runPowerShell(firewallLifecycleScript, "rollback")
+}
+func (windowsTrustVerifier) uninstallFirewall() error {
+	return runPowerShell(firewallLifecycleScript, "uninstall")
 }
 func (windowsTrustVerifier) cleanupRuntime() error {
-	const script = `$ErrorActionPreference='Stop';$d='C:\ProgramData\RegenBio\OverseasAccess';$l=Join-Path $d 'runtime-owned.json';if(!(Test-Path -LiteralPath $l)){exit 40};$o=Get-Content -Raw -LiteralPath $l|ConvertFrom-Json;$owned=@($o.files);foreach($n in @('credential.bin','sing-box.json')){$p=Join-Path $d $n;if((Test-Path -LiteralPath $p)-and $owned -notcontains $n){exit 41}};foreach($n in $owned){if($n -notin @('credential.bin','sing-box.json')){exit 41};$p=Join-Path $d $n;if(Test-Path -LiteralPath $p){$z=New-Object byte[] ((Get-Item -LiteralPath $p).Length);[IO.File]::WriteAllBytes($p,$z);Remove-Item -LiteralPath $p -Force};if(Test-Path -LiteralPath $p){exit 42}}}`
+	const script = `$ErrorActionPreference='Stop';$d='C:\ProgramData\RegenBio\OverseasAccess';$l=Join-Path $d 'runtime-owned.json';$s=@('credential.bin','sing-box.json');if(!(Test-Path -LiteralPath $l)){foreach($n in $s){if(Test-Path -LiteralPath (Join-Path $d $n)){exit 40}};exit 0};$o=Get-Content -Raw -LiteralPath $l|ConvertFrom-Json;if($o.schema_version -ne 2){exit 41};$targets=@($o.finalized);$paths=@($o.finalized);foreach($i in @($o.intents)){$t=[string]$i.target;if($t -notin $s -or [string]$i.phase -notin @('prepared','temporary-written','publishing','published')){exit 41};$targets+=$t;foreach($e in @(@('temporary','publish'),@('backup','backup'),@('replaced','replaced'))){$n=[string]$i.($e[0]);$r='^\.'+[regex]::Escape($t)+'\.'+$e[1]+'-[a-f0-9]{32}\.tmp$';if([IO.Path]::GetFileName($n)-ne $n -or $n -notmatch $r){exit 41};$paths+=$n}};foreach($n in @($o.finalized)){if($n -notin $s){exit 41}};foreach($n in $s){$p=Join-Path $d $n;if((Test-Path -LiteralPath $p)-and $targets -notcontains $n){exit 41}};foreach($n in @($paths|Select-Object -Unique)){$p=Join-Path $d $n;if(Test-Path -LiteralPath $p -PathType Leaf){$z=New-Object byte[] ((Get-Item -LiteralPath $p).Length);[IO.File]::WriteAllBytes($p,$z);Remove-Item -LiteralPath $p -Force}elseif(Test-Path -LiteralPath $p){exit 41};if(Test-Path -LiteralPath $p){exit 42}};Remove-Item -LiteralPath $l -Force;if(Test-Path -LiteralPath $l){exit 42}`
 	return runPowerShell(script)
 }

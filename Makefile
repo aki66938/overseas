@@ -1,11 +1,7 @@
-GO ?= go
-WIX ?= wix
-WIX_UTIL_EXT ?= WixToolset.Util.wixext/4.0.6
-WIX_FIREWALL_EXT ?= WixToolset.Firewall.wixext/4.0.6
+LOCKED_CLIENT_TOOL := scripts/windows/invoke-locked-client-tool.ps1
 CLIENT_PAYLOAD_DIR ?= build/msi
 CLIENT_MSI ?= dist/OverseasAccessSetup.msi
 CLIENT_RELEASE_MSI ?= dist/OverseasAccessSetup-RELEASE_SIGNED.msi
-DTF ?= WixToolset.Dtf.WindowsInstaller.dll
 SIGNTOOL ?= signtool.exe
 SIGNING_CERT_THUMBPRINT ?=
 
@@ -14,27 +10,30 @@ SIGNING_CERT_THUMBPRINT ?=
 .PHONY: generate-client-resources build-client verify-client-manifest build-server-service package-server-service test-server-install test-client-install
 
 test:
-	$(GO) test ./...
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('test','./...'); exit $$LASTEXITCODE"
 	pwsh -NoProfile -Command "if ((Get-Command Invoke-Pester).Parameters.ContainsKey('Output')) { Invoke-Pester tests/powershell -Output Detailed } else { Invoke-Pester -Script tests/powershell -Verbose }"
 
 build:
 	$(MAKE) build-client-binaries
-	$(GO) build -trimpath -o bin/poc-probe.exe ./cmd/poc-probe
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('build','-trimpath','-o','bin/poc-probe.exe','./cmd/poc-probe'); exit $$LASTEXITCODE"
 
 build-client-binaries: generate-client-resources
-	pwsh -NoProfile -Command "$$env:GOOS='windows'; $$env:GOARCH='amd64'; & '$(GO)' build -trimpath -o bin/overseas-agent.exe ./cmd/overseas-agent; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }; & '$(GO)' build -trimpath -ldflags '-H windowsgui' -o bin/overseas-client.exe ./cmd/overseas-client; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }; & '$(GO)' build -trimpath -o bin/credential-provisioner.exe ./cmd/credential-provisioner; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }; & '$(GO)' build -trimpath -o bin/installer-verifier.exe ./cmd/installer-verifier; exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/overseas-agent.exe','./cmd/overseas-agent'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-ldflags','-H windowsgui','-o','bin/overseas-client.exe','./cmd/overseas-client'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/credential-provisioner.exe','./cmd/credential-provisioner'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/installer-verifier.exe','./cmd/installer-verifier'); exit $$LASTEXITCODE"
 
 generate-client-resources:
-	$(GO) generate ./cmd/overseas-client
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('generate','./cmd/overseas-client'); exit $$LASTEXITCODE"
 
 build-client: generate-client-resources
-	$(GO) build -trimpath -ldflags "-H windowsgui" -o bin/overseas-client.exe ./cmd/overseas-client
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('build','-trimpath','-ldflags','-H windowsgui','-o','bin/overseas-client.exe','./cmd/overseas-client'); exit $$LASTEXITCODE"
 
 verify-client-manifest:
 	pwsh -NoProfile -File scripts/windows/verify-overseas-client-manifest.ps1 -Path bin/overseas-client.exe
 
 build-server-service:
-	$(GO) build -trimpath -o bin/overseas-server-service.exe ./cmd/overseas-server-service
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('build','-trimpath','-o','bin/overseas-server-service.exe','./cmd/overseas-server-service'); exit $$LASTEXITCODE"
 
 package-server-service: build-server-service
 	pwsh -NoProfile -File scripts/windows/package-server-service.ps1 -BundlePath bin/sing-box -ServicePath bin/overseas-server-service.exe
@@ -51,11 +50,12 @@ prepare-client-payload: build-client-binaries
 	pwsh -NoProfile -File scripts/windows/build-client-artifacts.ps1 -Mode Inspect -OutputDirectory '$(CLIENT_PAYLOAD_DIR)'
 
 msi: prepare-client-payload
-	pwsh -NoProfile -Command "New-Item -ItemType Directory -Path (Split-Path -Parent '$(CLIENT_MSI)') -Force | Out-Null; & '$(WIX)' build deploy/client/Product.wxs deploy/client/Files.wxs -bindpath '$(CLIENT_PAYLOAD_DIR)' -arch x64 -ext '$(WIX_UTIL_EXT)' -ext '$(WIX_FIREWALL_EXT)' -intermediateFolder build/wixobj -pdbtype none -out '$(CLIENT_MSI)'; exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "New-Item -ItemType Directory -Path (Split-Path -Parent '$(CLIENT_MSI)') -Force | Out-Null"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Wix -ToolArguments @('build','deploy/client/Product.wxs','deploy/client/Files.wxs','-bindpath','$(CLIENT_PAYLOAD_DIR)','-arch','x64','-intermediateFolder','build/wixobj','-pdbtype','none','-out','$(CLIENT_MSI)'); exit $$LASTEXITCODE"
 
 inspect-msi: msi
-	pwsh -NoProfile -File scripts/windows/inspect-client-msi.ps1 -MsiPath '$(CLIENT_MSI)' -StagingPath '$(CLIENT_PAYLOAD_DIR)' -WixPath '$(WIX)' -DtfPath '$(DTF)'
+	pwsh -NoProfile -File scripts/windows/inspect-client-msi.ps1 -MsiPath '$(CLIENT_MSI)' -StagingPath '$(CLIENT_PAYLOAD_DIR)'
 
-release-msi: build-client-binaries
+release-msi:
 	pwsh -NoProfile -Command "if ('$(SIGNING_CERT_THUMBPRINT)' -notmatch '^[A-Fa-f0-9]{40}$$') { throw 'SIGNING_CERT_THUMBPRINT is required for release-msi.' }"
-	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -WixPath '$(WIX)' -UtilExtensionPath '$(WIX_UTIL_EXT)' -DtfPath '$(DTF)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_RELEASE_MSI)'
+	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_RELEASE_MSI)'

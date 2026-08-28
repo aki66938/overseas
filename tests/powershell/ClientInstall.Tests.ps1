@@ -8,6 +8,12 @@ $checksumsLockPath = Join-Path $repoRoot 'deploy\client\checksums.lock'
 $artifactBuilderPath = Join-Path $repoRoot 'scripts\windows\build-client-artifacts.ps1'
 $msiInspectorPath = Join-Path $repoRoot 'scripts\windows\inspect-client-msi.ps1'
 $releasePublisherPath = Join-Path $repoRoot 'scripts\windows\publish-client-release.ps1'
+$verifierWindowsPath = Join-Path $repoRoot 'cmd\installer-verifier\main_windows.go'
+$verifierMainPath = Join-Path $repoRoot 'cmd\installer-verifier\main.go'
+$runtimeOwnerPath = Join-Path $repoRoot 'internal\runtimeowner\owner.go'
+$credentialWriterPath = Join-Path $repoRoot 'cmd\credential-provisioner\main_windows.go'
+$configWriterPath = Join-Path $repoRoot 'cmd\overseas-agent\main_windows.go'
+$realTestPathCommand = Get-Command Test-Path -CommandType Cmdlet
 
 function Get-ClientInstallFailureMessage {
     param([Parameter(Mandatory = $true)][scriptblock] $Action)
@@ -122,13 +128,11 @@ Describe 'Transactional Windows client installer' {
         $firewallIndex = $body.IndexOf('Remove-OwnedFirewallRules')
         $shortcutIndex = $body.IndexOf('Remove-OwnedShortcut')
         $serviceIndex = $body.IndexOf('Remove-OwnedService')
-        $payloadIndex = $body.IndexOf('Remove-OwnedPayloadFiles')
-        $markerIndex = $body.IndexOf('Remove-RootOwnershipMarker')
+        $rootIndex = $body.IndexOf('Remove-OwnedRoot')
         $firewallIndex | Should BeGreaterThan -1
         $shortcutIndex | Should BeGreaterThan $firewallIndex
         $serviceIndex | Should BeGreaterThan $shortcutIndex
-        $payloadIndex | Should BeGreaterThan $serviceIndex
-        $markerIndex | Should BeGreaterThan $payloadIndex
+        $rootIndex | Should BeGreaterThan $serviceIndex
         $text | Should Match '\bcatch\s*\{[^}]*Undo-ClientTransaction'
     }
 
@@ -236,14 +240,13 @@ Describe 'Transactional Windows client installer' {
         $statusStart = $text.IndexOf('function Get-ClientStatus')
         $body = $text.Substring($uninstallStart, $statusStart - $uninstallStart)
         $proofIndex = $body.IndexOf('Assert-OwnedFirewallAbsent')
-        $markerIndex = $body.IndexOf('Remove-RootOwnershipMarker')
+        $rootIndex = $body.IndexOf('Remove-OwnedRoot')
         $journalIndex = $body.IndexOf('Remove-Item -LiteralPath $JournalPath')
         $proofIndex | Should BeGreaterThan -1
-        $markerIndex | Should BeGreaterThan $proofIndex
-        $journalIndex | Should BeGreaterThan $markerIndex
+        $rootIndex | Should BeGreaterThan $proofIndex
+        $journalIndex | Should BeGreaterThan $rootIndex
         $body | Should Match 'catch\s*\{[\s\S]*Write-TransactionPhase[\s\S]*throw'
-        $body | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$root\s+-PathType\s+Container\)\s*\{\s*Remove-OwnedPayloadFiles'
-        $body | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$root\s+-PathType\s+Container\)\s*\{[\s\S]*Remove-RootOwnershipMarker'
+        $body | Should Match 'Remove-OwnedRoot\s+-Root\s+\$root\s+-JournalPath\s+\$JournalPath'
     }
 
     It 'has no dynamic execution plaintext-secret parameter secret-bearing native argv or registry write' {
@@ -353,10 +356,11 @@ Describe 'Transactional Windows client installer' {
 
     It 'wires reproducible local WiX restore MSI build inspection and dual-Pester targets' {
         $text = Get-Content -LiteralPath $makefilePath -Raw
-        $text | Should Match '(?m)^WIX\s*\?='
+        $text | Should Match 'invoke-locked-client-tool\.ps1'
+        $text | Should Not Match '(?m)^(WIX|WIX_UTIL_EXT|WIX_FIREWALL_EXT|DTF)\s*:='
         $text | Should Match '(?m)^msi:'
         $text | Should Match '-bindpath'
-        $text | Should Match '-arch x64'
+        $text | Should Match "'-arch','x64'"
         $text | Should Match 'OverseasAccessSetup\.msi'
         $text | Should Match '(?m)^inspect-msi:'
         $text | Should Match '(?m)^test-client-install:'
@@ -370,7 +374,7 @@ Describe 'Transactional Windows client installer' {
         (Test-Path -LiteralPath $checksumsLockPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path $buildLockPath) -or -not (Test-Path $checksumsLockPath)) { return }
         $lock = Get-Content -LiteralPath $buildLockPath -Raw | ConvertFrom-Json
-        $lock.schema_version | Should Be 1
+        $lock.schema_version | Should Be 2
         $lock.go.version | Should Be '1.27.0'
         $lock.wix.version | Should Be '4.0.6'
         $lock.sing_box.version | Should Be '1.13.19'
@@ -381,7 +385,8 @@ Describe 'Transactional Windows client installer' {
         $checksums | Should Match 'sing-box-1\.13\.19-windows-amd64\.zip'
         $files = Get-Content -LiteralPath $filesPath -Raw
         $files | Should Match 'wintun-LICENSE\.txt'
-        $files | Should Match 'Wintun is distributed under the GPLv2'
+        $files | Should Match 'Wintun Prebuilt Binaries License'
+        $files | Should Not Match '(?i)GPL|General Public License'
     }
 
     It 'builds canonical manifest SBOM and checksums offline and signs only from an external certificate store' {
@@ -393,14 +398,14 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'artifact-manifest\.json\.p7s'
         $text | Should Match 'client-sbom\.json'
         $text | Should Match 'SHA256SUMS'
-        $text | Should Match 'git\s+rev-parse\s+HEAD'
-        $text | Should Match 'git\s+status\s+--porcelain'
+        $text | Should Match 'git\s+-C\s+\$repo\s+rev-parse\s+HEAD'
+        $text | Should Match 'git\s+-C\s+\$repo\s+status\s+--porcelain'
         $text | Should Match 'INSPECT-ONLY-NOT-SIGNED'
         $text | Should Match 'Cert:\\(CurrentUser|LocalMachine)\\My'
         $text | Should Match 'HasPrivateKey'
         $text | Should Not Match '(?i)New-SelfSignedCertificate|Import-PfxCertificate|password|Invoke-WebRequest|Start-BitsTransfer|HttpClient'
         $text.IndexOf("if (`$Mode -eq 'Release')") | Should BeLessThan $text.IndexOf('Remove-Item -LiteralPath $target -Recurse')
-        $text.IndexOf('git status --porcelain') | Should BeLessThan $text.IndexOf('Remove-Item -LiteralPath $target -Recurse')
+        $text.IndexOf('git -C $repo status --porcelain') | Should BeLessThan $text.IndexOf('Remove-Item -LiteralPath $target -Recurse')
     }
 
     It 'recursively verifies every extracted byte signature and secret scan against the source manifest' {
@@ -469,7 +474,7 @@ Describe 'Transactional Windows client installer' {
         $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw
         $builder | Should Match 'go\.version'
         $builder | Should Match 'wix\.sdk_sha256'
-        $builder | Should Match 'Move-Item[^\r\n]*publish'
+        $builder | Should Match '\[IO\.Directory\]::Move\('
         $builder | Should Match 'finally[\s\S]*Remove-Item[^\r\n]*temporary'
         $builder | Should Match 'Wintun Prebuilt Binaries License'
         $inspector | Should Match 'trustRootNames'
@@ -481,5 +486,230 @@ Describe 'Transactional Windows client installer' {
             $publisher | Should Match 'build-client-artifacts\.ps1[\s\S]*wix[\s\S]*signtool[\s\S]*inspect-client-msi\.ps1[\s\S]*Move-Item'
             $publisher | Should Match 'finally[\s\S]*Remove-Item'
         }
+    }
+
+    It 'journals exact MSI firewall intent and ownership before mutation and separates rollback from uninstall' {
+        $verifier = (Get-Content -LiteralPath $verifierWindowsPath -Raw) + "`n" + (Get-Content -LiteralPath $verifierMainPath -Raw)
+        $product = Get-Content -LiteralPath $productPath -Raw
+        $verifier | Should Match 'msi-firewall-owned\.json'
+        $verifier | Should Match 'schema_version'
+        $verifier | Should Match 'current_operation'
+        $verifier | Should Match "'intended'"
+        $verifier | Should Match "'created'"
+        $verifier | Should Match "'preexisting'"
+        $verifier | Should Match 'Get-NetFirewallApplicationFilter'
+        $verifier | Should Match 'Get-NetFirewallPortFilter'
+        $verifier | Should Match 'Write-FirewallJournal'
+        $verifier | Should Match "icacls\.exe[^\r\n]*/inheritance:r[^\r\n]*S-1-5-18[^\r\n]*S-1-5-32-544"
+        $verifier.IndexOf('Write-FirewallJournal') | Should BeLessThan $verifier.IndexOf('New-NetFirewallRule')
+        $verifier | Should Match 'firewall-rollback'
+        $verifier | Should Match 'firewall-uninstall'
+        $product | Should Match 'Id="RollbackClientFirewall"[^>]*ExeCommand="firewall-rollback"'
+        $product | Should Match 'Id="RemoveClientFirewall"[^>]*ExeCommand="firewall-uninstall"'
+        $product | Should Match 'Action="RemoveClientFirewall"[^>]*Condition="REMOVE~=&quot;ALL&quot;"'
+        $source = Get-Content -LiteralPath $verifierWindowsPath -Raw
+        $match = [regex]::Match($source, '(?s)const firewallLifecycleScript = `(.*?)`\r?\n\r?\nfunc \(windowsTrustVerifier\) installFirewall')
+        $match.Success | Should Be $true
+        if ($match.Success) {
+            $tokens = $null
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseInput($match.Groups[1].Value, [ref] $tokens, [ref] $parseErrors) | Out-Null
+            @($parseErrors).Count | Should Be 0
+        }
+    }
+
+    It 'executes MSI firewall install repair failure rollback and uninstall against mocked state' {
+        Mock Test-Path { param($LiteralPath, $PathType); if ($PathType) { & $realTestPathCommand -LiteralPath $LiteralPath -PathType $PathType } else { & $realTestPathCommand -LiteralPath $LiteralPath } }
+        $source = Get-Content -LiteralPath $verifierWindowsPath -Raw
+        $match = [regex]::Match($source, '(?s)const firewallLifecycleScript = `(.*?)`\r?\n\r?\nfunc \(windowsTrustVerifier\) installFirewall')
+        $match.Success | Should Be $true
+        if (-not $match.Success) { return }
+        $data = Join-Path $TestDrive 'firewall-state'
+        New-Item -ItemType Directory -Path $data | Out-Null
+        $lifecycleText = $match.Groups[1].Value.Replace("`$data='C:\ProgramData\RegenBio\OverseasAccess'", "`$data='" + $data.Replace("'", "''") + "'")
+        $lifecycleText = $lifecycleText -replace '& "\$env:WINDIR\\System32\\icacls\.exe"[^\r\n]*', '$global:LASTEXITCODE=0'
+        $lifecycleText = $lifecycleText -replace 'exit 0', 'return'
+        foreach ($command in @('Get-NetFirewallRule','Get-NetFirewallApplicationFilter','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetFirewallServiceFilter','Get-NetFirewallInterfaceFilter','New-NetFirewallRule','Remove-NetFirewallRule')) {
+            $lifecycleText = $lifecycleText.Replace($command, ('Test-' + $command))
+        }
+        $lifecycle = [scriptblock]::Create($lifecycleText)
+        $script:firewallState = @{}
+        $script:createCount = 0
+        $script:failAt = 0
+        function Test-Get-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); if ($script:firewallState.ContainsKey($Name)) { return ($script:firewallState[$Name].Rule) } }
+        function Test-Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.App) } }
+        function Test-Get-NetFirewallPortFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Port) } }
+        function Test-Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Address) } }
+        function Test-Get-NetFirewallServiceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.ServiceFilter) } }
+        function Test-Get-NetFirewallInterfaceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.InterfaceFilter) } }
+        function Test-New-NetFirewallRule {
+            param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled,$PolicyStore)
+            $script:createCount++
+            if ($script:failAt -eq $script:createCount) { throw 'injected firewall creation failure' }
+            $record = [pscustomobject]@{}
+            $record | Add-Member Rule ([pscustomobject]@{ Name=$Name; DisplayName=$DisplayName; Group=$Group; Direction=$Direction; Action=$Action; Enabled=$Enabled; Profile=$Profile })
+            $record.Rule | Add-Member App ([pscustomobject]@{ Program=$Program; Package='Any' })
+            $record.Rule | Add-Member Port ([pscustomobject]@{ Protocol=$Protocol; LocalPort='Any'; RemotePort='Any' })
+            $record.Rule | Add-Member Address ([pscustomobject]@{ LocalAddress='Any'; RemoteAddress='Any' })
+            $record.Rule | Add-Member ServiceFilter ([pscustomobject]@{ Service='Any' })
+            $record.Rule | Add-Member InterfaceFilter ([pscustomobject]@{ InterfaceType='Any'; InterfaceAlias='Any' })
+            $script:firewallState[$Name] = $record
+        }
+        function Test-Remove-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); [void]$script:firewallState.Remove($Name) }
+
+        [IO.File]::WriteAllText((Join-Path $data 'msi-firewall-owned.json'), '{"schema_version":2,"product_id":"RegenBioOverseasAccess","owned_rules":[],"current_operation":null}')
+        Test-New-NetFirewallRule -Name 'RegenBioOverseasAccess-AllowAgent-Out' -DisplayName 'RegenBioOverseasAccess-AllowAgent-Out' -Group 'RegenBioOverseasAccess.Installer' -Direction Outbound -Action Allow -Program 'C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe' -Protocol TCP -Profile Any -Enabled $true -PolicyStore PersistentStore
+        { & $lifecycle 'install' } | Should Throw 'ownership proof'
+        $script:firewallState.Clear(); [IO.File]::WriteAllText((Join-Path $data 'msi-firewall-owned.json'), '{"schema_version":2,"product_id":"RegenBioOverseasAccess","owned_rules":[],"current_operation":null}'); $script:createCount = 0
+        & $lifecycle 'install'
+        $script:firewallState.Count | Should Be 3
+        & $lifecycle 'install' # exact journal-owned repair
+        $script:createCount | Should Be 3
+        & $lifecycle 'rollback' # repair rollback preserves rules created by the prior install
+        $script:firewallState.Count | Should Be 3
+        & $lifecycle 'uninstall'
+        $script:firewallState.Count | Should Be 0
+
+        $script:createCount = 0; $script:failAt = 2
+        { & $lifecycle 'install' } | Should Throw 'injected firewall creation failure'
+        $script:firewallState.Count | Should Be 1
+        & $lifecycle 'rollback'
+        $script:firewallState.Count | Should Be 0
+    }
+
+    It 'publishes both sensitive runtime files through schema-v2 intents and finalization' {
+        $owner = Get-Content -LiteralPath $runtimeOwnerPath -Raw
+        $credential = Get-Content -LiteralPath $credentialWriterPath -Raw
+        $config = Get-Content -LiteralPath $configWriterPath -Raw
+        $verifier = Get-Content -LiteralPath $verifierWindowsPath -Raw
+        $owner | Should Match 'SchemaVersion\s+int[^\r\n]*json:"schema_version"'
+        $owner | Should Match 'Intents\s+\[\]ownershipIntent[^\r\n]*json:"intents"'
+        $owner | Should Match 'Finalized\s+\[\]string[^\r\n]*json:"finalized"'
+        foreach ($field in @('Target', 'Temporary', 'Backup', 'Replaced', 'Phase')) { $owner | Should Match ("$field\s+string") }
+        $owner | Should Match 'lockRuntimeOwnership'
+        $owner | Should Match 'func Publish\('
+        $credential | Should Match 'runtimeowner\.Publish\('
+        $credential.IndexOf('runtimeowner.Publish(') | Should BeLessThan $credential.IndexOf('secret.StoreMachine(')
+        $config | Should Match 'runtimeowner\.Publish\('
+        $config.IndexOf('runtimeowner.Publish(') | Should BeLessThan $config.IndexOf('os.OpenFile(')
+        $verifier | Should Match ([regex]::Escape("`$s=@('credential.bin','sing-box.json')"))
+        $verifier | Should Match ([regex]::Escape('if(!(Test-Path -LiteralPath $l)){foreach($n in $s){if(Test-Path -LiteralPath (Join-Path $d $n)){exit 40}};exit 0}'))
+        $verifier | Should Match '\$o\.intents'
+        $verifier | Should Match '\$o\.finalized'
+    }
+
+    It 'securely cleans every structured crash-residue path before deleting the ledger' {
+        Mock Test-Path { param($LiteralPath, $PathType); if ($PathType) { & $realTestPathCommand -LiteralPath $LiteralPath -PathType $PathType } else { & $realTestPathCommand -LiteralPath $LiteralPath } }
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $start = $script.IndexOf('function Clear-OwnedSensitiveRuntimeFiles')
+        $end = $script.IndexOf('function Remove-OwnedDirectory', $start)
+        Invoke-Expression $script.Substring($start, $end - $start)
+        $script:DataRoot = Join-Path $TestDrive 'runtime'
+        New-Item -ItemType Directory -Path $script:DataRoot | Out-Null
+        $script:RuntimeOwnershipPath = Join-Path $script:DataRoot 'runtime-owned.json'
+        $intent = [ordered]@{
+            target = 'sing-box.json'; temporary = '.sing-box.json.publish-11111111111111111111111111111111.tmp'
+            backup = '.sing-box.json.backup-22222222222222222222222222222222.tmp'
+            replaced = '.sing-box.json.replaced-33333333333333333333333333333333.tmp'; phase = 'published'
+        }
+        $credentialIntent = [ordered]@{
+            target = 'credential.bin'; temporary = '.credential.bin.publish-44444444444444444444444444444444.tmp'
+            backup = '.credential.bin.backup-55555555555555555555555555555555.tmp'
+            replaced = '.credential.bin.replaced-66666666666666666666666666666666.tmp'; phase = 'prepared'
+        }
+        [IO.File]::WriteAllText($script:RuntimeOwnershipPath, ([ordered]@{ schema_version = 2; intents = @($intent, $credentialIntent); finalized = @('sing-box.json') } | ConvertTo-Json -Depth 6))
+        foreach ($name in @($intent.target, $intent.temporary, $intent.backup, $intent.replaced, $credentialIntent.target, $credentialIntent.temporary, $credentialIntent.backup, $credentialIntent.replaced)) {
+            [IO.File]::WriteAllText((Join-Path $script:DataRoot $name), 'sensitive-residue')
+        }
+        Clear-OwnedSensitiveRuntimeFiles
+        @(Get-ChildItem -LiteralPath $script:DataRoot -Force).Count | Should Be 0
+    }
+
+    It 'keeps root ownership proof for foreign residue and makes a failed root delete resumable' {
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $start = $script.IndexOf('function Remove-OwnedRoot')
+        $end = $script.IndexOf('function ', $start + 10)
+        $start | Should BeGreaterThan -1
+        if ($start -lt 0) { return }
+        if ($end -lt 0) { $end = $script.Length }
+        $body = $script.Substring($start, $end - $start)
+        $body | Should Match 'Get-ChildItem[^\r\n]*Where-Object'
+        $body.IndexOf('Get-ChildItem') | Should BeLessThan $body.IndexOf('Remove-RootOwnershipMarker')
+        $body.IndexOf('Write-TransactionPhase') | Should BeLessThan $body.IndexOf('Remove-RootOwnershipMarker')
+        $body.IndexOf('Remove-RootOwnershipMarker') | Should BeLessThan $body.IndexOf('Remove-Item -LiteralPath $Root')
+        $body | Should Match 'if\s*\(Test-Path[^\r\n]*\)\s*\{\s*throw'
+        $script | Should Match 'Test-UninstallJournalOwnsRootDeletion'
+        $script | Should Match 'RootDeletionIncomplete''\s+-PendingResource\s+\$pendingRoot'
+    }
+
+    It 'preserves the pending root when deletion fails after marker removal' {
+        Mock Test-Path { param($LiteralPath, $PathType); if ($PathType) { & $realTestPathCommand -LiteralPath $LiteralPath -PathType $PathType } else { & $realTestPathCommand -LiteralPath $LiteralPath } }
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $start = $script.IndexOf('function Uninstall-ClientTransaction')
+        $end = $script.IndexOf('function Get-ClientStatus', $start)
+        Invoke-Expression $script.Substring($start, $end - $start)
+        $script:InstallRoot = 'C:\Program Files\RegenBio\OverseasAccess'
+        $script:DataRoot = 'C:\ProgramData\RegenBio\OverseasAccess'
+        $script:ShortcutPath = Join-Path $TestDrive 'absent-shortcut.lnk'
+        $journalPath = Join-Path $TestDrive 'uninstall.json'
+        [IO.File]::WriteAllText($journalPath, '{"SchemaVersion":2,"Operation":"Uninstall","Phase":"DeletingRoot","PendingResource":"C:\\Program Files\\RegenBio\\OverseasAccess"}')
+        foreach ($name in @('Resume-ClientTransaction','Request-ControlledDisconnect','Assert-NetworkRestored','Remove-OwnedFirewallRules','Remove-OwnedShortcut','Remove-OwnedService','Clear-OwnedSensitiveRuntimeFiles','Assert-ServiceAbsent','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-OwnedFirewallAbsent')) {
+            Set-Item -Path ('function:' + $name) -Value { }
+        }
+        function Remove-OwnedRoot { throw 'injected root delete failure' }
+        $script:phaseWrites = @()
+        function Write-TransactionPhase { param($Path,$Phase,$PendingResource,$CompletedResource); $script:phaseWrites += ,@($Phase,$PendingResource) }
+        { Uninstall-ClientTransaction -TransactionId ([guid]::NewGuid()) -JournalPath $journalPath } | Should Throw 'injected root delete failure'
+        $script:phaseWrites[-1][0] | Should Be 'RootDeletionIncomplete'
+        $script:phaseWrites[-1][1] | Should Be $script:InstallRoot
+    }
+
+    It 'binds Make and the release publisher to hash-verified Go WiX and extension executables' {
+        $lock = Get-Content -LiteralPath $buildLockPath -Raw | ConvertFrom-Json
+        $makefile = Get-Content -LiteralPath $makefilePath -Raw
+        $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+        $lock.schema_version | Should Be 2
+        $lock.go.executable_sha256 | Should Match '^[a-f0-9]{64}$'
+        $lock.wix.executable_sha256 | Should Match '^[a-f0-9]{64}$'
+        $lock.wix.util_extension_sha256 | Should Match '^[a-f0-9]{64}$'
+        $lock.wix.firewall_extension_sha256 | Should Match '^[a-f0-9]{64}$'
+        $makefile | Should Match 'invoke-locked-client-tool\.ps1'
+        $makefile | Should Not Match '(?m)^GO\s*\?='
+        $makefile | Should Not Match '(?m)^WIX\s*\?='
+        $makefile | Should Not Match "'-ext'"
+        $publisher | Should Not Match '\[Parameter\(Mandatory\s*=\s*\$true\)\]\[string\]\s*\$(WixPath|UtilExtensionPath|DtfPath)'
+        $publisher | Should Match 'executable_sha256'
+        $publisher | Should Match 'util_extension_sha256'
+        $publisher | Should Match '\$goExecutable\s+@arguments'
+        $publisher | Should Match '-FirstPartyBinaryDirectory\s+\$firstParty'
+        $publisher | Should Match 'git\s+-C\s+\$repo\s+status'
+        $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw
+        $inspector | Should Not Match '\[string\]\s+\$(WixPath|DtfPath)'
+        $inspector | Should Match 'Resolve-VerifiedTool'
+        $inspector | Should Match 'dtf_sha256'
+        $wrapper = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\invoke-locked-client-tool.ps1') -Raw
+        $wrapper | Should Match "WiX extension paths are supplied only by the verified tool wrapper"
+        $wrapper | Should Match '\$ToolArguments\s*=\s*@\(\$ToolArguments\)[^\r\n]*\$utilExtension[^\r\n]*\$firewallExtension'
+    }
+
+    It 'creates only a validated release parent and atomically publishes after a clean-checkout proof' {
+        $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw
+        $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+        foreach ($text in @($builder, $publisher)) {
+            $text | Should Match 'Assert-SafeReleaseParent'
+            $text | Should Match '\[IO\.(Directory|File)\]::Move\('
+            $text.IndexOf('git -C $repo status --porcelain') | Should BeLessThan $text.IndexOf('Assert-SafeReleaseParent')
+        }
+    }
+
+    It 'uses only the Wintun Prebuilt Binaries License attribution' {
+        $combined = @(
+            (Get-Content -LiteralPath $filesPath -Raw),
+            (Get-Content -LiteralPath $artifactBuilderPath -Raw),
+            (Get-Content -LiteralPath $buildLockPath -Raw),
+            (Get-Content -LiteralPath $checksumsLockPath -Raw)
+        ) -join "`n"
+        $combined | Should Match 'Wintun Prebuilt Binaries License'
+        $combined | Should Not Match '(?i)GPL|General Public License'
     }
 }

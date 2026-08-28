@@ -20,7 +20,8 @@ type trustVerifier interface {
 	verifyPackage(msi, thumbprint string) error
 	verifyPayload(payloadInput) error
 	installFirewall() error
-	removeFirewall() error
+	rollbackFirewall() error
+	uninstallFirewall() error
 	cleanupRuntime() error
 }
 
@@ -45,8 +46,14 @@ func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 			return 1
 		}
 		return 0
-	case len(args) == 1 && args[0] == "firewall-remove":
-		if err := verifier.removeFirewall(); err != nil {
+	case len(args) == 1 && args[0] == "firewall-rollback":
+		if err := verifier.rollbackFirewall(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "installer firewall operation failed")
+			return 1
+		}
+		return 0
+	case len(args) == 1 && args[0] == "firewall-uninstall":
+		if err := verifier.uninstallFirewall(); err != nil {
 			_, _ = fmt.Fprintln(errorOutput, "installer firewall operation failed")
 			return 1
 		}

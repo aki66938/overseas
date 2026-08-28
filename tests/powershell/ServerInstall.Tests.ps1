@@ -388,7 +388,7 @@ Describe 'Transactional sing-box server deployment' {
         $makefile | Should Match '(?m)^test-server-install:'
         $makefile | Should Match '(?m)^build-server-service:'
         $makefile | Should Match '(?m)^package-server-service:'
-        $makefile | Should Match 'go\)?\s+build[^\r\n]*cmd/overseas-server-service'
+        $makefile | Should Match "\$\(LOCKED_CLIENT_TOOL\)[^\r\n]*'build'[^\r\n]*cmd/overseas-server-service"
         $makefile | Should Match 'package-server-service\.ps1'
         $makefile | Should Match 'powershell\.exe\s+-NoProfile[^\r\n]*ServerInstall\.Tests\.ps1'
         $makefile | Should Match 'pwsh[^\r\n]*ServerInstall\.Tests\.ps1'

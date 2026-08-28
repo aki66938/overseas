@@ -2,14 +2,26 @@
 param(
     [Parameter(Mandatory = $true)][string] $MsiPath,
     [Parameter(Mandatory = $true)][string] $StagingPath,
-    [Parameter(Mandatory = $true)][string] $WixPath,
-    [Parameter(Mandatory = $true)][string] $DtfPath,
     [string] $OutputDirectory = 'build/msi-inspect'
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+$lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
+function Resolve-VerifiedTool([string] $RelativePath, [string] $ExpectedHash) {
+    $path = [IO.Path]::GetFullPath((Join-Path $workspace $RelativePath))
+    if (-not $path.StartsWith($workspace + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $path -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $ExpectedHash) {
+        throw 'MSI inspection tool is outside the lock or mismatched.'
+    }
+    return $path
+}
+$WixPath = Resolve-VerifiedTool $lock.wix.executable_path $lock.wix.executable_sha256
+$DtfPath = Resolve-VerifiedTool $lock.wix.dtf_path $lock.wix.dtf_sha256
+if ((& $WixPath --version) -notmatch ('^' + [regex]::Escape($lock.wix.version) + '\+')) { throw 'Locked WiX version is mismatched.' }
 $output = [IO.Path]::GetFullPath((Join-Path $repo $OutputDirectory))
 if (-not $output.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe inspection directory.' }
 if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Recurse -Force }
@@ -89,6 +101,7 @@ if ($sequence.VerifyPackageTrust -ge $sequence.InstallInitialize) { throw 'Verif
 if ($sequence.MsiSafeRemove -ge $sequence.StopServices) { throw 'MsiSafeRemove must precede StopServices.' }
 if ($sequence.VerifyInstalledPayload -ge $sequence.InstallServices -or $sequence.VerifyInstalledPayload -le $sequence.InstallFiles) { throw 'VerifyInstalledPayload must follow InstallFiles and precede InstallServices.' }
 if ($sequence.InstallClientFirewall -le $sequence.VerifyInstalledPayload -or $sequence.InstallClientFirewall -ge $sequence.InstallServices) { throw 'InstallClientFirewall must follow VerifyInstalledPayload and precede InstallServices.' }
+if ($sequence.RemoveClientFirewall -le $sequence.StopServices -or $sequence.CleanupOwnedRuntime -le $sequence.RemoveClientFirewall) { throw 'Uninstall firewall and runtime cleanup ordering is unsafe.' }
 if ($sequence.RemoveExistingProducts -le $sequence.InstallInitialize) { throw 'Major upgrade removal ordering is unsafe.' }
 $aclRows = @(Get-MsiTableRows 'MsiLockPermissionsEx')
 $expectedSddl = @('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)', 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -101,6 +114,15 @@ $packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackag
 $payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq '[CustomActionData]' })
 $payloadDataActions = @($customActions | Where-Object { $_[1] -eq '51' -and $_[2] -eq 'VerifyInstalledPayload' })
 if ($packageTrustActions.Count -ne 1 -or $payloadTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 1) { throw 'First-party trust custom actions are invalid.' }
+$firewallCommands = @{
+    RollbackClientFirewall = 'firewall-rollback'
+    InstallClientFirewall = 'firewall-install'
+    RemoveClientFirewall = 'firewall-uninstall'
+}
+foreach ($action in $firewallCommands.Keys) {
+    $rows = @($customActions | Where-Object { $_[0] -eq $action -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq $firewallCommands[$action] })
+    if ($rows.Count -ne 1) { throw "Raw firewall custom action '$action' is invalid." }
+}
 $packageThumbprintMatch = [regex]::Match([string] $packageTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
 $payloadThumbprintMatch = [regex]::Match([string] $payloadDataActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
 if (-not $packageThumbprintMatch.Success -or -not $payloadThumbprintMatch.Success) { throw 'Embedded corporate trust anchor is absent.' }

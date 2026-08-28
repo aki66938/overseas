@@ -18,6 +18,7 @@ func (unsupportedTrustVerifier) verifyPackage(_, _ string) error {
 func (unsupportedTrustVerifier) verifyPayload(payloadInput) error {
 	return errors.New("installer verification is Windows-only")
 }
-func (unsupportedTrustVerifier) installFirewall() error { return errors.New("unsupported") }
-func (unsupportedTrustVerifier) removeFirewall() error  { return errors.New("unsupported") }
-func (unsupportedTrustVerifier) cleanupRuntime() error  { return errors.New("unsupported") }
+func (unsupportedTrustVerifier) installFirewall() error   { return errors.New("unsupported") }
+func (unsupportedTrustVerifier) rollbackFirewall() error  { return errors.New("unsupported") }
+func (unsupportedTrustVerifier) uninstallFirewall() error { return errors.New("unsupported") }
+func (unsupportedTrustVerifier) cleanupRuntime() error    { return errors.New("unsupported") }

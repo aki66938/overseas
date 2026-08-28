@@ -5,7 +5,8 @@ param(
     [string] $Mode,
     [string] $OutputDirectory = 'build/msi',
     [string] $SigningCertificateThumbprint,
-    [string] $SignToolPath = 'signtool.exe'
+    [string] $SignToolPath = 'signtool.exe',
+    [string] $FirstPartyBinaryDirectory
 )
 
 Set-StrictMode -Version 2.0
@@ -17,25 +18,65 @@ $target = $temporary
 if (-not $target.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe artifact output directory.' }
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
 $workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
-$goExecutable = Join-Path $workspace ('.tools\go' + $lock.go.version + '\go\bin\go.exe')
+$goExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.go.executable_path))
 $wixPackages = Join-Path $workspace ('.tools\wix' + $lock.wix.version)
+$wixExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.executable_path))
+$utilExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.util_extension_path))
+$firewallExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.firewall_extension_path))
+$dtf = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.dtf_path))
 $certificate = $null
 if ($Mode -eq 'Release') {
     if ($SigningCertificateThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Release requires a corporate signing certificate thumbprint.' }
     $certificate = @(Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $SigningCertificateThumbprint -and $_.HasPrivateKey })
     if ($certificate.Count -ne 1) { throw 'Release signing certificate is absent or ambiguous.' }
 }
-$workingTreeStatus = @(& git status --porcelain --untracked-files=normal)
+$workingTreeStatus = @(& git -C $repo status --porcelain --untracked-files=normal)
 if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the Git worktree.' }
 if ($workingTreeStatus.Count -ne 0) { throw 'Artifact builds require a clean Git worktree.' }
+$firstPartyRoot = if ([string]::IsNullOrWhiteSpace($FirstPartyBinaryDirectory)) {
+    if ($Mode -eq 'Release') { throw 'Release requires freshly built first-party binaries.' }
+    Join-Path $repo 'bin'
+}
+else { [IO.Path]::GetFullPath($FirstPartyBinaryDirectory) }
+if (-not $firstPartyRoot.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'First-party binary directory escapes the repository.'
+}
 
 function Assert-Hash([string] $Path, [string] $Expected) {
     if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Expected.ToLowerInvariant()) { throw "Locked hash mismatch for '$([IO.Path]::GetFileName($Path))'." }
 }
-if (-not (Test-Path -LiteralPath $goExecutable) -or (& $goExecutable version) -notmatch ('go' + [regex]::Escape($lock.go.version))) { throw 'Locked Go toolchain is absent or mismatched.' }
+Assert-Hash -Path $goExecutable -Expected $lock.go.executable_sha256
+Assert-Hash -Path $wixExecutable -Expected $lock.wix.executable_sha256
+Assert-Hash -Path $utilExtension -Expected $lock.wix.util_extension_sha256
+Assert-Hash -Path $firewallExtension -Expected $lock.wix.firewall_extension_sha256
+Assert-Hash -Path $dtf -Expected $lock.wix.dtf_sha256
+if ((& $goExecutable version) -ne ('go version go' + $lock.go.version + ' windows/amd64')) { throw 'Locked Go toolchain is absent or mismatched.' }
+if ((& $wixExecutable --version) -notmatch ('^' + [regex]::Escape($lock.wix.version) + '\+')) { throw 'Locked WiX toolchain is absent or mismatched.' }
 Assert-Hash -Path (Join-Path $wixPackages ('WixToolset.Sdk.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.sdk_sha256
 Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.util.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.util_sha256
 Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.firewall.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.firewall_sha256
+
+function Assert-SafeReleaseParent([string] $Path) {
+    $parent = [IO.Path]::GetFullPath((Split-Path -Parent $Path))
+    if (-not [string]::Equals($parent, $repo, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $parent.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Release parent escapes the repository.'
+    }
+    $relative = $parent.Substring($repo.Length).TrimStart('\', '/')
+    $current = $repo
+    foreach ($segment in @($relative -split '[\\/]' | Where-Object { $_ })) {
+        $current = Join-Path $current $segment
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+        }
+        else {
+            [void] [IO.Directory]::CreateDirectory($current)
+            $item = Get-Item -LiteralPath $current -Force
+        }
+        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Release parent contains a reparse point or non-directory.' }
+    }
+    return $parent
+}
 
 function Write-DetachedCms([string] $ContentPath, [string] $SignaturePath) {
     Add-Type -AssemblyName System.Security
@@ -48,7 +89,12 @@ function Write-DetachedCms([string] $ContentPath, [string] $SignaturePath) {
 }
 
 try {
-if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+Assert-SafeReleaseParent -Path $finalTarget | Out-Null
+if (Test-Path -LiteralPath $target) {
+    $existingTarget = Get-Item -LiteralPath $target -Force
+    if (-not $existingTarget.PSIsContainer -or ($existingTarget.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Artifact target is not a safe directory.' }
+    Remove-Item -LiteralPath $target -Recurse -Force
+}
 New-Item -ItemType Directory -Path $target | Out-Null
 $scratch = Join-Path $target '.extract'
 $coreArchive = Join-Path $repo ('artifacts\' + $lock.sing_box.archive)
@@ -59,10 +105,6 @@ Expand-Archive -LiteralPath $coreArchive -DestinationPath (Join-Path $scratch 'c
 Expand-Archive -LiteralPath $tunArchive -DestinationPath (Join-Path $scratch 'tun')
 
 $copies = @{
-    'overseas-agent.exe' = 'bin\overseas-agent.exe'
-    'overseas-client.exe' = 'bin\overseas-client.exe'
-    'credential-provisioner.exe' = 'bin\credential-provisioner.exe'
-    'installer-verifier.exe' = 'bin\installer-verifier.exe'
     'install-client.ps1' = 'deploy\client\install-client.ps1'
     'PROVISIONING.md' = 'deploy\client\PROVISIONING.md'
     'agent.yaml' = 'deploy\client\agent.yaml'
@@ -70,6 +112,9 @@ $copies = @{
     'sing-box.manifest.json' = 'sing-box.manifest.json'
 }
 foreach ($name in @($copies.Keys | Sort-Object)) { Copy-Item -LiteralPath (Join-Path $repo $copies[$name]) -Destination (Join-Path $target $name) }
+foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe')) {
+    Copy-Item -LiteralPath (Join-Path $firstPartyRoot $name) -Destination (Join-Path $target $name)
+}
 $coreRoot = Join-Path $scratch ('core\sing-box-' + $lock.sing_box.version + '-windows-amd64')
 Copy-Item -LiteralPath (Join-Path $coreRoot 'sing-box.exe') -Destination (Join-Path $target 'sing-box.exe')
 Copy-Item -LiteralPath (Join-Path $coreRoot 'libcronet.dll') -Destination (Join-Path $target 'libcronet.dll')
@@ -93,7 +138,7 @@ if ($Mode -eq 'Release') {
     }
 }
 
-$sourceCommit = (& git rev-parse HEAD).Trim()
+$sourceCommit = (& git -C $repo rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Could not bind artifacts to the Git commit.' }
 $sbom = [ordered] @{
     schema_version = 1; format = 'RegenBio-client-sbom'; source_commit = $sourceCommit
@@ -132,7 +177,7 @@ else { [IO.File]::WriteAllText($signaturePath, 'INSPECT-ONLY-NOT-SIGNED', [Text.
 Remove-Item -LiteralPath $scratch -Recurse -Force
 if ($Mode -eq 'Release') {
     if (Test-Path -LiteralPath $finalTarget) { throw 'Final release path already exists.' }
-    Move-Item -LiteralPath $temporary -Destination $finalTarget # atomic publish on one volume
+    [IO.Directory]::Move($temporary, $finalTarget) # atomic publish on one volume
     $target = $finalTarget
 }
 [ordered] @{ mode = $Mode; source_commit = $sourceCommit; output = $target; signing_thumbprint = $(if ($certificate) { $certificate[0].Thumbprint } else { $null }) } | ConvertTo-Json -Compress

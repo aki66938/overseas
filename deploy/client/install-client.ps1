@@ -98,6 +98,20 @@ function Test-JournalOwnsResource {
     catch { return $false }
 }
 
+function Test-UninstallJournalOwnsRootDeletion {
+    param(
+        [string] $JournalPath,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+    if ([string]::IsNullOrWhiteSpace($JournalPath) -or -not (Test-Path -LiteralPath $JournalPath -PathType Leaf)) { return $false }
+    try {
+        $journal = Get-Content -LiteralPath $JournalPath -Raw | ConvertFrom-Json
+        return $journal.SchemaVersion -eq 2 -and $journal.Operation -eq 'Uninstall' -and
+            [string]::Equals([string] $journal.PendingResource, $Root, [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
+
 function Assert-InstallCollisions {
     param([string] $JournalPath)
     foreach ($root in @('C:\Program Files\RegenBio\OverseasAccess', 'C:\ProgramData\RegenBio\OverseasAccess')) {
@@ -140,7 +154,9 @@ function Assert-RemoveOwnership {
     }
     foreach ($root in @($InstallRoot, $DataRoot)) {
         if (Test-Path -LiteralPath $root -PathType Container) {
-            if (-not (Test-ValidRootMarker -Root $root)) { throw "Uninstall requires a valid ownership marker for '$root'." }
+            if (-not (Test-ValidRootMarker -Root $root) -and -not (Test-UninstallJournalOwnsRootDeletion -JournalPath $JournalPath -Root $root)) {
+                throw "Uninstall requires a valid ownership marker for '$root'."
+            }
         }
         elseif (-not $resuming) { throw "Owned root '$root' is absent; refusing uninstall success." }
     }
@@ -578,24 +594,58 @@ function Remove-OwnedService {
 }
 
 function Clear-OwnedSensitiveRuntimeFiles {
-    if (-not (Test-Path -LiteralPath $RuntimeOwnershipPath -PathType Leaf)) { return }
+    if (-not [IO.File]::Exists($RuntimeOwnershipPath)) {
+        foreach ($expected in @('credential.bin', 'sing-box.json')) {
+            if ([IO.File]::Exists((Join-Path $DataRoot $expected))) {
+                throw "Sensitive runtime file '$expected' exists without an ownership ledger."
+            }
+        }
+        return
+    }
     $ledger = Get-Content -LiteralPath $RuntimeOwnershipPath -Raw | ConvertFrom-Json
-    if ($ledger.schema_version -ne 1) { throw 'Runtime ownership ledger is invalid.' }
+    if ($ledger.schema_version -ne 2) { throw 'Runtime ownership ledger is invalid.' }
+    $supported = @('credential.bin', 'sing-box.json')
+    $ownedTargets = @($ledger.finalized)
+    $ownedPaths = @($ledger.finalized)
+    foreach ($intent in @($ledger.intents)) {
+        $target = [string] $intent.target
+        if ($target -notin $supported -or [string] $intent.phase -notin @('prepared', 'temporary-written', 'publishing', 'published')) {
+            throw 'Runtime ownership ledger contains an invalid intent.'
+        }
+        $ownedTargets += $target
+        $ownedPaths += $target
+        foreach ($entry in @(@('temporary', 'publish'), @('backup', 'backup'), @('replaced', 'replaced'))) {
+            $name = [string] $intent.($entry[0])
+            $pattern = '^\.' + [regex]::Escape($target) + '\.' + $entry[1] + '-[a-f0-9]{32}\.tmp$'
+            if ([IO.Path]::GetFileName($name) -ne $name -or $name -notmatch $pattern) {
+                throw 'Runtime ownership ledger contains a foreign transient path.'
+            }
+            $ownedPaths += $name
+        }
+    }
+    foreach ($name in @($ledger.finalized)) {
+        if ([string] $name -notin $supported) { throw 'Runtime ownership ledger contains a foreign finalized path.' }
+    }
     foreach ($expected in @('credential.bin', 'sing-box.json')) {
-        if ((Test-Path -LiteralPath (Join-Path $DataRoot $expected) -PathType Leaf) -and @($ledger.files) -notcontains $expected) {
+        if ([IO.File]::Exists((Join-Path $DataRoot $expected)) -and $ownedTargets -notcontains $expected) {
             throw "Sensitive runtime file '$expected' is not ownership-proven."
         }
     }
-    foreach ($name in @($ledger.files)) {
-        if ($name -notin @('credential.bin', 'sing-box.json')) { throw 'Runtime ownership ledger contains a foreign path.' }
+    foreach ($name in @($ownedPaths | Select-Object -Unique)) {
         $path = Join-Path $DataRoot $name
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
+        if ([IO.File]::Exists($path)) {
             $length = (Get-Item -LiteralPath $path).Length
             [IO.File]::WriteAllBytes($path, (New-Object byte[] $length))
-            Remove-Item -LiteralPath $path -Force
+            [IO.File]::Delete($path)
         }
-        if (Test-Path -LiteralPath $path) { throw "Sensitive runtime residue '$name' remains." }
+        elseif ([IO.Directory]::Exists($path)) { throw "Sensitive runtime path '$name' is not a regular file." }
+        if ([IO.File]::Exists($path) -or [IO.Directory]::Exists($path)) { throw "Sensitive runtime residue '$name' remains." }
     }
+    foreach ($expected in @('credential.bin', 'sing-box.json')) {
+        if ([IO.File]::Exists((Join-Path $DataRoot $expected)) -or [IO.Directory]::Exists((Join-Path $DataRoot $expected))) { throw "Sensitive runtime residue '$expected' remains." }
+    }
+    [IO.File]::Delete($RuntimeOwnershipPath)
+    if ([IO.File]::Exists($RuntimeOwnershipPath) -or [IO.Directory]::Exists($RuntimeOwnershipPath)) { throw 'Runtime ownership ledger residue remains.' }
 }
 
 function Remove-OwnedDirectory {
@@ -610,6 +660,38 @@ function Remove-OwnedDirectory {
         throw "Owned root '$Path' contains foreign or unremoved content; refusing directory removal."
     }
     Remove-Item -LiteralPath $Path -Force
+}
+
+function Remove-OwnedRoot {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $JournalPath
+    )
+    Assert-ExactRoot -Actual $Root -Expected $(if ($Root -eq $InstallRoot) { $InstallRoot } else { $DataRoot })
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        Write-TransactionPhase -Path $JournalPath -Phase 'RootDeletionProven' -CompletedResource $Root
+        return
+    }
+    $hasMarker = Test-ValidRootMarker -Root $Root
+    if ($hasMarker) {
+        Remove-OwnedPayloadFiles -Root $Root
+        $foreign = @(Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -ne $RootOwnerFileName })
+        if ($foreign.Count -ne 0) {
+            throw "Owned root '$Root' contains foreign or unremoved content; ownership proof retained."
+        }
+        Write-TransactionPhase -Path $JournalPath -Phase 'DeletingRoot' -PendingResource $Root
+        Remove-RootOwnershipMarker -Root $Root
+    }
+    elseif (-not (Test-UninstallJournalOwnsRootDeletion -JournalPath $JournalPath -Root $Root) -and
+        -not (Test-JournalOwnsResource -JournalPath $JournalPath -Resource $Root)) {
+        throw "Root deletion for '$Root' lacks durable ownership proof."
+    }
+    if (@(Get-ChildItem -LiteralPath $Root -Force).Count -ne 0) {
+        throw "Owned root '$Root' contains foreign or unremoved content; refusing directory removal."
+    }
+    Remove-Item -LiteralPath $Root -Force
+    if (Test-Path -LiteralPath $Root) { throw "Owned root '$Root' deletion could not be proven." }
+    Write-TransactionPhase -Path $JournalPath -Phase 'RootDeletionProven' -CompletedResource $Root
 }
 
 function Remove-OwnedPayloadFiles {
@@ -713,11 +795,7 @@ function Undo-ClientTransaction {
         Remove-OwnedService
         Clear-OwnedSensitiveRuntimeFiles
         foreach ($root in @($InstallRoot, $DataRoot)) {
-            if (Test-ValidRootMarker -Root $root) {
-                Remove-OwnedPayloadFiles -Root $root
-                Remove-RootOwnershipMarker -Root $root
-                Remove-OwnedDirectory -Path $root -MarkerRemoved
-            }
+            if (Test-Path -LiteralPath $root -PathType Container) { Remove-OwnedRoot -Root $root -JournalPath $JournalPath }
         }
         Write-TransactionPhase -Path $JournalPath -Phase 'Compensated'
         Remove-Item -LiteralPath $JournalPath -Force
@@ -828,11 +906,6 @@ function Uninstall-ClientTransaction {
         Remove-OwnedService
         Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanup' -PendingResource $RuntimeOwnershipPath
         Clear-OwnedSensitiveRuntimeFiles
-        foreach ($root in @($InstallRoot, $DataRoot)) {
-            if (Test-Path -LiteralPath $root -PathType Container) {
-                Remove-OwnedPayloadFiles -Root $root
-            }
-        }
         Assert-ServiceAbsent
         Assert-TunAbsent
         Assert-OwnedRoutesAbsent
@@ -840,18 +913,30 @@ function Uninstall-ClientTransaction {
         Assert-OwnedFirewallAbsent
         if (Test-Path -LiteralPath $ShortcutPath) { throw 'Owned shortcut residue remains.' }
         Write-TransactionPhase -Path $JournalPath -Phase 'ResidueProven'
-        if (Test-Path -LiteralPath $RuntimeOwnershipPath -PathType Leaf) { Remove-Item -LiteralPath $RuntimeOwnershipPath -Force }
         foreach ($root in @($InstallRoot, $DataRoot)) {
-            if (Test-Path -LiteralPath $root -PathType Container) {
-                Remove-RootOwnershipMarker -Root $root
-                Remove-OwnedDirectory -Path $root -MarkerRemoved
-            }
+            Remove-OwnedRoot -Root $root -JournalPath $JournalPath
         }
         Write-TransactionPhase -Path $JournalPath -Phase 'Completed'
         Remove-Item -LiteralPath $JournalPath -Force
     }
     catch {
-        Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanupIncomplete'
+        $pendingRoot = $null
+        if (Test-Path -LiteralPath $JournalPath -PathType Leaf) {
+            try {
+                $failureJournal = Get-Content -LiteralPath $JournalPath -Raw | ConvertFrom-Json
+                if ($failureJournal.Operation -eq 'Uninstall' -and $failureJournal.Phase -eq 'DeletingRoot' -and
+                    [string] $failureJournal.PendingResource -in @($InstallRoot, $DataRoot)) {
+                    $pendingRoot = [string] $failureJournal.PendingResource
+                }
+            }
+            catch { $pendingRoot = $null }
+        }
+        if ($null -ne $pendingRoot) {
+            Write-TransactionPhase -Path $JournalPath -Phase 'RootDeletionIncomplete' -PendingResource $pendingRoot
+        }
+        else {
+            Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanupIncomplete'
+        }
         throw
     }
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -205,39 +204,32 @@ func renderClientConfig(policy accessmodel.Policy, credential agent.Credential) 
 }
 
 func writeConfigAtomic(path string, contents []byte) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".sing-box-*.tmp")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	keep := false
-	defer func() {
-		_ = temporary.Close()
-		if !keep {
-			_ = os.Remove(temporaryPath)
+	return runtimeowner.Publish(path, func(temporaryPath string) error {
+		temporary, err := os.OpenFile(temporaryPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return err
 		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	if err := runtimeowner.Record(path); err != nil {
-		return err
-	}
-	keep = true
-	return nil
+		closed := false
+		defer func() {
+			if !closed {
+				_ = temporary.Close()
+			}
+		}()
+		if err := temporary.Chmod(0o600); err != nil {
+			return err
+		}
+		if _, err := temporary.Write(contents); err != nil {
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			return err
+		}
+		if err := temporary.Close(); err != nil {
+			return err
+		}
+		closed = true
+		return nil
+	})
 }
 
 type supervisedCore struct {
