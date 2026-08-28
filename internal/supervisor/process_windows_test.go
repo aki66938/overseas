@@ -76,6 +76,38 @@ func TestExitBeforeReadyReturnsTypedFailure(t *testing.T) {
 	if err := p.Wait(); !errors.As(err, &exitErr) {
 		t.Fatalf("Wait error = %T %v, want *ExitError", err, err)
 	}
+	if !p.TerminationProven() {
+		t.Fatal("ExitError lost independent proof that the job tree is empty")
+	}
+}
+
+func TestStartCleanupFailureRetainsHandleForTerminationProofRetry(t *testing.T) {
+	cfg, _ := writeFakeConfig(t, map[string]any{"mode": "hang-on-stop"})
+	resumeErr := errors.New("injected resume failure")
+	waitErr := errors.New("injected first termination confirmation failure")
+	ops := defaultProcessOps
+	ops.resumeThread = func(windows.Handle) error { return resumeErr }
+	realWait := ops.waitProcess
+	firstBoundedWait := true
+	ops.waitProcess = func(process windows.Handle, timeout time.Duration) error {
+		if timeout >= 0 && firstBoundedWait {
+			firstBoundedWait = false
+			return waitErr
+		}
+		return realWait(process, timeout)
+	}
+	p := verifiedProcess(&Process{ops: &ops})
+
+	if err := p.Start(context.Background(), fakeConnectEXE, cfg); !errors.Is(err, resumeErr) || !errors.Is(err, waitErr) {
+		t.Fatalf("Start error = %v, want resume and cleanup failures", err)
+	}
+	if p.TerminationProven() {
+		t.Fatal("failed Start incorrectly proved termination")
+	}
+	_ = p.Stop(context.Background())
+	if !p.TerminationProven() {
+		t.Fatal("Stop could not retry failed-Start termination proof")
+	}
 }
 
 func TestStopEscalatesAndKillsDescendants(t *testing.T) {
@@ -421,6 +453,9 @@ func TestReadyReportsTreeConfirmationFailure(t *testing.T) {
 	err := readyResultWithin(t, p, time.Second)
 	assertCleanupError(t, err, treeWaitErr)
 	assertStopReturnsCleanupError(t, p, treeWaitErr)
+	if p.TerminationProven() {
+		t.Fatal("job-empty confirmation failure reported termination proven")
+	}
 }
 
 func TestStopReportsTerminateFailureAfterCloseFallback(t *testing.T) {

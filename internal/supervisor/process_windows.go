@@ -118,6 +118,11 @@ type Process struct {
 	ops         *processOps
 	cleanupDone chan struct{}
 	cleanupErr  error
+
+	nativeCreated      bool
+	terminationProven  bool
+	failedStart        bool
+	failedStartCleanup error
 }
 
 // Start launches exe directly with exactly "run -c <absolute-config>". It
@@ -165,13 +170,16 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 		p.redactor.Flush()
 		return fmt.Errorf("start supervised process: launch: %w", err)
 	}
+	p.nativeCreated = true
 	if err := ops.assignProcessToJob(job, proc.process); err != nil {
-		cleanupErr := abortSuspendedProcess(ops, job, proc, false)
+		cleanupErr, proven := abortSuspendedProcess(ops, job, proc, false)
+		p.rememberFailedStart(proc, ops, cleanupErr, proven)
 		p.redactor.Flush()
 		return errors.Join(fmt.Errorf("start supervised process: assign job: %w", err), cleanupErr)
 	}
 	if err := ops.resumeThread(proc.thread); err != nil {
-		cleanupErr := abortSuspendedProcess(ops, job, proc, true)
+		cleanupErr, proven := abortSuspendedProcess(ops, job, proc, true)
+		p.rememberFailedStart(proc, ops, cleanupErr, proven)
 		p.redactor.Flush()
 		return errors.Join(fmt.Errorf("start supervised process: resume: %w", err), cleanupErr)
 	}
@@ -183,6 +191,7 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 	p.ops = ops
 	p.done = make(chan struct{})
 	p.started = true
+	p.terminationProven = false
 	go p.waitLoop()
 	if ctx.Done() != nil {
 		go func() {
@@ -267,6 +276,10 @@ func (p *Process) Ready(ctx context.Context) error {
 // kill-on-close job after StopTimeout. It is idempotent after a controlled stop.
 func (p *Process) Stop(ctx context.Context) error {
 	p.mu.Lock()
+	if p.failedStart {
+		p.mu.Unlock()
+		return p.retryFailedStartCleanup(ctx)
+	}
 	if !p.started {
 		p.mu.Unlock()
 		return nil
@@ -339,6 +352,66 @@ func (p *Process) Stop(ctx context.Context) error {
 	}
 }
 
+// TerminationProven reports whether no native process created by this Process
+// can remain and, when a job was assigned, its process tree was observed empty.
+// It is intentionally independent of ExitError and non-proof cleanup errors.
+func (p *Process) TerminationProven() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.nativeCreated || p.terminationProven
+}
+
+// rememberFailedStart is called with p.mu held. Cleanup that could not prove
+// termination retains the native process handle so Stop can retry proof.
+func (p *Process) rememberFailedStart(proc *nativeProcess, ops *processOps, cleanupErr error, proven bool) {
+	p.failedStartCleanup = cleanupErr
+	p.terminationProven = proven
+	if proven {
+		return
+	}
+	p.proc = proc
+	p.ops = ops
+	p.done = make(chan struct{})
+	p.started = true
+	p.failedStart = true
+}
+
+func (p *Process) retryFailedStartCleanup(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	p.mu.Lock()
+	proc := p.proc
+	ops := p.ops
+	previous := p.failedStartCleanup
+	p.mu.Unlock()
+	var retryFailures []error
+	if err := ops.terminateProcess(proc.process, 1); err != nil {
+		retryFailures = append(retryFailures, fmt.Errorf("retry terminate failed-start process: %w", err))
+	}
+	if err := ops.waitProcess(proc.process, 5*time.Second); err != nil {
+		retryFailures = append(retryFailures, fmt.Errorf("retry confirm failed-start termination: %w", err))
+		return errors.Join(previous, &CleanupError{Err: errors.Join(retryFailures...)})
+	}
+	if err := ops.closeHandle(proc.process); err != nil {
+		retryFailures = append(retryFailures, fmt.Errorf("close failed-start process handle: %w", err))
+	}
+	p.mu.Lock()
+	p.terminationProven = true
+	p.failedStart = false
+	p.started = false
+	if p.done != nil {
+		close(p.done)
+	}
+	p.mu.Unlock()
+	if len(retryFailures) == 0 {
+		return previous
+	}
+	return errors.Join(previous, &CleanupError{Err: errors.Join(retryFailures...)})
+}
+
 // Wait waits for the supervised process and reports an unexpected exit as an
 // ExitError. Controlled termination returns nil.
 func (p *Process) Wait() error {
@@ -365,7 +438,8 @@ func (p *Process) waitLoop() {
 
 	cleanupDone, job, _, ops, cleanupOwner := p.acquireCleanup(false)
 	if cleanupOwner {
-		p.finishCleanup(cleanupDone, cleanupJobAfterRootExit(ops, job))
+		cleanupErr, proven := cleanupJobAfterRootExit(ops, job)
+		p.finishCleanup(cleanupDone, cleanupErr, proven)
 	} else {
 		<-cleanupDone
 	}
@@ -419,6 +493,8 @@ func (p *Process) terminateForFailure() error {
 	var cleanupFailures []error
 	jobClosed := false
 	jobTerminated := false
+	rootTerminated := false
+	jobEmpty := false
 	if job == 0 {
 		cleanupFailures = append(cleanupFailures, errors.New("process job handle was unavailable during teardown"))
 	} else if err := ops.terminateJob(job, 1); err != nil {
@@ -432,10 +508,14 @@ func (p *Process) terminateForFailure() error {
 	}
 	if err := ops.waitProcess(proc.process, 5*time.Second); err != nil {
 		cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm root process termination: %w", err))
+	} else {
+		rootTerminated = true
 	}
 	if jobTerminated {
 		if err := ops.waitJobEmpty(job, 5*time.Second); err != nil {
 			cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm process job is empty: %w", err))
+		} else {
+			jobEmpty = true
 		}
 	}
 	if job != 0 && !jobClosed {
@@ -447,7 +527,7 @@ func (p *Process) terminateForFailure() error {
 	if len(cleanupFailures) != 0 {
 		cleanupErr = &CleanupError{Err: errors.Join(cleanupFailures...)}
 	}
-	p.finishCleanup(cleanupDone, cleanupErr)
+	p.finishCleanup(cleanupDone, cleanupErr, rootTerminated && jobEmpty)
 	return cleanupErr
 }
 
@@ -472,9 +552,12 @@ func (p *Process) acquireCleanup(markStopping bool) (chan struct{}, windows.Hand
 	return p.cleanupDone, job, p.proc, p.ops, true
 }
 
-func (p *Process) finishCleanup(done chan struct{}, cleanupErr error) {
+func (p *Process) finishCleanup(done chan struct{}, cleanupErr error, terminationProven bool) {
 	p.mu.Lock()
 	p.cleanupErr = errors.Join(p.cleanupErr, cleanupErr)
+	if terminationProven {
+		p.terminationProven = true
+	}
 	close(done)
 	p.mu.Unlock()
 }
@@ -488,9 +571,10 @@ func (p *Process) terminalError() error {
 // cleanupJobAfterRootExit handles the important case where the root exits but
 // descendants still own inherited handles. The whole job is terminated and
 // observed empty before its kill-on-close handle is released.
-func cleanupJobAfterRootExit(ops *processOps, job windows.Handle) error {
+func cleanupJobAfterRootExit(ops *processOps, job windows.Handle) (error, bool) {
 	var cleanupFailures []error
 	jobClosed := false
+	jobEmpty := false
 	if job == 0 {
 		cleanupFailures = append(cleanupFailures, errors.New("process job handle was unavailable after root exit"))
 	} else if err := ops.terminateJob(job, 1); err != nil {
@@ -501,6 +585,8 @@ func cleanupJobAfterRootExit(ops *processOps, job windows.Handle) error {
 		jobClosed = true
 	} else if err := ops.waitJobEmpty(job, 5*time.Second); err != nil {
 		cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm process job is empty after root exit: %w", err))
+	} else {
+		jobEmpty = true
 	}
 	if job != 0 && !jobClosed {
 		if err := ops.closeJob(job); err != nil {
@@ -508,9 +594,9 @@ func cleanupJobAfterRootExit(ops *processOps, job windows.Handle) error {
 		}
 	}
 	if len(cleanupFailures) == 0 {
-		return nil
+		return nil, jobEmpty
 	}
-	return &CleanupError{Err: errors.Join(cleanupFailures...)}
+	return &CleanupError{Err: errors.Join(cleanupFailures...)}, jobEmpty
 }
 
 func createKillOnCloseJob() (windows.Handle, error) {
@@ -606,9 +692,10 @@ func launchSuspendedProcess(exe, config string, output io.Writer, verify func(st
 	return &nativeProcess{process: info.Process, thread: info.Thread, pid: info.ProcessId, logDone: logDone}, nil
 }
 
-func abortSuspendedProcess(ops *processOps, job windows.Handle, proc *nativeProcess, assigned bool) error {
+func abortSuspendedProcess(ops *processOps, job windows.Handle, proc *nativeProcess, assigned bool) (error, bool) {
 	var errs []error
 	jobClosed := false
+	terminationProven := false
 	if assigned {
 		if err := ops.terminateJob(job, 1); err != nil {
 			errs = append(errs, fmt.Errorf("terminate suspended job: %w", err))
@@ -622,14 +709,19 @@ func abortSuspendedProcess(ops *processOps, job windows.Handle, proc *nativeProc
 	}
 	if err := ops.waitProcess(proc.process, 5*time.Second); err != nil {
 		errs = append(errs, fmt.Errorf("wait for suspended process termination: %w", err))
+	} else {
+		terminationProven = true
 	}
 	if proc.thread != 0 {
 		if err := ops.closeHandle(proc.thread); err != nil {
 			errs = append(errs, fmt.Errorf("close suspended thread: %w", err))
 		}
+		proc.thread = 0
 	}
-	if err := ops.closeHandle(proc.process); err != nil {
-		errs = append(errs, fmt.Errorf("close suspended process: %w", err))
+	if terminationProven {
+		if err := ops.closeHandle(proc.process); err != nil {
+			errs = append(errs, fmt.Errorf("close suspended process: %w", err))
+		}
 	}
 	if !jobClosed {
 		if err := ops.closeJob(job); err != nil {
@@ -643,7 +735,7 @@ func abortSuspendedProcess(ops *processOps, job windows.Handle, proc *nativeProc
 			errs = append(errs, errors.New("log capture did not close after suspended-process cleanup"))
 		}
 	}
-	return errors.Join(errs...)
+	return errors.Join(errs...), terminationProven
 }
 
 func wrapError(operation string, err error) error {

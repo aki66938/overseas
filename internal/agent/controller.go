@@ -56,15 +56,30 @@ type NetworkManager interface {
 	ActivateTUNRoutes(context.Context) error
 	Restore(context.Context, any) error
 	Reconcile(context.Context) error
+	Failures() <-chan error
+}
+
+// ProcessStartResult distinguishes a failure before/after native creation.
+// TerminationProven means no process from this Start can still be running.
+type ProcessStartResult struct {
+	Err               error
+	TerminationProven bool
+}
+
+// ProcessTermination reports process outcome separately from proof that the
+// supervised job tree is empty. Exit errors do not invalidate positive proof.
+type ProcessTermination struct {
+	Err    error
+	Proven bool
 }
 
 // ProcessSupervisor is a reusable facade. A production implementation may
 // allocate a fresh single-use supervisor.Process for every Start call.
 type ProcessSupervisor interface {
-	Start(context.Context, string, string) error
+	Start(context.Context, string, string) ProcessStartResult
 	Ready(context.Context) error
-	Stop(context.Context) error
-	Wait() error
+	Stop(context.Context) ProcessTermination
+	Wait() ProcessTermination
 }
 
 // Dependencies are explicit so tests never need to touch the filesystem,
@@ -173,7 +188,7 @@ func (c *Controller) Connect(ctx context.Context) Status {
 		connected := status.State == accessmodel.StateConnected && c.generation == generation
 		c.mu.Unlock()
 		if connected {
-			go c.monitorProcess(generation)
+			go c.monitorLifecycle(generation)
 		}
 		return status
 	}
@@ -326,8 +341,9 @@ func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
 	// Start owns the core lifetime until Disconnect. The transition deadline
 	// still bounds Ready below, but must not terminate a successfully connected
 	// core when the connect operation itself returns.
-	if err := c.process.Start(context.WithoutCancel(ctx), c.deps.ExecutablePath, c.deps.ConfigPath); err != nil {
-		return failure(ErrorCoreStart), false
+	startResult := c.process.Start(context.WithoutCancel(ctx), c.deps.ExecutablePath, c.deps.ConfigPath)
+	if startResult.Err != nil {
+		return failure(ErrorCoreStart), !startResult.TerminationProven
 	}
 	started := true
 	if err := c.process.Ready(ctx); err != nil {
@@ -346,7 +362,7 @@ func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
 }
 
 func (c *Controller) stopCouldNotBeProven() bool {
-	return c.process.Stop(context.Background()) != nil
+	return !c.process.Stop(context.Background()).Proven
 }
 
 func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
@@ -357,14 +373,13 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	reconciled := c.reconciled
 	c.mu.Unlock()
 
-	var stopErr error
 	if started && c.process != nil {
-		stopErr = c.process.Stop(ctx)
-	}
-	if stopErr != nil {
-		// Restoring routes, DNS, or the leak block is unsafe until the whole
-		// supervised process tree is proven terminated.
-		return failure(ErrorRestoreFailed), false
+		termination := c.process.Stop(ctx)
+		if !termination.Proven {
+			// Restoring routes, DNS, or the leak block is unsafe until the whole
+			// supervised process tree is proven terminated.
+			return failure(ErrorRestoreFailed), false
+		}
 	}
 	if hasSnapshot {
 		if c.network == nil || c.network.Restore(ctx, snapshot) != nil {
@@ -378,10 +393,18 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	return Status{State: accessmodel.StateDisconnected, Message: "海外访问已关闭"}, true
 }
 
-func (c *Controller) monitorProcess(generation uint64) {
-	err := c.process.Wait()
-	if err == nil {
-		return
+func (c *Controller) monitorLifecycle(generation uint64) {
+	processDone := make(chan ProcessTermination, 1)
+	go func() { processDone <- c.process.Wait() }()
+	var failures <-chan error
+	if c.network != nil {
+		failures = c.network.Failures()
+	}
+	var termination ProcessTermination
+	select {
+	case termination = <-processDone:
+	case <-failures:
+		termination = c.process.Stop(context.Background())
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -389,7 +412,9 @@ func (c *Controller) monitorProcess(generation uint64) {
 		return
 	}
 	c.status = failure(ErrorReadinessLost)
-	c.processStarted = false
+	if termination.Proven {
+		c.processStarted = false
+	}
 }
 
 func (c *Controller) waitForTransition(ctx context.Context, done <-chan struct{}) Status {

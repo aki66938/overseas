@@ -243,7 +243,7 @@ type supervisedCore struct {
 	verifyExecutable func(string) error
 }
 
-func (s *supervisedCore) Start(ctx context.Context, executable, config string) error {
+func (s *supervisedCore) Start(ctx context.Context, executable, config string) agent.ProcessStartResult {
 	process := &supervisor.Process{
 		ReadyTimeout:     10 * time.Second,
 		StopTimeout:      3 * time.Second,
@@ -251,15 +251,15 @@ func (s *supervisedCore) Start(ctx context.Context, executable, config string) e
 		MaxLogBytes:      64 * 1024,
 		VerifyExecutable: s.verifyExecutable,
 	}
-	// supervisor.Process invokes VerifyExecutable inside its suspended-launch
-	// boundary immediately before CreateProcess.
-	if err := process.Start(ctx, executable, config); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	s.current = process
 	s.mu.Unlock()
-	return nil
+	// supervisor.Process invokes VerifyExecutable inside its suspended-launch
+	// boundary immediately before CreateProcess.
+	if err := process.Start(ctx, executable, config); err != nil {
+		return agent.ProcessStartResult{Err: err, TerminationProven: process.TerminationProven()}
+	}
+	return agent.ProcessStartResult{}
 }
 
 func (s *supervisedCore) Ready(ctx context.Context) error {
@@ -270,20 +270,22 @@ func (s *supervisedCore) Ready(ctx context.Context) error {
 	return process.Ready(ctx)
 }
 
-func (s *supervisedCore) Stop(ctx context.Context) error {
+func (s *supervisedCore) Stop(ctx context.Context) agent.ProcessTermination {
 	process := s.process()
 	if process == nil {
-		return nil
+		return agent.ProcessTermination{Proven: true}
 	}
-	return process.Stop(ctx)
+	err := process.Stop(ctx)
+	return agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
 }
 
-func (s *supervisedCore) Wait() error {
+func (s *supervisedCore) Wait() agent.ProcessTermination {
 	process := s.process()
 	if process == nil {
-		return supervisor.ErrNotStarted
+		return agent.ProcessTermination{Err: supervisor.ErrNotStarted, Proven: true}
 	}
-	return process.Wait()
+	err := process.Wait()
+	return agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
 }
 
 func (s *supervisedCore) process() *supervisor.Process {

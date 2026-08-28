@@ -18,25 +18,32 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 )
 
 const (
-	networkOperationCapture  = "capture"
-	networkOperationBlock    = "block"
-	networkOperationReady    = "ready"
-	networkOperationActivate = "activate"
-	networkOperationRestore  = "restore"
+	networkOperationCapture   = "capture"
+	networkOperationScan      = "scan"
+	networkOperationBlock     = "block"
+	networkOperationEmergency = "emergency"
+	networkOperationReady     = "ready"
+	networkOperationActivate  = "activate"
+	networkOperationRestore   = "restore"
 
-	windowsTUNInterface     = "RegenBioOverseasAccess"
-	windowsTUNAddress       = "172.19.0.1/30"
-	windowsTUNDNS           = "172.19.0.2"
-	windowsTCPBlockRule     = "RegenBioOverseasAccess.BlockPublicTCP"
-	windowsQUICBlockRule    = "RegenBioOverseasAccess.BlockQUIC"
-	windowsUDPBlockRule     = "RegenBioOverseasAccess.BlockPublicUDP"
-	windowsOwnedRouteMetric = 4096
+	windowsTUNInterface       = "RegenBioOverseasAccess"
+	windowsTUNAddress         = "172.19.0.1/30"
+	windowsTUNDNS             = "172.19.0.2"
+	windowsTCPBlockRule       = "RegenBioOverseasAccess.BlockPublicTCP"
+	windowsQUICBlockRule      = "RegenBioOverseasAccess.BlockQUIC"
+	windowsUDPBlockRule       = "RegenBioOverseasAccess.BlockPublicUDP"
+	windowsDNSUDPBlockRule    = "RegenBioOverseasAccess.BlockUnapprovedDNSUDP"
+	windowsDNSTCPBlockRule    = "RegenBioOverseasAccess.BlockUnapprovedDNSTCP"
+	windowsEmergencyBlockRule = "RegenBioOverseasAccess.BlockPublicEmergency"
+	windowsFirewallGroup      = "RegenBioOverseasAccess.Managed"
+	windowsOwnedRouteMetric   = 4096
 )
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
@@ -78,6 +85,13 @@ type WindowsTUNIdentity struct {
 	Addresses            []string `json:"Addresses"`
 }
 
+type WindowsAdapterIdentity struct {
+	InterfaceIndex int    `json:"InterfaceIndex"`
+	InterfaceGuid  string `json:"InterfaceGuid"`
+	InterfaceAlias string `json:"InterfaceAlias"`
+	Status         string `json:"Status"`
+}
+
 type WindowsNetworkSnapshot struct {
 	Version                   int                        `json:"Version"`
 	Interfaces                []WindowsInterfaceSnapshot `json:"Interfaces"`
@@ -93,19 +107,21 @@ type WindowsNetworkSnapshot struct {
 }
 
 type windowsNetworkInput struct {
-	Interfaces             []WindowsInterfaceSnapshot `json:"Interfaces,omitempty"`
-	FirewallRuleNames      []string                   `json:"FirewallRuleNames,omitempty"`
-	BlockedRemoteAddresses []string                   `json:"BlockedRemoteAddresses,omitempty"`
-	FirewallInterfaceTypes []string                   `json:"FirewallInterfaceTypes,omitempty"`
-	TUNInterface           string                     `json:"TUNInterface,omitempty"`
-	TUNAddress             string                     `json:"TUNAddress,omitempty"`
-	TUNDNS                 string                     `json:"TUNDNS,omitempty"`
-	TUNRoutePrefixes       []string                   `json:"TUNRoutePrefixes,omitempty"`
-	RouteMetric            int                        `json:"RouteMetric,omitempty"`
-	NodeAddresses          []string                   `json:"NodeAddresses,omitempty"`
-	BaselineAdapterGuids   []string                   `json:"BaselineAdapterGuids,omitempty"`
-	OwnedTUN               *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
-	OwnedRoutes            []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
+	Interfaces                []WindowsInterfaceSnapshot `json:"Interfaces,omitempty"`
+	FirewallRuleNames         []string                   `json:"FirewallRuleNames,omitempty"`
+	FirewallGroup             string                     `json:"FirewallGroup,omitempty"`
+	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses,omitempty"`
+	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses,omitempty"`
+	ProtectedAdapters         []WindowsAdapterIdentity   `json:"ProtectedAdapters,omitempty"`
+	TUNInterface              string                     `json:"TUNInterface,omitempty"`
+	TUNAddress                string                     `json:"TUNAddress,omitempty"`
+	TUNDNS                    string                     `json:"TUNDNS,omitempty"`
+	TUNRoutePrefixes          []string                   `json:"TUNRoutePrefixes,omitempty"`
+	RouteMetric               int                        `json:"RouteMetric,omitempty"`
+	NodeAddresses             []string                   `json:"NodeAddresses,omitempty"`
+	BaselineAdapterGuids      []string                   `json:"BaselineAdapterGuids,omitempty"`
+	OwnedTUN                  *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
+	OwnedRoutes               []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
 }
 
 type networkRunner interface {
@@ -119,14 +135,20 @@ type snapshotStore interface {
 }
 
 type WindowsNetworkManager struct {
-	mu              sync.Mutex
-	policy          accessmodel.Policy
-	statePath       string
-	runner          networkRunner
-	store           snapshotStore
-	nodeAddresses   []string
-	blockedPrefixes []string
-	current         *WindowsNetworkSnapshot
+	mu                 sync.Mutex
+	protectionRunMu    sync.Mutex
+	policy             accessmodel.Policy
+	statePath          string
+	runner             networkRunner
+	store              snapshotStore
+	nodeAddresses      []string
+	blockedPrefixes    []string
+	dnsBlockedPrefixes []string
+	current            *WindowsNetworkSnapshot
+	protectionInterval time.Duration
+	protectionCancel   context.CancelFunc
+	protectionDone     chan struct{}
+	failures           chan error
 }
 
 func NewWindowsNetworkManager(policy accessmodel.Policy, statePath string) (*WindowsNetworkManager, error) {
@@ -180,13 +202,21 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		excluded4 = append(excluded4, netip.PrefixFrom(address, 32))
 	}
 	blocked := append(complementIPv4Prefixes(excluded4), complementIPv6Prefixes(excluded6)...)
+	dnsExcluded4 := []netip.Prefix{netip.PrefixFrom(netip.MustParseAddr(windowsTUNDNS), 32)}
+	for _, value := range policy.CorporateDNS {
+		dnsExcluded4 = append(dnsExcluded4, netip.PrefixFrom(netip.MustParseAddr(value), 32))
+	}
+	dnsBlocked := append(complementIPv4Prefixes(dnsExcluded4), complementIPv6Prefixes(nil)...)
 	return &WindowsNetworkManager{
-		policy:          clonePolicy(policy),
-		statePath:       statePath,
-		runner:          runner,
-		store:           store,
-		nodeAddresses:   nodeAddresses,
-		blockedPrefixes: blocked,
+		policy:             clonePolicy(policy),
+		statePath:          statePath,
+		runner:             runner,
+		store:              store,
+		nodeAddresses:      nodeAddresses,
+		blockedPrefixes:    blocked,
+		dnsBlockedPrefixes: dnsBlocked,
+		protectionInterval: 250 * time.Millisecond,
+		failures:           make(chan error, 1),
 	}, nil
 }
 
@@ -202,7 +232,8 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	input := windowsNetworkInput{
-		FirewallRuleNames: []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule},
+		FirewallRuleNames: windowsFirewallRuleNames(),
+		FirewallGroup:     windowsFirewallGroup,
 		TUNRoutePrefixes:  []string{"0.0.0.0/1", "128.0.0.0/1"},
 		TUNInterface:      windowsTUNInterface,
 		TUNAddress:        windowsTUNAddress,
@@ -242,27 +273,141 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 
 func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.current == nil {
+		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	input := windowsNetworkInput{
-		Interfaces:             append([]WindowsInterfaceSnapshot(nil), m.current.Interfaces...),
-		FirewallRuleNames:      []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule},
-		BlockedRemoteAddresses: append([]string(nil), m.blockedPrefixes...),
-		// Windows Firewall applies these interface types dynamically, including
-		// adapters attached after Connect. Wintun is virtual/prop-virtual and is
-		// identity-checked separately, so it is intentionally outside this scope.
-		FirewallInterfaceTypes: []string{"Wired", "Wireless"},
+	if m.protectionCancel != nil {
+		m.mu.Unlock()
+		return errors.New("network protection monitor is already running")
 	}
-	_, err := m.run(ctx, networkOperationBlock, input)
+	m.mu.Unlock()
+	select {
+	case <-m.failures:
+	default:
+	}
+	if err := m.reconcileProtection(ctx); err != nil {
+		return errors.Join(err, m.installEmergencyProtection(ctx))
+	}
+	monitorContext, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.protectionCancel = cancel
+	m.protectionDone = done
+	interval := m.protectionInterval
+	m.mu.Unlock()
+	go m.monitorProtection(monitorContext, done, interval)
+	return nil
+}
+
+func (m *WindowsNetworkManager) Failures() <-chan error { return m.failures }
+
+func (m *WindowsNetworkManager) monitorProtection(ctx context.Context, done chan struct{}, interval time.Duration) {
+	defer close(done)
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.reconcileProtection(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				err = errors.Join(err, m.installEmergencyProtection(ctx))
+				select {
+				case m.failures <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
+}
+
+func (m *WindowsNetworkManager) reconcileProtection(ctx context.Context) error {
+	m.protectionRunMu.Lock()
+	defer m.protectionRunMu.Unlock()
+	output, err := m.run(ctx, networkOperationScan, windowsNetworkInput{})
+	if err != nil {
+		return err
+	}
+	var adapters []WindowsAdapterIdentity
+	if err := json.Unmarshal(output, &adapters); err != nil {
+		return fmt.Errorf("decode adapter scan: %w", err)
+	}
+	if len(adapters) == 0 {
+		return errors.New("adapter scan returned no protectable adapters")
+	}
+	m.mu.Lock()
+	if m.current == nil {
+		m.mu.Unlock()
+		return errors.New("network state was not captured")
+	}
+	ownedTUN := m.current.OwnedTUN
+	interfaces := append([]WindowsInterfaceSnapshot(nil), m.current.Interfaces...)
+	m.mu.Unlock()
+	protected := make([]WindowsAdapterIdentity, 0, len(adapters))
+	for _, adapter := range adapters {
+		if adapter.InterfaceIndex <= 0 || strings.TrimSpace(adapter.InterfaceGuid) == "" || strings.TrimSpace(adapter.InterfaceAlias) == "" {
+			return errors.New("adapter scan returned an invalid identity")
+		}
+		if ownedTUN != nil && adapter.InterfaceIndex == ownedTUN.InterfaceIndex && strings.EqualFold(adapter.InterfaceGuid, ownedTUN.InterfaceGuid) && adapter.InterfaceAlias == ownedTUN.InterfaceAlias {
+			continue
+		}
+		protected = append(protected, adapter)
+	}
+	sort.Slice(protected, func(left, right int) bool { return protected[left].InterfaceGuid < protected[right].InterfaceGuid })
+	input := windowsNetworkInput{
+		Interfaces:                interfaces,
+		FirewallRuleNames:         windowsFirewallRuleNames(),
+		FirewallGroup:             windowsFirewallGroup,
+		BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
+		DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
+		ProtectedAdapters:         protected,
+	}
+	_, err = m.run(ctx, networkOperationBlock, input)
 	return err
+}
+
+func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) error {
+	input := windowsNetworkInput{
+		FirewallRuleNames:         windowsFirewallRuleNames(),
+		FirewallGroup:             windowsFirewallGroup,
+		BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
+		DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
+	}
+	_, err := m.run(ctx, networkOperationEmergency, input)
+	return err
+}
+
+func windowsFirewallRuleNames() []string {
+	return []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule, windowsDNSUDPBlockRule, windowsDNSTCPBlockRule, windowsEmergencyBlockRule}
+}
+
+func (m *WindowsNetworkManager) stopProtection() {
+	m.mu.Lock()
+	cancel := m.protectionCancel
+	done := m.protectionDone
+	m.protectionCancel = nil
+	m.protectionDone = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.current == nil {
+		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
 	input := windowsNetworkInput{
@@ -272,13 +417,16 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	}
 	output, err := m.run(ctx, networkOperationReady, input)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	var identity WindowsTUNIdentity
 	if err := json.Unmarshal(output, &identity); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("decode TUN identity: %w", err)
 	}
 	if err := validateTUNIdentity(identity, m.current.BaselineAdapterGuids); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	ownedRoutes := []WindowsOwnedRoute{
@@ -297,7 +445,12 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	}
 	m.current.OwnedTUN = &identity
 	m.current.OwnedRoutes = ownedRoutes
-	return m.store.Save(m.statePath, *m.current)
+	if err := m.store.Save(m.statePath, *m.current); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Unlock()
+	return m.reconcileProtection(ctx)
 }
 
 func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
@@ -316,6 +469,7 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	if err != nil {
 		return err
 	}
+	m.stopProtection()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {
@@ -332,6 +486,7 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 }
 
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
+	m.stopProtection()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	snapshot, err := m.store.Load(m.statePath)
@@ -368,7 +523,8 @@ func (m *WindowsNetworkManager) run(ctx context.Context, operation string, input
 func activationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
 	return windowsNetworkInput{
 		Interfaces:        append([]WindowsInterfaceSnapshot(nil), snapshot.Interfaces...),
-		FirewallRuleNames: []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule},
+		FirewallRuleNames: windowsFirewallRuleNames(),
+		FirewallGroup:     windowsFirewallGroup,
 		TUNInterface:      windowsTUNInterface,
 		TUNAddress:        windowsTUNAddress,
 		TUNDNS:            windowsTUNDNS,
@@ -682,11 +838,13 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 }
 
 var networkPowerShellScripts = map[string]string{
-	networkOperationCapture:  captureNetworkPowerShell,
-	networkOperationBlock:    blockNetworkPowerShell,
-	networkOperationReady:    readyNetworkPowerShell,
-	networkOperationActivate: activateNetworkPowerShell,
-	networkOperationRestore:  restoreNetworkPowerShell,
+	networkOperationCapture:   captureNetworkPowerShell,
+	networkOperationScan:      scanNetworkPowerShell,
+	networkOperationBlock:     blockNetworkPowerShell,
+	networkOperationEmergency: emergencyNetworkPowerShell,
+	networkOperationReady:     readyNetworkPowerShell,
+	networkOperationActivate:  activateNetworkPowerShell,
+	networkOperationRestore:   restoreNetworkPowerShell,
 }
 
 const captureNetworkPowerShell = `$ErrorActionPreference = 'Stop'
@@ -712,6 +870,7 @@ $collisions = @()
 foreach ($name in @($i.FirewallRuleNames)) {
   if (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue) { $collisions += [string]$name }
 }
+if (Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue) { $collisions += [string]$i.FirewallGroup }
 $conflicting = @()
 foreach ($prefix in @($i.TUNRoutePrefixes)) {
   if (Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue) { $conflicting += [string]$prefix }
@@ -749,13 +908,63 @@ foreach ($node in @($i.NodeAddresses)) {
   NodeRoutes = @($nodeRoutes)
 } | ConvertTo-Json -Compress -Depth 8`
 
+const scanNetworkPowerShell = `$ErrorActionPreference = 'Stop'
+$null = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+$adapters = @(Get-NetAdapter -IncludeHidden | ForEach-Object {
+  [pscustomobject]@{
+    InterfaceIndex = [int]$_.InterfaceIndex
+    InterfaceGuid = [string]$_.InterfaceGuid
+    InterfaceAlias = [string]$_.InterfaceAlias
+    Status = [string]$_.Status
+  }
+})
+ConvertTo-Json -InputObject $adapters -Compress -Depth 4`
+
 const blockNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
 $remote = @($i.BlockedRemoteAddresses)
-$types = @($i.FirewallInterfaceTypes)
-if (-not (Get-NetFirewallRule -Name $i.FirewallRuleNames[0] -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name $i.FirewallRuleNames[0] -DisplayName $i.FirewallRuleNames[0] -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $remote -InterfaceType $types -Profile Any | Out-Null }
-if (-not (Get-NetFirewallRule -Name $i.FirewallRuleNames[1] -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name $i.FirewallRuleNames[1] -DisplayName $i.FirewallRuleNames[1] -Direction Outbound -Action Block -Protocol UDP -RemotePort 443 -RemoteAddress $remote -InterfaceType $types -Profile Any | Out-Null }
-if (-not (Get-NetFirewallRule -Name $i.FirewallRuleNames[2] -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name $i.FirewallRuleNames[2] -DisplayName $i.FirewallRuleNames[2] -Direction Outbound -Action Block -Protocol UDP -RemoteAddress $remote -InterfaceType $types -Profile Any | Out-Null }`
+$dnsRemote = @($i.DNSBlockedRemoteAddresses)
+$desired = @([string]$i.FirewallRuleNames[3], [string]$i.FirewallRuleNames[4])
+function Test-ManagedAdapterRule([string]$name, [string]$alias) {
+  $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
+  if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
+  if ($existing.Count -eq 0) { return $false }
+  $aliases = @($existing[0] | Get-NetFirewallInterfaceFilter).InterfaceAlias
+  if ($aliases.Count -eq 1 -and [string]$aliases[0] -eq $alias) { return $true }
+  $existing[0] | Remove-NetFirewallRule -ErrorAction Stop
+  return $false
+}
+function Test-ManagedRule([string]$name) {
+  $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
+  if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
+  return ($existing.Count -eq 1)
+}
+foreach ($adapter in @($i.ProtectedAdapters)) {
+  $suffix = ([string]$adapter.InterfaceGuid).Trim('{}').Replace('-', '')
+  $tcpName = ([string]$i.FirewallRuleNames[0]) + '.' + $suffix
+  $quicName = ([string]$i.FirewallRuleNames[1]) + '.' + $suffix
+  $udpName = ([string]$i.FirewallRuleNames[2]) + '.' + $suffix
+  $desired += @($tcpName, $quicName, $udpName)
+  if (-not (Test-ManagedAdapterRule $tcpName ([string]$adapter.InterfaceAlias))) { New-NetFirewallRule -Name $tcpName -DisplayName $tcpName -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $remote -InterfaceAlias ([string]$adapter.InterfaceAlias) -Profile Any | Out-Null }
+  if (-not (Test-ManagedAdapterRule $quicName ([string]$adapter.InterfaceAlias))) { New-NetFirewallRule -Name $quicName -DisplayName $quicName -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 443 -RemoteAddress $remote -InterfaceAlias ([string]$adapter.InterfaceAlias) -Profile Any | Out-Null }
+  if (-not (Test-ManagedAdapterRule $udpName ([string]$adapter.InterfaceAlias))) { New-NetFirewallRule -Name $udpName -DisplayName $udpName -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemoteAddress $remote -InterfaceAlias ([string]$adapter.InterfaceAlias) -Profile Any | Out-Null }
+}
+if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
+if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
+Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Where-Object { $desired -notcontains $_.Name } | Remove-NetFirewallRule -ErrorAction Stop`
+
+const emergencyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
+$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+$remote = @($i.BlockedRemoteAddresses)
+$dnsRemote = @($i.DNSBlockedRemoteAddresses)
+function Test-ManagedRule([string]$name) {
+  $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
+  if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
+  return ($existing.Count -eq 1)
+}
+if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[5]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[5] -DisplayName $i.FirewallRuleNames[5] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol Any -RemoteAddress $remote -Profile Any | Out-Null }
+if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
+if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }`
 
 const readyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
@@ -810,6 +1019,4 @@ foreach ($physical in @($i.Interfaces)) {
 foreach ($route in @($i.OwnedRoutes)) {
   Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
 }
-foreach ($name in @($i.FirewallRuleNames[2], $i.FirewallRuleNames[1], $i.FirewallRuleNames[0])) {
-  Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
-}`
+Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop`

@@ -233,6 +233,7 @@ func TestControllerStopFailureRetainsLeakBlockAndSkipsRestore(t *testing.T) {
 		t.Fatalf("Connect() = %#v", got)
 	}
 	process.stopErr = errors.New("could not prove process tree termination")
+	process.stopProven = false
 
 	got := controller.Disconnect(context.Background())
 
@@ -258,6 +259,7 @@ func TestControllerStartupFailureWithUnprovenStopRetainsLeakBlock(t *testing.T) 
 	network.activateErr = errors.New("route activation failed")
 	process := newFakeProcess()
 	process.stopErr = errors.New("could not prove process tree termination")
+	process.stopProven = false
 	controller := newTestController(network, process, testDependencies(nil))
 
 	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRouteActivationFailed {
@@ -276,6 +278,98 @@ func TestControllerStartupFailureWithUnprovenStopRetainsLeakBlock(t *testing.T) 
 	}
 }
 
+func TestControllerStartCleanupFailureRetainsProtectionAndDeniesRelaunch(t *testing.T) {
+	network := newFakeNetwork()
+	process := newFakeProcess()
+	process.startErr = errors.New("native launch cleanup failed")
+	process.startProven = false
+	process.stopErr = errors.New("native process termination remains unproven")
+	process.stopProven = false
+	controller := newTestController(network, process, testDependencies(nil))
+
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorCoreStart {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Disconnect() = %#v", got)
+	}
+	if network.restoreCalls != 0 || !network.isBlocked() {
+		t.Fatalf("start cleanup failure restored protection: restore=%d blocked=%v", network.restoreCalls, network.isBlocked())
+	}
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("relaunch after unproven start = %#v", got)
+	}
+	if process.startCalls != 1 {
+		t.Fatalf("Start() calls = %d, want 1", process.startCalls)
+	}
+}
+
+func TestControllerRestoresAfterExitErrorWhenTreeTerminationIsProven(t *testing.T) {
+	network := newFakeNetwork()
+	process := newFakeProcess()
+	controller := newTestController(network, process, testDependencies(nil))
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	process.exit(errors.New("unexpected exit"))
+	waitForState(t, controller, accessmodel.StateFailed)
+
+	got := controller.Disconnect(context.Background())
+
+	if got.State != accessmodel.StateDisconnected || network.restoreCalls != 1 || network.isBlocked() {
+		t.Fatalf("Disconnect() = %#v restore=%d blocked=%v", got, network.restoreCalls, network.isBlocked())
+	}
+}
+
+func TestControllerUnexpectedExitCleanupFailureDeniesReconnectAndRestore(t *testing.T) {
+	network := newFakeNetwork()
+	process := newFakeProcess()
+	process.waitProven = false
+	process.stopProven = false
+	process.stopErr = errors.New("job tree confirmation failed")
+	controller := newTestController(network, process, testDependencies(nil))
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	process.exit(errors.New("unexpected exit with cleanup failure"))
+	waitForState(t, controller, accessmodel.StateFailed)
+
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("reconnect after unproven unexpected exit = %#v", got)
+	}
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Disconnect() = %#v", got)
+	}
+	if network.restoreCalls != 0 || !network.isBlocked() || process.startCalls != 1 {
+		t.Fatalf("cleanup failure state: restore=%d blocked=%v starts=%d", network.restoreCalls, network.isBlocked(), process.startCalls)
+	}
+}
+
+func TestControllerDisconnectRaceWithUnexpectedExitHasOneTerminalOwner(t *testing.T) {
+	for range 25 {
+		network := newFakeNetwork()
+		process := newFakeProcess()
+		controller := newTestController(network, process, testDependencies(nil))
+		if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+			t.Fatalf("Connect() = %#v", got)
+		}
+		start := make(chan struct{})
+		result := make(chan Status, 1)
+		go func() {
+			<-start
+			result <- controller.Disconnect(context.Background())
+		}()
+		close(start)
+		process.exit(errors.New("unexpected exit during disconnect"))
+		if got := <-result; got.State != accessmodel.StateDisconnected {
+			t.Fatalf("Disconnect() = %#v", got)
+		}
+		if network.restoreCalls != 1 || network.isBlocked() {
+			t.Fatalf("terminal race restore=%d blocked=%v", network.restoreCalls, network.isBlocked())
+		}
+	}
+}
+
 func TestControllerTUNIdentityFailureRemainsFailClosed(t *testing.T) {
 	network := newFakeNetwork()
 	network.readyErr = errors.New("new TUN identity was not proven")
@@ -289,6 +383,22 @@ func TestControllerTUNIdentityFailureRemainsFailClosed(t *testing.T) {
 	}
 	if !network.isBlocked() || network.activateCalls != 0 || process.stopCalls != 1 {
 		t.Fatalf("identity failure state: blocked=%v activate=%d stop=%d", network.isBlocked(), network.activateCalls, process.stopCalls)
+	}
+}
+
+func TestControllerProtectionReconciliationFailureStopsCoreAndRetainsBlock(t *testing.T) {
+	network := newFakeNetwork()
+	process := newFakeProcess()
+	controller := newTestController(network, process, testDependencies(nil))
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+
+	network.failures <- errors.New("adapter reconciliation failed")
+	waitForState(t, controller, accessmodel.StateFailed)
+
+	if !network.isBlocked() || network.restoreCalls != 0 || process.stopCalls != 1 {
+		t.Fatalf("protection failure state: blocked=%v restore=%d stop=%d", network.isBlocked(), network.restoreCalls, process.stopCalls)
 	}
 }
 
@@ -391,9 +501,10 @@ type fakeNetwork struct {
 	readyErr       error
 	log            []string
 	trace          *callTrace
+	failures       chan error
 }
 
-func newFakeNetwork() *fakeNetwork { return &fakeNetwork{} }
+func newFakeNetwork() *fakeNetwork { return &fakeNetwork{failures: make(chan error, 1)} }
 
 func (f *fakeNetwork) Capture(context.Context) (any, error) {
 	f.mu.Lock()
@@ -438,6 +549,8 @@ func (f *fakeNetwork) WaitTUNReady(context.Context) error {
 	return f.readyErr
 }
 
+func (f *fakeNetwork) Failures() <-chan error { return f.failures }
+
 func (f *fakeNetwork) Restore(_ context.Context, _ any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -475,6 +588,9 @@ type fakeProcess struct {
 	startErr     error
 	readyErr     error
 	stopErr      error
+	startProven  bool
+	stopProven   bool
+	waitProven   bool
 	readyGate    chan struct{}
 	started      chan struct{}
 	startOnce    sync.Once
@@ -489,10 +605,10 @@ type fakeProcess struct {
 }
 
 func newFakeProcess() *fakeProcess {
-	return &fakeProcess{started: make(chan struct{}), waitDone: make(chan struct{})}
+	return &fakeProcess{started: make(chan struct{}), waitDone: make(chan struct{}), startProven: true, stopProven: true, waitProven: true}
 }
 
-func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) error {
+func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) ProcessStartResult {
 	f.mu.Lock()
 	f.startCalls++
 	f.startContext = ctx
@@ -503,7 +619,7 @@ func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) error {
 	err := f.startErr
 	f.mu.Unlock()
 	f.startOnce.Do(func() { close(f.started) })
-	return err
+	return ProcessStartResult{Err: err, TerminationProven: f.startProven}
 }
 
 func (f *fakeProcess) Ready(ctx context.Context) error {
@@ -524,7 +640,7 @@ func (f *fakeProcess) Ready(ctx context.Context) error {
 	return err
 }
 
-func (f *fakeProcess) Stop(context.Context) error {
+func (f *fakeProcess) Stop(context.Context) ProcessTermination {
 	f.mu.Lock()
 	f.stopCalls++
 	f.log = append(f.log, "stop")
@@ -534,14 +650,14 @@ func (f *fakeProcess) Stop(context.Context) error {
 	err := f.stopErr
 	f.mu.Unlock()
 	f.exit(nil)
-	return err
+	return ProcessTermination{Err: err, Proven: f.stopProven}
 }
 
-func (f *fakeProcess) Wait() error {
+func (f *fakeProcess) Wait() ProcessTermination {
 	<-f.waitDone
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.waitErr
+	return ProcessTermination{Err: f.waitErr, Proven: f.waitProven}
 }
 
 func (f *fakeProcess) exit(err error) {

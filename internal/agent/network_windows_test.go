@@ -8,7 +8,9 @@ import (
 	"errors"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 )
@@ -29,11 +31,12 @@ func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), snapshot) })
 
 	if snapshot == nil || !store.exists {
 		t.Fatal("captured network state was not persisted")
 	}
-	if got, want := trace.calls(), []string{"capture", "save", "block"}; !equalStrings(got, want) {
+	if got, want := trace.calls(), []string{"capture", "save", "scan", "block"}; !equalStrings(got, want) {
 		t.Fatalf("call order = %v, want %v", got, want)
 	}
 	block := runner.inputFor(t, networkOperationBlock)
@@ -160,8 +163,58 @@ func TestWindowsNetworkBlocksPublicIPv6AndRetainsLocalIPv6(t *testing.T) {
 	assertAddressCovered(t, manager.blockedPrefixes, netip.MustParseAddr("fd00::1"), false)
 }
 
-func TestWindowsNetworkFirewallScopeCoversNewEligibleInterfacesAndExcludesTUNByType(t *testing.T) {
-	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+func TestWindowsNetworkProtectionCoversRASAndHotPluggedAdaptersByIdentity(t *testing.T) {
+	runner := &fakeNetworkRunner{
+		capture: validWindowsSnapshot(),
+		scans: [][]WindowsAdapterIdentity{
+			{{InterfaceIndex: 7, InterfaceGuid: "ethernet-guid", InterfaceAlias: "Ethernet", Status: "Up"}},
+			{
+				{InterfaceIndex: 7, InterfaceGuid: "ethernet-guid", InterfaceAlias: "Ethernet", Status: "Up"},
+				{InterfaceIndex: 22, InterfaceGuid: "ras-guid", InterfaceAlias: "Company RAS", Status: "Up"},
+			},
+		},
+	}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), validWindowsSnapshot()) })
+	waitForNetworkOperationCount(t, runner, networkOperationBlock, 2)
+
+	input := runner.lastInputFor(t, networkOperationBlock)
+	if len(input.ProtectedAdapters) != 2 || input.ProtectedAdapters[1].InterfaceGuid != "ras-guid" {
+		t.Fatalf("protected adapters = %#v", input.ProtectedAdapters)
+	}
+	if strings.Contains(blockNetworkPowerShell, "-InterfaceType") || !strings.Contains(blockNetworkPowerShell, "-InterfaceAlias") {
+		t.Fatal("firewall script does not scope rules to reconciled adapter identities")
+	}
+	if !strings.Contains(blockNetworkPowerShell, "Firewall rule name collision") || !strings.Contains(blockNetworkPowerShell, "Get-NetFirewallInterfaceFilter") {
+		t.Fatal("firewall reconciliation does not reject foreign names or refresh changed adapter aliases")
+	}
+	if !strings.Contains(scanNetworkPowerShell, "ConvertTo-Json -InputObject $adapters") {
+		t.Fatal("single-adapter scans are not encoded as a JSON array")
+	}
+}
+
+func TestWindowsNetworkProtectionExplicitlyExcludesOnlyOwnedTUNIdentity(t *testing.T) {
+	runner := &fakeNetworkRunner{
+		capture: validWindowsSnapshot(),
+		ready:   validTUNIdentity(),
+		scans: [][]WindowsAdapterIdentity{
+			{{InterfaceIndex: 7, InterfaceGuid: "ethernet-guid", InterfaceAlias: "Ethernet", Status: "Up"}},
+			{
+				{InterfaceIndex: 7, InterfaceGuid: "ethernet-guid", InterfaceAlias: "Ethernet", Status: "Up"},
+				{InterfaceIndex: 41, InterfaceGuid: "new-tun-guid", InterfaceAlias: windowsTUNInterface, Status: "Up"},
+			},
+		},
+	}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
 	if err != nil {
 		t.Fatal(err)
@@ -172,13 +225,113 @@ func TestWindowsNetworkFirewallScopeCoversNewEligibleInterfacesAndExcludesTUNByT
 	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-
-	input := runner.inputFor(t, networkOperationBlock)
-	if !equalStrings(input.FirewallInterfaceTypes, []string{"Wired", "Wireless"}) {
-		t.Fatalf("firewall interface types = %v", input.FirewallInterfaceTypes)
+	if err := manager.WaitTUNReady(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(blockNetworkPowerShell, "-InterfaceType") || strings.Contains(blockNetworkPowerShell, "-InterfaceAlias") {
-		t.Fatal("firewall script is not dynamically scoped by eligible interface type")
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), validWindowsSnapshot()) })
+
+	input := runner.lastInputFor(t, networkOperationBlock)
+	if len(input.ProtectedAdapters) != 1 || input.ProtectedAdapters[0].InterfaceGuid != "ethernet-guid" {
+		t.Fatalf("owned TUN was not exactly excluded: %#v", input.ProtectedAdapters)
+	}
+}
+
+func TestWindowsNetworkDNSProtectionBlocksSecondaryPrivateAndPublicResolvers(t *testing.T) {
+	policy := validPolicy()
+	policy.CorporateDNS = []string{"172.20.9.1", "172.20.9.2"}
+	manager, err := newWindowsNetworkManager(policy, `C:\state.json`, &fakeNetworkRunner{}, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("192.168.50.53"), true)
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("8.8.8.8"), true)
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("fd00::53"), true)
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("172.20.9.1"), false)
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("172.19.0.2"), false)
+	if !strings.Contains(blockNetworkPowerShell, "-RemotePort 53") || !strings.Contains(blockNetworkPowerShell, "$i.DNSBlockedRemoteAddresses") {
+		t.Fatal("dedicated all-destination DNS egress rules are missing")
+	}
+}
+
+func TestWindowsNetworkReconciliationFailureInstallsCatchAllEmergencyBlock(t *testing.T) {
+	runner := &fakeNetworkRunner{
+		capture:   validWindowsSnapshot(),
+		runErrors: map[string][]error{networkOperationScan: {errors.New("adapter scan failed")}},
+	}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.InstallPublicTCPBlock(context.Background()); err == nil {
+		t.Fatal("InstallPublicTCPBlock() succeeded after adapter reconciliation failure")
+	}
+	if got := runner.count(networkOperationEmergency); got != 1 {
+		t.Fatalf("emergency operations = %d, want 1", got)
+	}
+	input := runner.lastInputFor(t, networkOperationEmergency)
+	assertAddressCovered(t, input.BlockedRemoteAddresses, netip.MustParseAddr("8.8.8.8"), true)
+	if !strings.Contains(emergencyNetworkPowerShell, "Firewall rule name collision") {
+		t.Fatal("emergency protection can adopt a foreign colliding rule")
+	}
+}
+
+func TestWindowsNetworkRestoreCancellationDoesNotLeakStaleMonitorFailure(t *testing.T) {
+	runner := &fakeNetworkRunner{
+		capture:        validWindowsSnapshot(),
+		blockScanAfter: 2,
+		scanStarted:    make(chan struct{}),
+	}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	snapshot, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("protection monitor did not enter its scan")
+	}
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-manager.Failures():
+		t.Fatalf("normal monitor cancellation leaked failure: %v", err)
+	default:
+	}
+}
+
+func TestWindowsNetworkNewProtectionGenerationDropsOldFailure(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.failures <- errors.New("previous protection generation")
+	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), snapshot) })
+	select {
+	case err := <-manager.Failures():
+		t.Fatalf("new protection generation retained old failure: %v", err)
+	default:
 	}
 }
 
@@ -371,28 +524,65 @@ func assertAddressCovered(t *testing.T, prefixes []string, address netip.Addr, w
 }
 
 type fakeNetworkRunner struct {
-	trace         *callTrace
-	capture       WindowsNetworkSnapshot
-	ready         WindowsTUNIdentity
-	operations    []string
-	inputs        map[string][]byte
-	restoreErrors []error
+	trace          *callTrace
+	capture        WindowsNetworkSnapshot
+	ready          WindowsTUNIdentity
+	operations     []string
+	inputs         map[string][]byte
+	restoreErrors  []error
+	scans          [][]WindowsAdapterIdentity
+	inputHistory   map[string][][]byte
+	mu             sync.Mutex
+	runErrors      map[string][]error
+	blockScanAfter int
+	scanCalls      int
+	scanStarted    chan struct{}
+	scanStartOnce  sync.Once
 }
 
-func (f *fakeNetworkRunner) Run(_ context.Context, operation string, input []byte) ([]byte, error) {
+func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []byte) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.operations = append(f.operations, operation)
 	if f.inputs == nil {
 		f.inputs = make(map[string][]byte)
 	}
 	f.inputs[operation] = append([]byte(nil), input...)
+	if f.inputHistory == nil {
+		f.inputHistory = make(map[string][][]byte)
+	}
+	f.inputHistory[operation] = append(f.inputHistory[operation], append([]byte(nil), input...))
 	if f.trace != nil {
 		f.trace.record(operation)
+	}
+	if queued := f.runErrors[operation]; len(queued) != 0 {
+		err := queued[0]
+		f.runErrors[operation] = queued[1:]
+		return nil, err
 	}
 	if operation == networkOperationCapture {
 		return json.Marshal(f.capture)
 	}
 	if operation == networkOperationReady {
 		return json.Marshal(f.ready)
+	}
+	if operation == networkOperationScan {
+		f.scanCalls++
+		if f.blockScanAfter > 0 && f.scanCalls >= f.blockScanAfter {
+			f.scanStartOnce.Do(func() { close(f.scanStarted) })
+			f.mu.Unlock()
+			<-ctx.Done()
+			f.mu.Lock()
+			return nil, ctx.Err()
+		}
+		if len(f.scans) == 0 {
+			return json.Marshal([]WindowsAdapterIdentity{{InterfaceIndex: 7, InterfaceGuid: "ethernet-guid", InterfaceAlias: "Ethernet", Status: "Up"}})
+		}
+		value := f.scans[0]
+		if len(f.scans) > 1 {
+			f.scans = f.scans[1:]
+		}
+		return json.Marshal(value)
 	}
 	if operation == networkOperationRestore && len(f.restoreErrors) != 0 {
 		err := f.restoreErrors[0]
@@ -404,6 +594,8 @@ func (f *fakeNetworkRunner) Run(_ context.Context, operation string, input []byt
 
 func (f *fakeNetworkRunner) inputFor(t *testing.T, operation string) windowsNetworkInput {
 	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var input windowsNetworkInput
 	if err := json.Unmarshal(f.inputs[operation], &input); err != nil {
 		t.Fatalf("decode %s input: %v", operation, err)
@@ -411,7 +603,24 @@ func (f *fakeNetworkRunner) inputFor(t *testing.T, operation string) windowsNetw
 	return input
 }
 
+func (f *fakeNetworkRunner) lastInputFor(t *testing.T, operation string) windowsNetworkInput {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	history := f.inputHistory[operation]
+	if len(history) == 0 {
+		t.Fatalf("no %s input", operation)
+	}
+	var input windowsNetworkInput
+	if err := json.Unmarshal(history[len(history)-1], &input); err != nil {
+		t.Fatalf("decode %s input: %v", operation, err)
+	}
+	return input
+}
+
 func (f *fakeNetworkRunner) count(operation string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	count := 0
 	for _, candidate := range f.operations {
 		if candidate == operation {
@@ -419,6 +628,18 @@ func (f *fakeNetworkRunner) count(operation string) int {
 		}
 	}
 	return count
+}
+
+func waitForNetworkOperationCount(t *testing.T, runner *fakeNetworkRunner, operation string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if runner.count(operation) >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%s operation count = %d, want at least %d", operation, runner.count(operation), want)
 }
 
 type fakeSnapshotStore struct {
