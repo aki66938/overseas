@@ -1,54 +1,69 @@
-# Task 9 Report — Windows Fail-Closed Integration Harness
+# Task 9 Report — Windows Fail-Closed Integration Harness v3
 
 ## Status
 
-`DONE_WITH_CONCERNS`: the privileged harness, safety gates, lifecycle matrix, evidence contract, and non-live verification are implemented. The required live RED/GREEN run was intentionally not executed because this development workstation is not the designated disposable physical Windows test host. That physical-host gate remains for Task 10.
+`BLOCKED`: the protocol-v3 safety harness and its non-live false-pass defenses are substantially implemented and verified, but adversarial review found four code prerequisites that make the clean-host live lifecycle incomplete. Task 9 therefore does not claim code-complete or live PASS. The remaining implementation and physical-host acceptance are explicitly tracked in `task-10-brief.md`.
 
-No route, DNS, adapter, firewall, service, installer, or real tunnel mutation was performed. `OVERSEAS_ACCESS_INTEGRATION=1` was never set during this task.
+This workstation is not designated disposable. `OVERSEAS_ACCESS_INTEGRATION=1` was never set, and no route, DNS, adapter, firewall, service, installer, credential, or runtime mutation was performed.
 
-## Implemented contract
+## Current implementation
 
-- Live execution requires all four independent authorization boundaries: elevated Administrator token, exact integration opt-in, exact disposable-host acknowledgement plus a hostname-bound token, and an existing empty absolute non-reparse evidence directory.
-- The Task 10 fixture driver is also required to be an absolute ordinary non-reparse file. Public/corporate TCP sentinels must be distinct non-loopback IPv4 endpoints, with the corporate endpoint inside the declared corporate CIDR and the ordinary-gateway endpoint outside it.
-- The driver uses a versioned one-request/one-response JSON stdin/stdout protocol. It owns signed-payload setup, the isolated fake upstream, crash/restart/recovery injection, transactional uninstall, cleanup, and exact host restoration. Driver output is not echoed on failure, preventing accidental evidence/log disclosure.
-- The test covers success through the fake upstream, upstream absent, upstream death, core exit, UI exit, agent crash/restart, machine-style recovery, 20 connect/disconnect cycles, and uninstall cleanup.
-- Unavailable-tunnel cases make three independent public TCP attempts and fail on any successful ordinary-gateway connection; the corporate sentinel must remain reachable. The upstream-absent/death assertions correctly accept either a locally ready core or a failed core because local TUN readiness does not prove remote upstream health.
-- Before every case the harness captures canonical routes, DNS, adapters, services, processes, and complete owned-firewall state. Baselines use create-new durable writes, are checked against modification, and are compared exactly to a final canonical snapshot.
-- Deferred cleanup/restore runs after every case. State drift poisons the run and stops later cases. `TestMain` retains a last-chance cleanup/restore/capture comparison whenever restoration is unproven.
-- `test-integration-preflight` forcibly clears the opt-in and executes the non-live package. `test-integration-live` refuses unless the operator already set the exact opt-in; it does not silently enable mutation.
+- Protocol version 3 binds payload/client/server/action config hashes; exact agent, core, UI, production server-service, driver, sentinel, action-helper, System32 PowerShell, installer, capture-script, and manifest hashes; all fixture identities; and public-data/public-health/corporate/fake-control/fake-data endpoints.
+- The fixture manifest, detached signature, configs, driver, helper, capture runtime, and declared artifacts are path/hash/signature checked and held with deny-write/delete semantics around privileged work. Run/case directory handles are reparse-checked after open.
+- Client/server configs are strict JSON and cross-bind the client tunnel to the server inbound and the server outbound to the fake CONNECT/data listener. Telecom/`127.0.0.1:8080`, extra fallback outbounds, unknown network-bearing top-level surfaces, remote rule sets, and unreviewed route actions are refused.
+- The harness, driver capture, and typed helper execute through suspended-create/assign-before-resume kill-on-close Jobs. The shared runner waits for zero active processes. Live driver timeouts join the quiescence path before cleanup/restore can begin.
+- `fixture-action.exe` exposes only the 13 reviewed actions. Installer operations use fixed arguments; persistent fake/UI children are supervised by unique run-owned Windows services. Start actions wait for listener/child readiness.
+- Fake control/data listeners must share one exact sentinel PID whose parent is the expected run-owned action-helper service PID. Public data/health must share one sentinel PID. Preflight requires fake endpoints free; the later start action proves ownership.
+- Snapshot v3 covers structured adapters, routes, DNS, services, processes, firewall, MSI, installed/runtime files, registry, ownership, recovery, transaction, fixture residue, and listener surfaces. Present known roles require exact bound hashes; canonical comparison excludes only transient PIDs/nonces.
+- Baseline custody retains canonical bytes/hash in memory and an ACL-protected open file. A changed display baseline causes a new same-run protected restore input. Cleanup and restore use independent budgets, and exact final drift is always checked.
+- Leak failures span the reconciliation window with spaced attempts, fail on any data receipt, and independently require the paired health/corporate sentinels to remain healthy. Success requires a nonce receipt carrying the fake-upstream identity.
 
-## Strict TDD evidence
+## Strict RED → GREEN evidence
 
-- Initial RED: the integration package failed to compile on missing preflight and scenario-plan APIs.
-- Documentation/target RED: the repository contract test failed because `tests/integration/README.md` and Make targets did not exist.
-- Lifecycle-semantics RED: the unavailable-upstream test failed before the state predicate existed; implementation then stopped requiring an impossible remote-health transition from the local controller.
-- Recovery-hook RED: the last-chance-release test failed before the harness proved that no active/poisoned restoration remained.
-- Evidence-integrity RED: the preserved-baseline test failed before baseline modification detection existed.
-- Disclosure RED: a local fake driver wrote a secret marker to stderr and the test proved it appeared in the error before driver output was suppressed.
-- Snapshot-schema RED: a `null` route surface was accepted before strict array validation was added.
+Review fixes were each driven by focused failing tests before implementation, including:
 
-All RED cases were observed for the expected missing/incorrect behavior before their minimal GREEN implementation.
+- missing artifact/config/endpoint bindings and wrong present image hashes;
+- direct public route, unreviewed DNS, remote rule-set, and client/server inbound mismatches;
+- split fake listener PIDs and missing run-owned supervisor linkage;
+- preflight requiring already-running fake endpoints, which contradicted run-owned start;
+- absent recovery staging evidence and mismatched marker/capture locations;
+- vacuous installed-hash facts and missing agent/server-service uninstall facts;
+- action helper output not bound to request identity and Jobs returning before quiescence;
+- driver timeout returning before the live quiescence join completed;
+- installed runtime config hash mismatch and Connect-time installed executable swaps.
 
-## Fresh non-live verification
+All implemented review tests are green in the non-live suite.
 
-- Integration guard/package suite: PASS; 11 tests passed and the single privileged lifecycle test skipped because opt-in was absent.
-- `go test -count=20 ./internal/agent ./internal/supervisor`: PASS for both packages.
-- `go test -count=1 ./...`: PASS for all packages.
-- `go vet ./...`: exit 0.
-- Windows amd64 agent, GUI client, credential provisioner, and installer verifier builds: exit 0 through the locked Go wrapper.
-- Windows PowerShell 5.1 Pester: `108 passed, 0 failed`.
-- PowerShell 7 Pester: `108 passed, 0 failed`.
-- `git diff --check`: clean apart from the repository's configured LF-to-CRLF warning.
-- GNU Make was not installed, so the tracked target bodies were validated by contract tests and their exact locked-Go command equivalents were executed directly.
+## Unresolved code prerequisites
 
-## External Task 10 gate
+1. Clean-host `case-setup` invokes the real client installer, but the installer intentionally leaves the agent stopped without `credential.bin`. The typed helper does not yet invoke the installed, payload-manifest-pinned credential provisioner with pipe-only fixture input, so its required running-service postcondition cannot be achieved.
+2. Snapshot/setup/uninstall coverage does not yet derive every installed file from the signed client payload manifest. Provisioner/verifier/Wintun/library/metadata files and unexpected owned-root residue could be omitted from immediate evidence.
+3. The client direct-route/DNS checks currently constrain targets to private ranges but do not bind them to an explicit signed corporate CIDR/DNS/suffix allowlist. An unrelated private target can pass.
+4. The production server service/config and client-facing Shadowsocks listener are hash-bound as artifacts/config bytes but are not yet lifecycle-controlled or locally/remotely attested as the process that handled the tested connection.
 
-The following evidence does not exist yet and must not be inferred from the non-live PASS:
+These are live false-pass/blocking conditions, not physical-host-only observations. They must be implemented and reviewed before enabling the live gate.
 
-1. Corporate-signed client payload and generated disposable-host configs.
-2. Authorized fixture driver controlling the fake upstream and both local sentinels without contacting the telecom service.
-3. Elevated dry-run/preflight evidence on the designated physical host.
-4. Live RED evidence while integration hooks are deliberately incomplete, followed by live GREEN for all nine scenarios.
-5. Exact zero-drift baseline/final evidence from the physical host.
+## Non-live verification
 
-Until that gate is run, Task 9 is implementation-complete but live acceptance remains blocked.
+The implementation was checked without live opt-in using:
+
+- focused `go test -count=1 ./tests/integration/...` during each RED/GREEN slice;
+- `go test -count=20 ./tests/integration/fixtureproto ./tests/integration/fixtureconfig ./internal/agent ./internal/supervisor`;
+- `go test -count=1 ./...`;
+- `go vet ./...`;
+- Windows amd64 builds of driver, sentinel, action helper, agent, UI, credential provisioner, installer verifier, and production server service through the locked Go wrapper;
+- Windows PowerShell 5.1 Pester and PowerShell 7 Pester: `108 passed, 0 failed` in each runtime;
+- `git diff --check` (only configured LF→CRLF warnings).
+
+The final matrix was rerun after the last review batch before commit; exact results are recorded in the handoff message.
+
+## Commit/design lineage
+
+- `2b503d3` — first review hardening: trusted baseline custody, timeout/TOCTOU/leak fixes, versioned fixture protocol.
+- `f00608e` — accepted Task 9 second-review design.
+- `c13d65c` — detailed TDD implementation plan.
+- The implementation/report commit following those documents contains protocol v3, the typed helper, Job runner, expanded evidence, tests, this blocked report, and the Task 10 prerequisite ledger.
+
+## External gate
+
+After the four code prerequisites are green, Task 10 must stage signed/ACL-protected artifacts on the authorized disposable physical Windows host, run elevated dry-run/preflight, obtain stop/go approval, execute all nine scenarios plus 20 repetitions, and preserve nonce/leak and exact zero-drift evidence. Until then, neither Task 9 nor Task 10 may claim live acceptance.

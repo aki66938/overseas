@@ -261,6 +261,28 @@ func TestEveryDriverActionReceivesABoundedContext(t *testing.T) {
 	}
 }
 
+func TestLiveDriverTimeoutJoinsQuiescenceBeforeReturning(t *testing.T) {
+	harness := boundHarness(t)
+	harness.actionTimeout = 20 * time.Millisecond
+	harness.driverJoinTimeout = 200 * time.Millisecond
+	quiesced := make(chan struct{})
+	harness.invokeDriver = func(ctx context.Context, _ fixtureproto.Request) ([]byte, error) {
+		<-ctx.Done()
+		time.Sleep(40 * time.Millisecond)
+		close(quiesced)
+		return nil, ctx.Err()
+	}
+	_, err := harness.action("case-setup", "core-exits", nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("action() = %v, want deadline", err)
+	}
+	select {
+	case <-quiesced:
+	default:
+		t.Fatal("driver timeout returned before process-tree quiescence")
+	}
+}
+
 func TestCaptureAddsDeadlineWhenCallerHasNone(t *testing.T) {
 	harness := boundHarness(t)
 	harness.actionTimeout = 30 * time.Millisecond
@@ -347,9 +369,10 @@ func TestTraversalReceiptRequiresFakeUpstreamIdentity(t *testing.T) {
 func boundHarness(t *testing.T) *liveHarness {
 	t.Helper()
 	binding := fixtureproto.FixtureBinding{
-		PayloadSHA256: strings.Repeat("1", 64), ConfigSHA256: strings.Repeat("2", 64),
+		PayloadSHA256: strings.Repeat("1", 64), ConfigSHA256: strings.Repeat("2", 64), ServerConfigSHA256: strings.Repeat("3", 64), ActionConfigSHA256: strings.Repeat("4", 64),
 		FakeUpstreamIdentity: "fake-upstream/1", PublicSentinelIdentity: "public/1", CorporateSentinelIdentity: "corporate/1",
-		PublicSentinelEndpoint: "198.18.0.2:18080", PublicSentinelHealthEndpoint: "172.20.9.251:18080", CorporateSentinelEndpoint: "172.20.9.250:18081", FakeUpstreamControlEndpoint: "172.20.9.15:18082",
+		PublicSentinelEndpoint: "198.18.0.2:18080", PublicSentinelHealthEndpoint: "172.20.9.251:18080", CorporateSentinelEndpoint: "172.20.9.250:18081", FakeUpstreamControlEndpoint: "172.20.9.15:18082", FakeUpstreamDataEndpoint: "172.20.9.15:18083",
+		Artifacts: fixtureproto.ArtifactBinding{ManifestSHA256: strings.Repeat("5", 64), AgentSHA256: strings.Repeat("6", 64), CoreSHA256: strings.Repeat("7", 64), UISHA256: strings.Repeat("8", 64), ServerServiceSHA256: strings.Repeat("9", 64), DriverSHA256: strings.Repeat("a", 64), SentinelSHA256: strings.Repeat("b", 64), ActionHelperSHA256: strings.Repeat("c", 64), PowerShellSHA256: strings.Repeat("d", 64), InstallerSHA256: strings.Repeat("e", 64), CaptureScriptSHA256: strings.Repeat("f", 64)},
 	}
 	return &liveHarness{
 		config: liveConfig{binding: binding, preflight: preflightResult{Hostname: "host-1"}},
@@ -371,19 +394,30 @@ func boundResponse(request fixtureproto.Request, binding fixtureproto.FixtureBin
 		facts["sentinel_identities_verified"] = "true"
 	case "case-setup":
 		facts["service_present"] = "true"
+		facts["agent_hash_verified"] = "true"
+		facts["installed_hashes_verified"] = "true"
 	}
 	response := fixtureproto.Response{
 		ProtocolVersion: fixtureproto.ProtocolVersion, RequestNonce: request.RequestNonce, RunID: request.RunID,
 		Scenario: request.Scenario, Action: request.Action, OK: true, Binding: binding,
 		Evidence: fixtureproto.ActionEvidence{Kind: request.Action, ObservationNonce: request.RequestNonce, Facts: facts},
 		Snapshot: fixtureproto.Snapshot{
-			ObservationNonce:   request.RequestNonce,
-			Adapters:           []fixtureproto.AdapterRecord{{InterfaceIndex: 7, InterfaceGUID: "{guid}", InterfaceAlias: "Ethernet", Status: "Up"}},
-			Routes:             []fixtureproto.RouteRecord{{DestinationPrefix: "0.0.0.0/0", InterfaceIndex: 7, NextHop: "192.0.2.1", RouteMetric: 10}},
-			DNS:                []fixtureproto.DNSRecord{{InterfaceIndex: 7, InterfaceAlias: "Ethernet", ServerAddresses: []string{"192.0.2.53"}}},
-			Services:           []fixtureproto.ServiceRecord{{Name: "RegenBioOverseasAccessAgent", Present: false, Status: "Absent", StartMode: "Absent"}},
-			Processes:          []fixtureproto.ProcessRecord{{Role: "agent", Present: false}, {Role: "core", Present: false}, {Role: "ui", Present: false}, {Role: "fake-upstream", Present: false}},
-			OwnedFirewallRules: []fixtureproto.FirewallRecord{{Name: "owned", Present: false, DefinitionSHA256: strings.Repeat("0", 64)}},
+			ObservationNonce:     request.RequestNonce,
+			Adapters:             []fixtureproto.AdapterRecord{{InterfaceIndex: 7, InterfaceGUID: "{guid}", InterfaceAlias: "Ethernet", Status: "Up"}},
+			Routes:               []fixtureproto.RouteRecord{{DestinationPrefix: "0.0.0.0/0", InterfaceIndex: 7, NextHop: "192.0.2.1", RouteMetric: 10}},
+			DNS:                  []fixtureproto.DNSRecord{{InterfaceIndex: 7, InterfaceAlias: "Ethernet", ServerAddresses: []string{"192.0.2.53"}}},
+			Services:             []fixtureproto.ServiceRecord{{Name: "RegenBioOverseasAccessAgent", Present: false, Status: "Absent", StartMode: "Absent"}},
+			Processes:            []fixtureproto.ProcessRecord{{Role: "agent", Present: false}, {Role: "core", Present: false}, {Role: "ui", Present: false}, {Role: "fake-upstream", Present: false}},
+			OwnedFirewallRules:   []fixtureproto.FirewallRecord{{Name: "owned", Present: false, DefinitionSHA256: strings.Repeat("0", 64)}},
+			MSIRegistrations:     []fixtureproto.MSIRecord{{ProductCode: "{D1234567-89AB-4CDE-8012-3456789ABCDE}", Present: false}},
+			InstalledFiles:       []fixtureproto.FileRecord{{Role: "agent", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, Present: false}},
+			RuntimeFiles:         []fixtureproto.FileRecord{{Role: "credential", Path: `C:\ProgramData\RegenBio\OverseasAccess\credential.bin`, Present: false}},
+			RegistryRecords:      []fixtureproto.StateRecord{{Kind: "registry", Name: "product", Present: false}},
+			OwnershipArtifacts:   []fixtureproto.StateRecord{{Kind: "ownership", Name: "ledger", Present: false}},
+			RecoveryArtifacts:    []fixtureproto.StateRecord{{Kind: "recovery", Name: "machine", Present: false}},
+			TransactionArtifacts: []fixtureproto.StateRecord{{Kind: "transaction", Name: "journal", Present: false}},
+			FixtureResidues:      []fixtureproto.StateRecord{{Kind: "fixture-residue", Name: "service", Present: false}},
+			Listeners:            []fixtureproto.ListenerRecord{{Role: "fake-upstream", Endpoint: "172.20.9.15:18083", Present: false}},
 		},
 	}
 	canonical, _ := response.Snapshot.CanonicalState()

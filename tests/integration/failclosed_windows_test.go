@@ -17,7 +17,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,7 +27,9 @@ import (
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/clientapi"
 	"corp.example/overseas-access-gateway/internal/coreverify"
+	"corp.example/overseas-access-gateway/tests/integration/fixtureconfig"
 	"corp.example/overseas-access-gateway/tests/integration/fixtureproto"
+	"corp.example/overseas-access-gateway/tests/integration/winjob"
 	"golang.org/x/sys/windows"
 )
 
@@ -43,6 +44,10 @@ const (
 	envIntegrationDriverSigner   = "OVERSEAS_ACCESS_INTEGRATION_DRIVER_SIGNER"
 	envPayloadSHA256             = "OVERSEAS_ACCESS_PAYLOAD_SHA256"
 	envGeneratedConfigSHA256     = "OVERSEAS_ACCESS_GENERATED_CONFIG_SHA256"
+	envServerConfigSHA256        = "OVERSEAS_ACCESS_SERVER_CONFIG_SHA256"
+	envActionConfigSHA256        = "OVERSEAS_ACCESS_ACTION_CONFIG_SHA256"
+	envFixtureManifest           = "OVERSEAS_ACCESS_FIXTURE_MANIFEST"
+	envFixtureManifestSHA256     = "OVERSEAS_ACCESS_FIXTURE_MANIFEST_SHA256"
 	envFakeUpstreamIdentity      = "OVERSEAS_ACCESS_FAKE_UPSTREAM_IDENTITY"
 	envPublicSentinelIdentity    = "OVERSEAS_ACCESS_PUBLIC_SENTINEL_IDENTITY"
 	envCorporateSentinelIdentity = "OVERSEAS_ACCESS_CORPORATE_SENTINEL_IDENTITY"
@@ -52,6 +57,7 @@ const (
 	envCorporateSentinel         = "OVERSEAS_ACCESS_CORPORATE_SENTINEL"
 	envPublicSentinelHealth      = "OVERSEAS_ACCESS_PUBLIC_SENTINEL_HEALTH"
 	envFakeUpstreamControl       = "OVERSEAS_ACCESS_FAKE_UPSTREAM_CONTROL"
+	envFakeUpstreamData          = "OVERSEAS_ACCESS_FAKE_UPSTREAM_DATA"
 	envCorporateCIDR             = "OVERSEAS_ACCESS_CORPORATE_CIDR"
 
 	disposableAcknowledgement = "I_ACKNOWLEDGE_THIS_WINDOWS_HOST_IS_DISPOSABLE"
@@ -89,18 +95,25 @@ type scenario struct {
 }
 
 type liveConfig struct {
-	preflight            preflightResult
-	dryRun               bool
-	driverPath           string
-	driverSHA256         string
-	driverSigners        []string
-	fixtureConfigPath    string
-	fixtureConfigSHA256  string
-	binding              fixtureproto.FixtureBinding
-	publicSentinel       string
-	publicSentinelHealth string
-	corporateSentinel    string
-	corporateCIDR        netip.Prefix
+	preflight             preflightResult
+	dryRun                bool
+	driverPath            string
+	driverSHA256          string
+	driverSigners         []string
+	fixtureConfigPath     string
+	fixtureConfigSHA256   string
+	fixtureManifestPath   string
+	fixtureManifestSHA256 string
+	fixtureManifest       fixtureconfig.Manifest
+	payloadPath           string
+	generatedConfigPath   string
+	serverConfigPath      string
+	actionConfigPath      string
+	binding               fixtureproto.FixtureBinding
+	publicSentinel        string
+	publicSentinelHealth  string
+	corporateSentinel     string
+	corporateCIDR         netip.Prefix
 }
 
 type liveHarness struct {
@@ -118,9 +131,11 @@ type liveHarness struct {
 	actionTimeout        time.Duration
 	cleanupTimeout       time.Duration
 	restoreTimeout       time.Duration
+	driverJoinTimeout    time.Duration
 	reconciliationWindow time.Duration
 	probeInterval        time.Duration
 	probeReceipt         func(string, string, string) (bool, error)
+	connectionLocks      closerGroup
 
 	mu             sync.Mutex
 	activeScenario string
@@ -315,9 +330,17 @@ func TestRepositoryIntegrationContractDocumentsExternalLiveGate(t *testing.T) {
 		envIntegrationDriverSigner,
 		envFixtureConfigSHA256,
 		envPublicSentinelHealth,
+		envServerConfigSHA256,
+		envActionConfigSHA256,
+		envFixtureManifest,
+		envFixtureManifestSHA256,
+		envFakeUpstreamData,
 		"Task 10",
-		"must not be run on a developer workstation",
-		"routes, DNS, adapters, services, processes, and owned firewall rules",
+		"Never run the live target on a developer workstation",
+		"version 3",
+		"fixture-action.exe",
+		"MSI registration",
+		"kill-on-close Windows Job Objects",
 	} {
 		if !bytes.Contains(readme, []byte(required)) {
 			t.Errorf("README is missing %q", required)
@@ -452,6 +475,10 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if err != nil {
 		return liveConfig{}, err
 	}
+	fakeDataEndpoint, fakeDataAddress, err := parseSentinel(envFakeUpstreamData, os.Getenv(envFakeUpstreamData))
+	if err != nil {
+		return liveConfig{}, err
+	}
 	corporateCIDR, err := netip.ParsePrefix(strings.TrimSpace(os.Getenv(envCorporateCIDR)))
 	if err != nil || corporateCIDR.String() != strings.TrimSpace(os.Getenv(envCorporateCIDR)) {
 		return liveConfig{}, fmt.Errorf("%s must be a canonical CIDR", envCorporateCIDR)
@@ -465,6 +492,9 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	}
 	if !corporateCIDR.Contains(fakeControlAddress) {
 		return liveConfig{}, fmt.Errorf("%s must use the permitted fixture path inside %s", envFakeUpstreamControl, envCorporateCIDR)
+	}
+	if !corporateCIDR.Contains(fakeDataAddress) || fakeDataEndpoint == fakeControlEndpoint {
+		return liveConfig{}, fmt.Errorf("%s must be a distinct endpoint on the permitted fixture path inside %s", envFakeUpstreamData, envCorporateCIDR)
 	}
 	if !corporateCIDR.Contains(corporateAddress) {
 		return liveConfig{}, fmt.Errorf("%s must be inside %s", envCorporateSentinel, envCorporateCIDR)
@@ -495,14 +525,60 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if err != nil {
 		return liveConfig{}, err
 	}
+	fixtureConfigData, err := os.ReadFile(fixtureConfigPath)
+	if err != nil || digest(fixtureConfigData) != fixtureConfigHash {
+		return liveConfig{}, errors.New("fixture config hash mismatch")
+	}
+	var fixturePaths struct {
+		PayloadPath         string `json:"payload_path"`
+		GeneratedConfigPath string `json:"generated_config_path"`
+		ServerConfigPath    string `json:"server_config_path"`
+		ActionConfigPath    string `json:"action_config_path"`
+	}
+	if err := json.Unmarshal(fixtureConfigData, &fixturePaths); err != nil {
+		return liveConfig{}, fmt.Errorf("parse fixture paths: %w", err)
+	}
+	for name, path := range map[string]string{"payload": fixturePaths.PayloadPath, "client config": fixturePaths.GeneratedConfigPath, "server config": fixturePaths.ServerConfigPath, "action config": fixturePaths.ActionConfigPath} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return liveConfig{}, fmt.Errorf("fixture %s path is invalid", name)
+		}
+	}
+	fixtureManifestPath, err := validateOrdinaryFile(os.Getenv(envFixtureManifest))
+	if err != nil {
+		return liveConfig{}, fmt.Errorf("%s: %w", envFixtureManifest, err)
+	}
+	fixtureManifestHash, err := requiredSHA256(envFixtureManifestSHA256)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	manifestData, err := os.ReadFile(fixtureManifestPath)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	if digest(manifestData) != fixtureManifestHash {
+		return liveConfig{}, errors.New("fixture manifest hash mismatch")
+	}
+	manifest, err := fixtureconfig.ParseManifest(manifestData)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	artifactBinding, err := manifest.ArtifactBinding(fixtureManifestHash)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	if !strings.EqualFold(filepath.Clean(manifest.Artifacts["driver"].Path), filepath.Clean(driver)) || artifactBinding.DriverSHA256 != driverHash {
+		return liveConfig{}, errors.New("driver is not the manifest-bound artifact")
+	}
 	binding := fixtureproto.FixtureBinding{
 		PayloadSHA256:             strings.TrimSpace(os.Getenv(envPayloadSHA256)),
 		ConfigSHA256:              strings.TrimSpace(os.Getenv(envGeneratedConfigSHA256)),
+		ServerConfigSHA256:        strings.TrimSpace(os.Getenv(envServerConfigSHA256)),
+		ActionConfigSHA256:        strings.TrimSpace(os.Getenv(envActionConfigSHA256)),
 		FakeUpstreamIdentity:      strings.TrimSpace(os.Getenv(envFakeUpstreamIdentity)),
 		PublicSentinelIdentity:    strings.TrimSpace(os.Getenv(envPublicSentinelIdentity)),
 		CorporateSentinelIdentity: strings.TrimSpace(os.Getenv(envCorporateSentinelIdentity)),
 		PublicSentinelEndpoint:    publicEndpoint, PublicSentinelHealthEndpoint: publicHealthEndpoint,
-		CorporateSentinelEndpoint: corporateEndpoint, FakeUpstreamControlEndpoint: fakeControlEndpoint,
+		CorporateSentinelEndpoint: corporateEndpoint, FakeUpstreamControlEndpoint: fakeControlEndpoint, FakeUpstreamDataEndpoint: fakeDataEndpoint, Artifacts: artifactBinding,
 	}
 	if !isSHA256(binding.PayloadSHA256) {
 		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envPayloadSHA256)
@@ -510,13 +586,19 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if !isSHA256(binding.ConfigSHA256) {
 		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envGeneratedConfigSHA256)
 	}
+	if !isSHA256(binding.ServerConfigSHA256) {
+		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envServerConfigSHA256)
+	}
+	if !isSHA256(binding.ActionConfigSHA256) {
+		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envActionConfigSHA256)
+	}
 	if binding.FakeUpstreamIdentity == "" || binding.PublicSentinelIdentity == "" || binding.CorporateSentinelIdentity == "" {
 		return liveConfig{}, errors.New("all fixture and sentinel identities are required")
 	}
 	if binding.FakeUpstreamIdentity == binding.PublicSentinelIdentity || binding.FakeUpstreamIdentity == binding.CorporateSentinelIdentity || binding.PublicSentinelIdentity == binding.CorporateSentinelIdentity {
 		return liveConfig{}, errors.New("fixture and sentinel identities must be distinct")
 	}
-	return liveConfig{preflight: preflight, dryRun: dryRunText == "1", driverPath: driver, driverSHA256: driverHash, driverSigners: []string{signer}, fixtureConfigPath: fixtureConfigPath, fixtureConfigSHA256: fixtureConfigHash, binding: binding, publicSentinel: publicEndpoint, publicSentinelHealth: publicHealthEndpoint, corporateSentinel: corporateEndpoint, corporateCIDR: corporateCIDR}, nil
+	return liveConfig{preflight: preflight, dryRun: dryRunText == "1", driverPath: driver, driverSHA256: driverHash, driverSigners: []string{signer}, fixtureConfigPath: fixtureConfigPath, fixtureConfigSHA256: fixtureConfigHash, fixtureManifestPath: fixtureManifestPath, fixtureManifestSHA256: fixtureManifestHash, fixtureManifest: manifest, payloadPath: fixturePaths.PayloadPath, generatedConfigPath: fixturePaths.GeneratedConfigPath, serverConfigPath: fixturePaths.ServerConfigPath, actionConfigPath: fixturePaths.ActionConfigPath, binding: binding, publicSentinel: publicEndpoint, publicSentinelHealth: publicHealthEndpoint, corporateSentinel: corporateEndpoint, corporateCIDR: corporateCIDR}, nil
 }
 
 func requiredSHA256(name string) (string, error) {
@@ -585,7 +667,7 @@ func newLiveHarness(config liveConfig) (*liveHarness, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identify evidence run: %w", err)
 	}
-	h := &liveHarness{config: config, runDir: runDir, runID: runID, runDirectoryIdentity: identity, runDirectoryHandle: runHandle, client: clientapi.New(), actionTimeout: 30 * time.Second, cleanupTimeout: 5 * time.Second, restoreTimeout: 60 * time.Second, reconciliationWindow: stateTimeout, probeInterval: time.Second, probeReceipt: probeSentinelReceipt}
+	h := &liveHarness{config: config, runDir: runDir, runID: runID, runDirectoryIdentity: identity, runDirectoryHandle: runHandle, client: clientapi.New(), actionTimeout: 30 * time.Second, cleanupTimeout: 5 * time.Second, restoreTimeout: 60 * time.Second, driverJoinTimeout: 7 * time.Second, reconciliationWindow: stateTimeout, probeInterval: time.Second, probeReceipt: probeSentinelReceipt}
 	h.validateRunDirectory = func() error {
 		current, err := directoryIdentity(runDir)
 		if err != nil {
@@ -684,7 +766,25 @@ func verifyAndLockInputs(config liveConfig) (io.Closer, error) {
 		_ = driver.Close()
 		return nil, fmt.Errorf("verify pinned fixture config: %w", err)
 	}
-	return closerGroup{driver, fixtureConfig}, nil
+	locks := closerGroup{driver, fixtureConfig}
+	manifest, err := lockPinnedData(config.fixtureManifestPath, config.fixtureManifestSHA256)
+	if err != nil {
+		_ = locks.Close()
+		return nil, fmt.Errorf("verify pinned fixture manifest: %w", err)
+	}
+	locks = append(locks, manifest)
+	for role, artifact := range config.fixtureManifest.Artifacts {
+		if role == "driver" {
+			continue
+		}
+		locked, err := lockPinnedData(artifact.Path, artifact.SHA256)
+		if err != nil {
+			_ = locks.Close()
+			return nil, fmt.Errorf("verify pinned fixture artifact %s: %w", role, err)
+		}
+		locks = append(locks, locked)
+	}
+	return locks, nil
 }
 
 func lockPinnedData(path, expectedSHA256 string) (io.Closer, error) {
@@ -824,25 +924,97 @@ func (h *liveHarness) startUpstreamAndConnect(t *testing.T, scenarioName string,
 
 func (h *liveHarness) connectMustSucceed(t *testing.T) {
 	t.Helper()
+	locks, err := h.lockConnectInputs()
+	if err != nil {
+		t.Fatalf("lock/validate Connect inputs: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
 	defer cancel()
 	status, err := h.client.Connect(ctx)
 	if err != nil || status.State != accessmodel.StateConnected {
+		_ = locks.Close()
 		t.Fatalf("Connect() = %#v, %v; want connected", status, err)
 	}
+	if err := h.pinRenderedRuntimeConfig(&locks); err != nil {
+		_ = locks.Close()
+		t.Fatalf("rendered runtime config: %v", err)
+	}
+	h.connectionLocks = locks
 }
 
 func (h *liveHarness) connectWithUnavailableUpstream(t *testing.T) {
 	t.Helper()
+	locks, err := h.lockConnectInputs()
+	if err != nil {
+		t.Fatalf("lock/validate Connect inputs: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
 	defer cancel()
 	status, err := h.client.Connect(ctx)
 	if err != nil {
+		_ = locks.Close()
 		t.Fatalf("Connect() transport error = %v; service must remain observable", err)
 	}
+	if err := h.pinRenderedRuntimeConfig(&locks); err != nil {
+		_ = locks.Close()
+		t.Fatalf("rendered runtime config: %v", err)
+	}
+	h.connectionLocks = locks
 	if !isUnavailableTunnelState(status.State) {
 		t.Fatalf("Connect() = %#v, want connected or failed before leak assertion", status)
 	}
+}
+
+func (h *liveHarness) lockConnectInputs() (closerGroup, error) {
+	inputs := []struct{ path, hash string }{
+		{h.config.payloadPath, h.config.binding.PayloadSHA256},
+		{h.config.generatedConfigPath, h.config.binding.ConfigSHA256},
+		{h.config.serverConfigPath, h.config.binding.ServerConfigSHA256},
+		{h.config.actionConfigPath, h.config.binding.ActionConfigSHA256},
+		{h.config.fixtureManifestPath, h.config.fixtureManifestSHA256},
+	}
+	for _, role := range []string{"agent", "core", "ui"} {
+		artifact := h.config.fixtureManifest.Artifacts[role]
+		inputs = append(inputs, struct{ path, hash string }{artifact.InstalledPath, artifact.SHA256})
+	}
+	var locks closerGroup
+	for _, input := range inputs {
+		locked, err := lockPinnedData(input.path, input.hash)
+		if err != nil {
+			_ = locks.Close()
+			return nil, err
+		}
+		locks = append(locks, locked)
+	}
+	clientData, err := os.ReadFile(h.config.generatedConfigPath)
+	if err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	serverData, err := os.ReadFile(h.config.serverConfigPath)
+	if err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	if err := fixtureconfig.ValidateGeneratedConfigs(clientData, serverData, h.config.binding.FakeUpstreamDataEndpoint); err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	actionData, err := os.ReadFile(h.config.actionConfigPath)
+	if err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	actionConfig, err := fixtureconfig.ParseActionConfig(actionData)
+	if err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	if err := actionConfig.Validate(h.config.fixtureManifest, h.config.binding.FakeUpstreamDataEndpoint, h.config.binding.FakeUpstreamControlEndpoint, h.config.binding.PublicSentinelEndpoint, h.config.binding.FakeUpstreamIdentity, h.config.payloadPath); err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	return locks, nil
 }
 
 func isUnavailableTunnelState(state accessmodel.ConnectionState) bool {
@@ -854,9 +1026,35 @@ func (h *liveHarness) disconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
 	defer cancel()
 	status, err := h.client.Disconnect(ctx)
+	h.releaseConnectionLocks()
 	if err != nil || status.State != accessmodel.StateDisconnected {
 		t.Fatalf("Disconnect() = %#v, %v; restoration was not proven", status, err)
 	}
+}
+
+func (h *liveHarness) releaseConnectionLocks() {
+	if h.connectionLocks != nil {
+		_ = h.connectionLocks.Close()
+		h.connectionLocks = nil
+	}
+}
+
+func (h *liveHarness) pinRenderedRuntimeConfig(locks *closerGroup) error {
+	const installedClientConfig = `C:\ProgramData\RegenBio\OverseasAccess\sing-box.json`
+	locked, err := lockPinnedData(installedClientConfig, h.config.binding.ConfigSHA256)
+	if err != nil {
+		return err
+	}
+	*locks = append(*locks, locked)
+	runtimeData, err := os.ReadFile(installedClientConfig)
+	if err != nil {
+		return err
+	}
+	serverData, err := os.ReadFile(h.config.serverConfigPath)
+	if err != nil {
+		return err
+	}
+	return fixtureconfig.ValidateGeneratedConfigs(runtimeData, serverData, h.config.binding.FakeUpstreamDataEndpoint)
 }
 
 func (h *liveHarness) waitForState(t *testing.T, want accessmodel.ConnectionState) {
@@ -979,6 +1177,7 @@ func (h *liveHarness) capture(ctx context.Context, scenarioName, _ string) ([]by
 }
 
 func (h *liveHarness) restoreAndProve(scenarioName, caseDir string, baseline *trustedBaseline) error {
+	h.releaseConnectionLocks()
 	cleanupErr, restoreErr := runRestorationActions(
 		func(ctx context.Context) error {
 			_, err := h.actionWithContext(ctx, "case-cleanup", scenarioName, baseline)
@@ -1056,6 +1255,16 @@ func (h *liveHarness) callDriver(ctx context.Context, request fixtureproto.Reque
 	case result := <-done:
 		return result.response, result.err
 	case <-ctx.Done():
+		if h.driverJoinTimeout > 0 {
+			timer := time.NewTimer(h.driverJoinTimeout)
+			defer timer.Stop()
+			select {
+			case <-done:
+				return fixtureproto.Response{}, ctx.Err()
+			case <-timer.C:
+				return fixtureproto.Response{}, errors.New("driver call did not quiesce within its containment budget")
+			}
+		}
 		return fixtureproto.Response{}, ctx.Err()
 	}
 }
@@ -1095,6 +1304,16 @@ func (h *liveHarness) callDriverOnce(ctx context.Context, request fixtureproto.R
 	case result := <-invocation:
 		responseData, err = result.data, result.err
 	case <-ctx.Done():
+		if h.driverJoinTimeout > 0 {
+			timer := time.NewTimer(h.driverJoinTimeout)
+			defer timer.Stop()
+			select {
+			case <-invocation:
+				return fixtureproto.Response{}, ctx.Err()
+			case <-timer.C:
+				return fixtureproto.Response{}, errors.New("driver process tree did not quiesce within its containment budget")
+			}
+		}
 		return fixtureproto.Response{}, ctx.Err()
 	}
 	if err != nil {
@@ -1145,16 +1364,7 @@ func (h *liveHarness) invokeExecutableDriver(ctx context.Context, request fixtur
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, h.config.driverPath)
-	command.Env = append(environmentWithout(os.Environ(), envFixtureConfig), envFixtureConfig+"="+h.config.fixtureConfigPath)
-	command.Stdin = bytes.NewReader(append(requestData, '\n'))
-	var stdout bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
-		return nil, err
-	}
-	return stdout.Bytes(), nil
+	return winjob.Run(ctx, h.config.driverPath, nil, append(environmentWithout(os.Environ(), envFixtureConfig), envFixtureConfig+"="+h.config.fixtureConfigPath), append(requestData, '\n'))
 }
 
 func environmentWithout(environment []string, name string) []string {

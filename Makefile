@@ -23,6 +23,7 @@ test-integration-live:
 build-integration-fixtures:
 	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/overseas-access-integration-driver.exe','./tests/integration/fixturedriver'); exit $$LASTEXITCODE"
 	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/fixture-sentinel.exe','./tests/integration/fixtureserver'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/fixture-action.exe','./tests/integration/fixtureaction'); exit $$LASTEXITCODE"
 
 build:
 	$(MAKE) build-client-binaries
