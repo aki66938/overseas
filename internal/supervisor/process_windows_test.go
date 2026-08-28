@@ -454,6 +454,88 @@ func TestStopReportsTerminateFailureAfterCloseFallback(t *testing.T) {
 	}
 }
 
+func TestGracefulStopReportsJobCloseFailureAndKillsDescendant(t *testing.T) {
+	closeErr := errors.New("injected graceful close-job failure")
+	ops := defaultProcessOps
+	realClose := ops.closeJob
+	ops.closeJob = func(job windows.Handle) error {
+		_ = realClose(job)
+		return closeErr
+	}
+	p, childPID := startGracefulDescendantProcess(t, &ops)
+
+	err := p.Stop(context.Background())
+	var cleanupErr *CleanupError
+	if !errors.As(err, &cleanupErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Stop error = %T %v, want typed close-job failure", err, err)
+	}
+	if !waitProcessExit(childPID, time.Second) {
+		t.Fatalf("descendant PID %d survived graceful root exit", childPID)
+	}
+}
+
+func TestGracefulStopReportsJobTreeConfirmationFailure(t *testing.T) {
+	treeErr := errors.New("injected graceful job-empty failure")
+	ops := defaultProcessOps
+	ops.waitJobEmpty = func(windows.Handle, time.Duration) error { return treeErr }
+	p, _ := startGracefulDescendantProcess(t, &ops)
+
+	err := p.Stop(context.Background())
+	var cleanupErr *CleanupError
+	if !errors.As(err, &cleanupErr) || !errors.Is(err, treeErr) {
+		t.Fatalf("Stop error = %T %v, want typed job-empty failure", err, err)
+	}
+}
+
+func TestWaitObservesCleanupStartedAfterWaitBlocks(t *testing.T) {
+	treeErr := errors.New("injected delayed job-empty failure")
+	treeWaitEntered := make(chan struct{})
+	releaseTreeWait := make(chan struct{})
+	ops := defaultProcessOps
+	ops.waitJobEmpty = func(windows.Handle, time.Duration) error {
+		close(treeWaitEntered)
+		<-releaseTreeWait
+		return treeErr
+	}
+	cfg, ready := writeFakeConfig(t, map[string]any{"mode": "hang-on-stop", "suppress_ready": true})
+	p := verifiedProcess(&Process{
+		ReadyTimeout: 50 * time.Millisecond,
+		StopTimeout:  20 * time.Millisecond,
+		ReadyProbe:   fileProbe(ready),
+		ops:          &ops,
+	})
+	if err := p.Start(context.Background(), fakeConnectEXE, cfg); err != nil {
+		t.Fatal(err)
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- p.Wait() }()
+	readyResult := make(chan error, 1)
+	go func() { readyResult <- p.Ready(context.Background()) }()
+	select {
+	case <-treeWaitEntered:
+	case <-time.After(time.Second):
+		t.Fatal("readiness cleanup did not reach job-empty confirmation")
+	}
+	select {
+	case err := <-waitResult:
+		close(releaseTreeWait)
+		t.Fatalf("Wait returned before in-flight cleanup completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseTreeWait)
+	if err := <-readyResult; !errors.Is(err, treeErr) {
+		t.Fatalf("Ready error = %v, want delayed cleanup error", err)
+	}
+	select {
+	case err := <-waitResult:
+		if !errors.Is(err, treeErr) {
+			t.Fatalf("Wait error = %v, want delayed cleanup error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait remained blocked after cleanup completed")
+	}
+}
+
 func verifiedProcess(p *Process) *Process {
 	p.VerifyExecutable = func(string) error { return nil }
 	return p
@@ -534,6 +616,35 @@ func forceCloseJob(p *Process) {
 	if job != 0 {
 		_ = windows.CloseHandle(job)
 	}
+}
+
+func startGracefulDescendantProcess(t *testing.T, ops *processOps) (*Process, uint32) {
+	t.Helper()
+	childPIDFile := filepath.Join(t.TempDir(), "child.pid")
+	cfg, ready := writeFakeConfig(t, map[string]any{
+		"mode":           "graceful-with-descendant",
+		"child_pid_file": childPIDFile,
+	})
+	p := verifiedProcess(&Process{
+		ReadyTimeout: time.Second,
+		StopTimeout:  500 * time.Millisecond,
+		ReadyProbe:   fileProbe(ready),
+		ops:          ops,
+	})
+	if err := p.Start(context.Background(), fakeConnectEXE, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	childPID := waitPIDFile(t, childPIDFile)
+	t.Cleanup(func() {
+		if process, err := os.FindProcess(int(childPID)); err == nil {
+			_ = process.Kill()
+		}
+		forceCloseJob(p)
+	})
+	return p, childPID
 }
 
 func writeFakeConfig(t *testing.T, values map[string]any) (string, string) {

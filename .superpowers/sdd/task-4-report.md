@@ -292,3 +292,110 @@ cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH
 ```
 
 Race instrumentation therefore remains unavailable in this workstation toolchain; all other requested gates pass.
+
+## Second security re-review remediation
+
+The second review identified two terminal-state races: graceful root exit published
+`done` without job-tree confirmation and allowed `Stop` to discard cleanup failures;
+and `Wait` captured `cleanupDone` before blocking, so cleanup beginning during the
+root transition could be missed. Both were reproduced before production changes.
+
+### RED evidence
+
+Focused RED command:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -timeout 30s -run 'TestGracefulStopReports|TestWaitObservesCleanupStartedAfterWaitBlocks' -v ./internal/supervisor
+```
+
+Result: FAIL, with the intended three failures:
+
+```text
+TestGracefulStopReportsJobCloseFailureAndKillsDescendant:
+Stop error = <nil> <nil>, want typed close-job failure
+
+TestGracefulStopReportsJobTreeConfirmationFailure:
+Stop error = <nil> <nil>, want typed job-empty failure
+
+TestWaitObservesCleanupStartedAfterWaitBlocks:
+Wait returned before in-flight cleanup completed: <nil>
+```
+
+### Remediation implemented
+
+- Added one mutex-protected cleanup ownership transition shared by readiness
+  failure, forced stop, graceful root exit, and unexpected root exit. Exactly one
+  path removes and closes the job handle; all other terminal paths wait for its
+  result.
+- Graceful/unexpected root exit now terminates remaining job members, positively
+  waits for `ActiveProcesses == 0`, closes the job, and records failures as a
+  typed `CleanupError`.
+- `done` is now the final terminal barrier. The wait loop publishes it only after
+  job cleanup, descendant/log closure, and process-handle cleanup have finished.
+  `Wait` therefore cannot snapshot and miss cleanup that starts during exit.
+- Every `Stop` root-exit branch returns the final joined `waitErr`/`cleanupErr`.
+  A failed teardown still lets later `Stop` calls return the recorded cleanup
+  failure instead of waiting forever on an unreachable terminal state.
+- Added an immediate `rootExited` transition so readiness cannot report success
+  during the interval between root death and completed tree cleanup.
+- Added a real graceful helper mode whose root honors CTRL_BREAK while a
+  descendant remains alive. Failure-injection tests cover job close, job-empty
+  confirmation, descendant death, and a waiter already blocked before cleanup
+  begins.
+
+### GREEN evidence
+
+Focused GREEN command:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -timeout 45s -run 'TestGracefulStopReports|TestWaitObservesCleanupStartedAfterWaitBlocks' -v ./internal/supervisor
+```
+
+Result: PASS; all three tests passed in 2.083s.
+
+Complete supervisor lifecycle gate:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -timeout 120s -v ./internal/supervisor
+```
+
+Result: PASS; all 22 supervisor tests passed in 2.548s.
+
+Lifecycle repetition:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -timeout 180s -count=10 ./internal/supervisor
+```
+
+Result: PASS in 18.344s.
+
+Full regression:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe test -timeout 180s ./...
+```
+
+Result: PASS for every package; `internal/supervisor` completed in 3.622s.
+
+Static analysis:
+
+```powershell
+C:\Users\Eleme\codex_workspace\.tools\go1.27.0\go\bin\go.exe vet ./...
+```
+
+Result: PASS.
+
+Non-Windows compile gate:
+
+```powershell
+$env:GOOS='linux'
+$env:GOARCH='amd64'
+go test -c -o .superpowers/sdd/task4-secret-linux.test ./internal/secret
+go test -c -o .superpowers/sdd/task4-supervisor-linux.test ./internal/supervisor
+go build -o .superpowers/sdd/task4-fakeconnect-linux ./tests/integration/fakeconnect
+```
+
+Result: PASS; all three Linux/amd64 artifacts were produced and then removed.
+
+Race instrumentation remains unavailable for the already documented workstation
+toolchain reason (`gcc` is absent). No new concern was found in this remediation.

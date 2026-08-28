@@ -113,6 +113,30 @@ func main() {
 			_ = os.WriteFile(cfg.ChildPIDFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
 		}
 		os.Exit(31)
+	case "graceful-with-descendant":
+		if os.Getenv("FAKECONNECT_GRACEFUL_CHILD") == "1" {
+			interrupt := make(chan os.Signal, 1)
+			signal.Notify(interrupt, os.Interrupt)
+			go func() {
+				for range interrupt {
+				}
+			}()
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		child := exec.Command(os.Args[0], "run", "-c", os.Args[3])
+		child.Env = append(os.Environ(), "FAKECONNECT_GRACEFUL_CHILD=1")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(66)
+		}
+		if cfg.ChildPIDFile != "" {
+			_ = os.WriteFile(cfg.ChildPIDFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		}
+		markReady(cfg)
+		waitForStop()
 	default:
 		os.Exit(64)
 	}

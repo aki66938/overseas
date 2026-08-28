@@ -112,6 +112,7 @@ type Process struct {
 	waitErr     error
 	started     bool
 	ready       bool
+	rootExited  bool
 	stopping    bool
 	redactor    *streamRedactor
 	ops         *processOps
@@ -239,16 +240,13 @@ func (p *Process) Ready(ctx context.Context) error {
 				continue
 			}
 			p.mu.Lock()
-			select {
-			case <-done:
-				err := p.waitErr
+			if p.rootExited {
 				p.mu.Unlock()
-				return err
-			default:
-				p.ready = true
-				p.mu.Unlock()
-				return nil
+				return p.Wait()
 			}
+			p.ready = true
+			p.mu.Unlock()
+			return nil
 		case <-done:
 			return p.Wait()
 		case <-readyCtx.Done():
@@ -279,25 +277,43 @@ func (p *Process) Stop(ctx context.Context) error {
 		p.mu.Unlock()
 		if cleanupDone != nil {
 			select {
+			case <-done:
+				return p.terminalError()
 			case <-cleanupDone:
 				p.mu.Lock()
 				err := p.cleanupErr
 				p.mu.Unlock()
-				return err
+				if err != nil {
+					// A failed cleanup may be unable to drive the root process to
+					// its terminal state. Do not leave later Stop calls blocked on
+					// a done channel that can never close.
+					select {
+					case <-done:
+						return p.terminalError()
+					default:
+						return err
+					}
+				}
+				select {
+				case <-done:
+					return p.terminalError()
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
 		select {
 		case <-done:
-			return nil
+			return p.terminalError()
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 	select {
 	case <-done:
-		err := p.waitErr
+		err := errors.Join(p.waitErr, p.cleanupErr)
 		p.mu.Unlock()
 		return err
 	default:
@@ -315,7 +331,7 @@ func (p *Process) Stop(ctx context.Context) error {
 	defer timer.Stop()
 	select {
 	case <-done:
-		return nil
+		return p.terminalError()
 	case <-timer.C:
 		return p.terminateForFailure()
 	case <-ctx.Done():
@@ -332,15 +348,9 @@ func (p *Process) Wait() error {
 		return ErrNotStarted
 	}
 	done := p.done
-	cleanupDone := p.cleanupDone
 	p.mu.Unlock()
 	<-done
-	if cleanupDone != nil {
-		<-cleanupDone
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return errors.Join(p.waitErr, p.cleanupErr)
+	return p.terminalError()
 }
 
 func (p *Process) waitLoop() {
@@ -350,15 +360,14 @@ func (p *Process) waitLoop() {
 		err = errors.Join(err, codeErr)
 	}
 	p.mu.Lock()
-	job := p.job
-	p.job = 0
-	cleanupDone := p.cleanupDone
-	stopping := p.stopping
-	beforeReady := !p.ready
+	p.rootExited = true
 	p.mu.Unlock()
-	var closeErr error
-	if job != 0 {
-		closeErr = p.ops.closeJob(job)
+
+	cleanupDone, job, _, ops, cleanupOwner := p.acquireCleanup(false)
+	if cleanupOwner {
+		p.finishCleanup(cleanupDone, cleanupJobAfterRootExit(ops, job))
+	} else {
+		<-cleanupDone
 	}
 	var logErr error
 	if p.proc.logDone != nil {
@@ -369,6 +378,10 @@ func (p *Process) waitLoop() {
 		}
 	}
 	p.redactor.Flush()
+	p.mu.Lock()
+	stopping := p.stopping
+	beforeReady := !p.ready
+	p.mu.Unlock()
 	var waitErr error
 	if !stopping {
 		waitErr = &ExitError{Code: code, BeforeReady: beforeReady}
@@ -376,45 +389,32 @@ func (p *Process) waitLoop() {
 	if err != nil {
 		waitErr = errors.Join(waitErr, fmt.Errorf("wait for supervised process: %w", err))
 	}
-	if closeErr != nil || logErr != nil {
+	if logErr != nil {
 		waitErr = errors.Join(waitErr, &CleanupError{Err: errors.Join(
-			wrapError("close process job", closeErr),
 			logErr,
 		)})
+	}
+	if closeErr := p.ops.closeHandle(p.proc.process); closeErr != nil {
+		waitErr = errors.Join(waitErr, &CleanupError{Err: fmt.Errorf("close process handle: %w", closeErr)})
 	}
 	p.mu.Lock()
 	p.waitErr = waitErr
 	close(p.done)
 	p.mu.Unlock()
-	if cleanupDone != nil {
-		<-cleanupDone
-	}
-	_ = p.ops.closeHandle(p.proc.process)
 }
 
 func (p *Process) terminateForFailure() error {
-	p.mu.Lock()
-	if !p.started {
-		p.mu.Unlock()
+	cleanupDone, job, proc, ops, cleanupOwner := p.acquireCleanup(true)
+	if cleanupDone == nil {
 		return nil
 	}
-	if p.cleanupDone != nil {
-		cleanupDone := p.cleanupDone
-		p.mu.Unlock()
+	if !cleanupOwner {
 		<-cleanupDone
 		p.mu.Lock()
 		err := p.cleanupErr
 		p.mu.Unlock()
 		return err
 	}
-	p.stopping = true
-	p.cleanupDone = make(chan struct{})
-	cleanupDone := p.cleanupDone
-	job := p.job
-	p.job = 0
-	proc := p.proc
-	ops := p.ops
-	p.mu.Unlock()
 
 	var cleanupFailures []error
 	jobClosed := false
@@ -447,11 +447,70 @@ func (p *Process) terminateForFailure() error {
 	if len(cleanupFailures) != 0 {
 		cleanupErr = &CleanupError{Err: errors.Join(cleanupFailures...)}
 	}
-	p.mu.Lock()
-	p.cleanupErr = cleanupErr
-	close(cleanupDone)
-	p.mu.Unlock()
+	p.finishCleanup(cleanupDone, cleanupErr)
 	return cleanupErr
+}
+
+// acquireCleanup serializes all teardown paths. The owner removes the job
+// handle from Process and is solely responsible for finishing cleanupDone.
+// Every observer waits for that same result before publishing terminal state.
+func (p *Process) acquireCleanup(markStopping bool) (chan struct{}, windows.Handle, *nativeProcess, *processOps, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.started {
+		return nil, 0, nil, nil, false
+	}
+	if markStopping {
+		p.stopping = true
+	}
+	if p.cleanupDone != nil {
+		return p.cleanupDone, 0, p.proc, p.ops, false
+	}
+	p.cleanupDone = make(chan struct{})
+	job := p.job
+	p.job = 0
+	return p.cleanupDone, job, p.proc, p.ops, true
+}
+
+func (p *Process) finishCleanup(done chan struct{}, cleanupErr error) {
+	p.mu.Lock()
+	p.cleanupErr = errors.Join(p.cleanupErr, cleanupErr)
+	close(done)
+	p.mu.Unlock()
+}
+
+func (p *Process) terminalError() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return errors.Join(p.waitErr, p.cleanupErr)
+}
+
+// cleanupJobAfterRootExit handles the important case where the root exits but
+// descendants still own inherited handles. The whole job is terminated and
+// observed empty before its kill-on-close handle is released.
+func cleanupJobAfterRootExit(ops *processOps, job windows.Handle) error {
+	var cleanupFailures []error
+	jobClosed := false
+	if job == 0 {
+		cleanupFailures = append(cleanupFailures, errors.New("process job handle was unavailable after root exit"))
+	} else if err := ops.terminateJob(job, 1); err != nil {
+		cleanupFailures = append(cleanupFailures, fmt.Errorf("terminate process job after root exit: %w", err))
+		if closeErr := ops.closeJob(job); closeErr != nil {
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("close process job fallback after root exit: %w", closeErr))
+		}
+		jobClosed = true
+	} else if err := ops.waitJobEmpty(job, 5*time.Second); err != nil {
+		cleanupFailures = append(cleanupFailures, fmt.Errorf("confirm process job is empty after root exit: %w", err))
+	}
+	if job != 0 && !jobClosed {
+		if err := ops.closeJob(job); err != nil {
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("close process job after root exit: %w", err))
+		}
+	}
+	if len(cleanupFailures) == 0 {
+		return nil
+	}
+	return &CleanupError{Err: errors.Join(cleanupFailures...)}
 }
 
 func createKillOnCloseJob() (windows.Handle, error) {
