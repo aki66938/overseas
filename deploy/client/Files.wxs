@@ -41,7 +41,6 @@
         <ServiceControl
               Id="AgentServiceControl"
               Name="RegenBioOverseasAccessAgent"
-              Start="install"
               Stop="both"
               Remove="uninstall"
               Wait="yes" />
@@ -89,10 +88,15 @@
         <File Id="CoreManifest" Source="sing-box.manifest.json" Checksum="yes" />
         <File Id="CronetRuntime" Source="libcronet.dll" Checksum="yes" />
         <File Id="TunDriver" Source="wintun.dll" Checksum="yes" />
-        <File Id="ThirdPartyLicense" Source="LICENSE" Checksum="yes" />
+        <File Id="SingBoxLicense" Source="sing-box-LICENSE.txt" Checksum="yes" />
+        <!-- Wintun is distributed under the GPLv2; keep its official license distinct. -->
+        <File Id="WintunLicense" Source="wintun-LICENSE.txt" Checksum="yes" />
       </Component>
       <Component Id="InstallerHarness" Guid="5AF50244-CB84-4B2D-80BD-B36315F29E54" Bitness="always64">
         <File Id="InstallerHarnessFile" Source="install-client.ps1" KeyPath="yes" Checksum="yes" />
+        <File Id="InstallerVerifierFile" Source="installer-verifier.exe" Checksum="yes" />
+        <File Id="CredentialProvisionerFile" Source="credential-provisioner.exe" Checksum="yes" />
+        <File Id="ProvisioningGuide" Source="PROVISIONING.md" Checksum="yes" />
       </Component>
     </ComponentGroup>
 
@@ -105,6 +109,10 @@
       <Component Id="SignedPolicy" Guid="119915E6-1504-4D49-9EF0-9D76454629C6" Bitness="always64">
         <File Id="AgentPolicy" Source="agent.yaml" KeyPath="yes" Checksum="yes" />
         <File Id="AgentPolicySignature" Source="agent.yaml.p7s" Checksum="yes" />
+        <File Id="ArtifactManifest" Source="artifact-manifest.json" Checksum="yes" />
+        <File Id="ArtifactManifestSignature" Source="artifact-manifest.json.p7s" Checksum="yes" />
+        <File Id="ClientSbom" Source="client-sbom.json" Checksum="yes" />
+        <File Id="PayloadChecksums" Source="SHA256SUMS" Checksum="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

@@ -3,6 +3,10 @@ $scriptPath = Join-Path $repoRoot 'deploy\client\install-client.ps1'
 $productPath = Join-Path $repoRoot 'deploy\client\Product.wxs'
 $filesPath = Join-Path $repoRoot 'deploy\client\Files.wxs'
 $makefilePath = Join-Path $repoRoot 'Makefile'
+$buildLockPath = Join-Path $repoRoot 'deploy\client\build-lock.json'
+$checksumsLockPath = Join-Path $repoRoot 'deploy\client\checksums.lock'
+$artifactBuilderPath = Join-Path $repoRoot 'scripts\windows\build-client-artifacts.ps1'
+$msiInspectorPath = Join-Path $repoRoot 'scripts\windows\inspect-client-msi.ps1'
 
 function Get-ClientInstallFailureMessage {
     param([Parameter(Mandatory = $true)][scriptblock] $Action)
@@ -40,7 +44,7 @@ Describe 'Transactional Windows client installer' {
 
     It 'verifies every payload hash and required signature before the transaction journal or mutation' {
         $text = Get-Content -LiteralPath $scriptPath -Raw
-        foreach ($literal in @('overseas-agent.exe', 'overseas-client.exe', 'sing-box.exe', 'sing-box.manifest.json', 'agent.yaml', 'agent.yaml.p7s', 'wintun.dll')) {
+        foreach ($literal in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'install-client.ps1', 'PROVISIONING.md', 'sing-box.exe', 'sing-box.manifest.json', 'agent.yaml', 'agent.yaml.p7s', 'wintun.dll', 'sing-box-LICENSE.txt', 'wintun-LICENSE.txt')) {
             $text | Should Match ([regex]::Escape($literal))
         }
         $hashIndex = $text.IndexOf('Assert-PayloadHashes')
@@ -54,6 +58,7 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'Get-AuthenticodeSignature'
         $text | Should Match 'SignedCms'
         $text | Should Match 'CheckSignature\(\$true\)'
+        $text | Should Match ([regex]::Escape("foreach (`$name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'wintun.dll'))"))
         $text | Should Not Match '(?i)Invoke-WebRequest|Start-BitsTransfer|System\.Net\.WebClient|HttpClient'
     }
 
@@ -116,13 +121,13 @@ Describe 'Transactional Windows client installer' {
         $firewallIndex = $body.IndexOf('Remove-OwnedFirewallRules')
         $shortcutIndex = $body.IndexOf('Remove-OwnedShortcut')
         $serviceIndex = $body.IndexOf('Remove-OwnedService')
-        $installIndex = $body.IndexOf('Remove-OwnedDirectory -Path $InstallRoot')
-        $dataIndex = $body.IndexOf('Remove-OwnedDirectory -Path $DataRoot')
+        $payloadIndex = $body.IndexOf('Remove-OwnedPayloadFiles')
+        $markerIndex = $body.IndexOf('Remove-RootOwnershipMarker')
         $firewallIndex | Should BeGreaterThan -1
         $shortcutIndex | Should BeGreaterThan $firewallIndex
         $serviceIndex | Should BeGreaterThan $shortcutIndex
-        $installIndex | Should BeGreaterThan $serviceIndex
-        $dataIndex | Should BeGreaterThan $installIndex
+        $payloadIndex | Should BeGreaterThan $serviceIndex
+        $markerIndex | Should BeGreaterThan $payloadIndex
         $text | Should Match '\bcatch\s*\{[^}]*Undo-ClientTransaction'
     }
 
@@ -166,6 +171,80 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'AlreadyCurrent'
     }
 
+    It 'behaviorally refuses a pre-existing root without an exact ownership marker' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $start = $text.IndexOf('function Assert-InstallCollisions')
+        $end = $text.IndexOf('function ', $start + 10)
+        $start | Should BeGreaterThan -1
+        if ($start -lt 0) { return }
+        if ($end -lt 0) { $end = $text.Length }
+        Invoke-Expression $text.Substring($start, $end - $start)
+        function Test-ValidRootMarker { return $false }
+        function Test-JournalOwnsResource { return $false }
+        Mock Test-Path { return $true }
+        (Get-ClientInstallFailureMessage { Assert-InstallCollisions }) | Should Match 'pre-existing unowned root'
+    }
+
+    It 'journals each resource before creation and publishes exact per-root markers' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match '\$RootOwnerFileName\s*=\s*''\.regenbio-overseas-access\.owner\.json'''
+        $text | Should Match 'function Write-TransactionPhase'
+        $text | Should Match 'PendingResource'
+        $text | Should Match 'CreatedResources'
+        $installStart = $text.IndexOf('function Install-ClientTransaction')
+        $installEnd = $text.IndexOf('function Repair-ClientTransaction')
+        $body = $text.Substring($installStart, $installEnd - $installStart)
+        $body.IndexOf("Write-TransactionPhase -Path `$JournalPath -Phase 'CreatingInstallRoot'") | Should BeLessThan $body.IndexOf('Protect-OwnedDirectory -Path $InstallRoot')
+        $body.IndexOf('Write-RootOwnershipMarker -Root $InstallRoot') | Should BeGreaterThan $body.IndexOf('Protect-OwnedDirectory -Path $InstallRoot')
+        $body.IndexOf("Write-TransactionPhase -Path `$JournalPath -Phase 'CreatingDataRoot'") | Should BeLessThan $body.IndexOf('Protect-OwnedDirectory -Path $DataRoot')
+        $body.IndexOf('Write-RootOwnershipMarker -Root $DataRoot') | Should BeGreaterThan $body.IndexOf('Protect-OwnedDirectory -Path $DataRoot')
+    }
+
+    It 'never overwrites or removes a shortcut whose exact target is not owned' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match 'function Test-OwnedShortcut'
+        $text | Should Match '\.TargetPath'
+        $text | Should Match 'TargetPath\),\s*\(Join-Path\s+\$InstallRoot\s+''overseas-client\.exe''\)'
+        $removeStart = $text.IndexOf('function Remove-OwnedShortcut')
+        $removeEnd = $text.IndexOf('function Remove-OwnedService')
+        $removeBody = $text.Substring($removeStart, $removeEnd - $removeStart)
+        $removeBody | Should Match 'Test-OwnedShortcut'
+        $removeBody | Should Match 'not installer-owned'
+    }
+
+    It 'uses the durable journal to resume partial ownership without accepting foreign resources' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match 'function Test-JournalOwnsResource'
+        $text | Should Match 'function Assert-RemoveOwnership'
+        $text | Should Match 'Assert-InstallCollisions\s+-JournalPath\s+\$resumePath'
+        $text | Should Match 'Assert-RemoveOwnership\s+-JournalPath\s+\$resumePath'
+        $text | Should Match 'Test-JournalOwnsResource\s+-JournalPath\s+\$JournalPath\s+-Resource\s+\$root'
+        $removeCheck = $text.IndexOf('Assert-RemoveOwnership -JournalPath $resumePath')
+        $uninstallDecision = $text.IndexOf('if (-not $PSCmdlet.ShouldProcess($InstallRoot, "Uninstall client;')
+        $removeCheck | Should BeGreaterThan -1
+        $removeCheck | Should BeLessThan $uninstallDecision
+    }
+
+    It 'keeps repair and uninstall resumable and deletes ownership proof last' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match 'Get-ResumableJournal'
+        $text | Should Match "-Phase\s+'RepairPayloads'"
+        $text | Should Match "-Phase\s+'UninstallDisconnect'"
+        $text | Should Match 'Resume-ClientTransaction'
+        $uninstallStart = $text.IndexOf('function Uninstall-ClientTransaction')
+        $statusStart = $text.IndexOf('function Get-ClientStatus')
+        $body = $text.Substring($uninstallStart, $statusStart - $uninstallStart)
+        $proofIndex = $body.IndexOf('Assert-OwnedFirewallAbsent')
+        $markerIndex = $body.IndexOf('Remove-RootOwnershipMarker')
+        $journalIndex = $body.IndexOf('Remove-Item -LiteralPath $JournalPath')
+        $proofIndex | Should BeGreaterThan -1
+        $markerIndex | Should BeGreaterThan $proofIndex
+        $journalIndex | Should BeGreaterThan $markerIndex
+        $body | Should Match 'catch\s*\{[\s\S]*Write-TransactionPhase[\s\S]*throw'
+        $body | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$root\s+-PathType\s+Container\)\s*\{\s*Remove-OwnedPayloadFiles'
+        $body | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$root\s+-PathType\s+Container\)\s*\{[\s\S]*Remove-RootOwnershipMarker'
+    }
+
     It 'has no dynamic execution plaintext-secret parameter secret-bearing native argv or registry write' {
         $tokens = $null
         $errors = $null
@@ -188,7 +267,7 @@ Describe 'Transactional Windows client installer' {
         $message = Get-ClientInstallFailureMessage {
             & $scriptPath -Mode Install -BundlePath (Join-Path $TestDrive 'missing') -PayloadManifestPath (Join-Path $TestDrive 'missing.json') -WhatIf
         }
-        $message | Should Match 'BundlePath|payload manifest|signature gate'
+        $message | Should Match 'BundlePath|payload manifest|signature gate|Could not find file'
         Assert-MockCalled New-Service -Times 0 -Exactly -Scope It
         Assert-MockCalled New-NetFirewallRule -Times 0 -Exactly -Scope It
         Assert-MockCalled Copy-Item -Times 0 -Exactly -Scope It
@@ -224,6 +303,28 @@ Describe 'Transactional Windows client installer' {
         $product | Should Match '<CustomAction[^>]*Id="MsiSafeRemove"[^>]*Execute="deferred"[^>]*Impersonate="no"[^>]*Return="check"'
         $product | Should Match '<SetProperty[^>]*Id="MsiSafeRemove"[^>]*-MsiPreRemove'
         $product | Should Match '<Custom[^>]*Action="MsiSafeRemove"[^>]*Before="StopServices"'
+        $product | Should Not Match 'NOT\s+UPGRADINGPRODUCTCODE'
+    }
+
+    It 'fails untrusted install repair and upgrade before InstallInitialize using a first-party Binary action' {
+        $product = Get-Content -LiteralPath $productPath -Raw
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $product | Should Match 'INSPECT_ONLY_REFUSES_INSTALL'
+        $product | Should Match '<Binary[^>]*Id="InstallerVerifierBinary"[^>]*installer-verifier\.exe'
+        $product | Should Match '<CustomAction[^>]*Id="VerifyPackageTrust"[^>]*BinaryRef="InstallerVerifierBinary"[^>]*Execute="immediate"[^>]*Return="check"'
+        $product | Should Match '<Custom[^>]*Action="VerifyPackageTrust"[^>]*Before="InstallInitialize"'
+        $product | Should Match 'OriginalDatabase'
+        $product | Should Match 'NOT Installed OR REINSTALL OR WIX_UPGRADE_DETECTED'
+        $files | Should Match 'installer-verifier\.exe'
+    }
+
+    It 'verifies the installed signed payload after files and before service or firewall mutation' {
+        $product = Get-Content -LiteralPath $productPath -Raw
+        $product | Should Match '<CustomAction[^>]*Id="VerifyInstalledPayload"[^>]*BinaryRef="InstallerVerifierBinary"[^>]*Execute="deferred"[^>]*Impersonate="no"[^>]*Return="check"'
+        $product | Should Match '<Custom[^>]*Action="VerifyInstalledPayload"[^>]*Before="InstallServices"'
+        $product | Should Match 'After InstallFiles; before InstallServices'
+        $product | Should Match 'artifact-manifest\.json'
+        $product | Should Match 'artifact-manifest\.json\.p7s'
     }
 
     It 'embeds exactly the allowlisted non-secret payload and uses no secret MSI property or network source' {
@@ -238,6 +339,16 @@ Describe 'Transactional Windows client installer' {
         $combined | Should Not Match '<CustomAction[^>]*(ExeCommand|CommandLine)[^>]*(credential|password|secret|token|pin)'
     }
 
+    It 'packages a stdin-only credential provisioner and leaves the service stopped until provisioning' {
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $files | Should Match 'credential-provisioner\.exe'
+        $files | Should Match 'PROVISIONING\.md'
+        $files | Should Not Match '<ServiceControl[^>]*Start="install"'
+        $script | Should Match '\$CredentialPath\s*=\s*Join-Path\s+\$DataRoot\s+''credential\.bin'''
+        $script | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$CredentialPath\s+-PathType\s+Leaf\)\s*\{[\s\S]*Start-Service'
+    }
+
     It 'wires reproducible local WiX restore MSI build inspection and dual-Pester targets' {
         $text = Get-Content -LiteralPath $makefilePath -Raw
         $text | Should Match '(?m)^WIX\s*\?='
@@ -250,5 +361,74 @@ Describe 'Transactional Windows client installer' {
         ([regex]::Matches($text, 'ClientInstall\.Tests\.ps1')).Count | Should Be 2
         $text | Should Match 'powershell\.exe'
         $text | Should Match 'pwsh'
+    }
+
+    It 'locks every external artifact and packages Wintun attribution distinctly' {
+        (Test-Path -LiteralPath $buildLockPath -PathType Leaf) | Should Be $true
+        (Test-Path -LiteralPath $checksumsLockPath -PathType Leaf) | Should Be $true
+        if (-not (Test-Path $buildLockPath) -or -not (Test-Path $checksumsLockPath)) { return }
+        $lock = Get-Content -LiteralPath $buildLockPath -Raw | ConvertFrom-Json
+        $lock.schema_version | Should Be 1
+        $lock.go.version | Should Be '1.27.0'
+        $lock.wix.version | Should Be '4.0.6'
+        $lock.sing_box.version | Should Be '1.13.19'
+        $lock.wintun.version | Should Be '0.14.1'
+        $lock.wintun.archive_sha256 | Should Match '^[a-f0-9]{64}$'
+        $checksums = Get-Content -LiteralPath $checksumsLockPath -Raw
+        $checksums | Should Match 'wintun-0\.14\.1\.zip'
+        $checksums | Should Match 'sing-box-1\.13\.19-windows-amd64\.zip'
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $files | Should Match 'wintun-LICENSE\.txt'
+        $files | Should Match 'Wintun is distributed under the GPLv2'
+    }
+
+    It 'builds canonical manifest SBOM and checksums offline and signs only from an external certificate store' {
+        (Test-Path -LiteralPath $artifactBuilderPath -PathType Leaf) | Should Be $true
+        if (-not (Test-Path $artifactBuilderPath)) { return }
+        $text = Get-Content -LiteralPath $artifactBuilderPath -Raw
+        $text | Should Match "ValidateSet\('Inspect',\s*'Release'\)"
+        $text | Should Match 'artifact-manifest\.json'
+        $text | Should Match 'artifact-manifest\.json\.p7s'
+        $text | Should Match 'client-sbom\.json'
+        $text | Should Match 'SHA256SUMS'
+        $text | Should Match 'git\s+rev-parse\s+HEAD'
+        $text | Should Match 'git\s+status\s+--porcelain'
+        $text | Should Match 'INSPECT-ONLY-NOT-SIGNED'
+        $text | Should Match 'Cert:\\(CurrentUser|LocalMachine)\\My'
+        $text | Should Match 'HasPrivateKey'
+        $text | Should Not Match '(?i)New-SelfSignedCertificate|Import-PfxCertificate|password|Invoke-WebRequest|Start-BitsTransfer|HttpClient'
+        $text.IndexOf("if (`$Mode -eq 'Release')") | Should BeLessThan $text.IndexOf('Remove-Item -LiteralPath $target -Recurse')
+        $text.IndexOf('git status --porcelain') | Should BeLessThan $text.IndexOf('Remove-Item -LiteralPath $target -Recurse')
+    }
+
+    It 'recursively verifies every extracted byte signature and secret scan against the source manifest' {
+        (Test-Path -LiteralPath $msiInspectorPath -PathType Leaf) | Should Be $true
+        if (-not (Test-Path $msiInspectorPath)) { return }
+        $text = Get-Content -LiteralPath $msiInspectorPath -Raw
+        $text | Should Match 'Get-ChildItem[^\r\n]*-Recurse'
+        $text | Should Match 'Compare-Object'
+        $text | Should Match 'Get-FileHash'
+        $text | Should Match 'Get-AuthenticodeSignature'
+        $text | Should Match 'SignedCms'
+        $text | Should Match 'MsiLockPermissionsEx'
+        $text | Should Match 'InstallExecuteSequence'
+        $text | Should Match 'VerifyPackageTrust.*InstallInitialize'
+        $text | Should Match 'MsiSafeRemove.*StopServices'
+        $text | Should Match 'VerifyInstalledPayload.*InstallServices'
+        $text | Should Match 'D:P\(A;OICI;FA;;;SY\)'
+        $text | Should Match 'INSPECT_ONLY_REFUSES_INSTALL|RELEASE_SIGNED'
+        $text | Should Match 'BEGIN \(RSA \|EC \)\?PRIVATE KEY'
+        $text | Should Match 'credential|secret|token'
+        $text | Should Match '\$binaryForbiddenContent'
+        $text | Should Match '\$textExtensions'
+        $text | Should Match 'if\s*\(\(?\$textExtensions\s+-contains\s+\$file\.Extension'
+    }
+
+    It 'exposes separate inspect-only and externally signed release MSI targets' {
+        $text = Get-Content -LiteralPath $makefilePath -Raw
+        $text | Should Match '(?m)^release-msi:'
+        $text | Should Match 'SIGNING_CERT_THUMBPRINT'
+        $text | Should Match 'build-client-artifacts\.ps1'
+        $text | Should Match 'inspect-client-msi\.ps1'
     }
 }

@@ -13,13 +13,17 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $ProductVersion = [version] '0.1.0'
-$TrustedManifestSignerThumbprint = '4E51A35F5C3C16B483663E3D48D22219DAD986B3'
+$TrustedManifestSignerThumbprint = '0000000000000000000000000000000000000000' # INSPECT_ONLY_REFUSES_INSTALL; release recipe replaces this copy.
 $ServiceName = 'RegenBioOverseasAccessAgent'
 $ServiceDisplayName = 'RegenBio Overseas Access Agent'
 $InstallRoot = 'C:\Program Files\RegenBio\OverseasAccess'
 $DataRoot = 'C:\ProgramData\RegenBio\OverseasAccess'
 $TransactionRoot = 'C:\ProgramData\RegenBio\InstallerTransactions'
-$OwnerPath = Join-Path $DataRoot 'owner.json'
+$RootOwnerFileName = '.regenbio-overseas-access.owner.json'
+$InstallOwnerPath = Join-Path $InstallRoot $RootOwnerFileName
+$DataOwnerPath = Join-Path $DataRoot $RootOwnerFileName
+$OwnerPath = $DataOwnerPath
+$CredentialPath = Join-Path $DataRoot 'credential.bin'
 $ShortcutPath = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\RegenBio Overseas Access.lnk'
 $PipePath = '\\.\pipe\RegenBioOverseasAccess'
 $TunAlias = 'RegenBioOverseasAccess'
@@ -33,13 +37,18 @@ $OwnedFirewallRules = @(
 $RequiredPayloads = @(
     'overseas-agent.exe',
     'overseas-client.exe',
+    'credential-provisioner.exe',
+    'installer-verifier.exe',
+    'install-client.ps1',
+    'PROVISIONING.md',
     'sing-box.exe',
     'sing-box.manifest.json',
     'libcronet.dll',
     'wintun.dll',
     'agent.yaml',
     'agent.yaml.p7s',
-    'LICENSE'
+    'sing-box-LICENSE.txt',
+    'wintun-LICENSE.txt'
 )
 
 function Assert-Elevated {
@@ -67,18 +76,119 @@ function Assert-ExactRoot {
 
 function Assert-OwnedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
-    if (-not (Test-Path -LiteralPath $OwnerPath -PathType Leaf)) {
-        throw 'Ownership manifest is absent; refusing to remove the client.'
-    }
-    $owner = Get-Content -LiteralPath $OwnerPath -Raw | ConvertFrom-Json
-    if ($owner.SchemaVersion -ne 1 -or $owner.ServiceName -ne $ServiceName) {
-        throw 'Ownership manifest is invalid; refusing to remove the client.'
-    }
     $canonical = Get-CanonicalPath $Path
-    $owned = @($owner.OwnedRoots | ForEach-Object { Get-CanonicalPath ([string] $_) })
-    if ($owned -notcontains $canonical) {
+    if ($canonical -notin @((Get-CanonicalPath $InstallRoot), (Get-CanonicalPath $DataRoot)) -or -not (Test-ValidRootMarker -Root $canonical)) {
         throw "Path '$canonical' is not transaction-owned."
     }
+}
+
+function Test-JournalOwnsResource {
+    param(
+        [string] $JournalPath,
+        [Parameter(Mandatory = $true)][string] $Resource
+    )
+    if ([string]::IsNullOrWhiteSpace($JournalPath) -or -not (Test-Path -LiteralPath $JournalPath -PathType Leaf)) { return $false }
+    try {
+        $journal = Get-Content -LiteralPath $JournalPath -Raw | ConvertFrom-Json
+        if ($journal.SchemaVersion -ne 2 -or $journal.Operation -ne 'Install') { return $false }
+        return [string]::Equals([string] $journal.PendingResource, $Resource, [StringComparison]::OrdinalIgnoreCase) -or
+            @($journal.CreatedResources | Where-Object { [string]::Equals([string] $_, $Resource, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1
+    }
+    catch { return $false }
+}
+
+function Assert-InstallCollisions {
+    param([string] $JournalPath)
+    foreach ($root in @('C:\Program Files\RegenBio\OverseasAccess', 'C:\ProgramData\RegenBio\OverseasAccess')) {
+        if ((Test-Path -LiteralPath $root) -and -not (Test-ValidRootMarker -Root $root) -and
+            -not (Test-JournalOwnsResource -JournalPath $JournalPath -Resource $root)) {
+            throw "Refusing pre-existing unowned root '$root'."
+        }
+    }
+    if (Test-Path -LiteralPath 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\RegenBio Overseas Access.lnk') {
+        if (-not (Test-JournalOwnsResource -JournalPath $JournalPath -Resource $ShortcutPath) -or -not (Test-OwnedShortcut)) {
+            throw 'Refusing a pre-existing unowned shortcut.'
+        }
+    }
+    $existingService = Get-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction SilentlyContinue
+    if ($null -ne $existingService) {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
+        if (-not (Test-JournalOwnsResource -JournalPath $JournalPath -Resource $ServiceName) -or
+            $service.PathName.Trim('"') -ne (Join-Path $InstallRoot 'overseas-agent.exe')) {
+            throw 'Refusing a pre-existing service name.'
+        }
+    }
+    foreach ($name in @('RegenBioOverseasAccess-AllowAgent-Out', 'RegenBioOverseasAccess-AllowCoreTCP-Out', 'RegenBioOverseasAccess-AllowCoreUDP-Out')) {
+        $rules = @(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+        if ($rules.Count -ne 0) {
+            if (-not (Test-JournalOwnsResource -JournalPath $JournalPath -Resource $OwnedFirewallGroup) -or
+                $rules.Count -ne 1 -or $rules[0].Group -ne $OwnedFirewallGroup) {
+                throw "Refusing a pre-existing firewall rule '$name'."
+            }
+        }
+    }
+}
+
+function Assert-RemoveOwnership {
+    param([string] $JournalPath)
+    $resuming = $false
+    if (-not [string]::IsNullOrWhiteSpace($JournalPath) -and (Test-Path -LiteralPath $JournalPath -PathType Leaf)) {
+        $journal = Get-Content -LiteralPath $JournalPath -Raw | ConvertFrom-Json
+        $resuming = $journal.SchemaVersion -eq 2 -and $journal.Operation -eq 'Uninstall'
+        if (-not $resuming) { throw 'The uninstall resume journal is invalid.' }
+    }
+    foreach ($root in @($InstallRoot, $DataRoot)) {
+        if (Test-Path -LiteralPath $root -PathType Container) {
+            if (-not (Test-ValidRootMarker -Root $root)) { throw "Uninstall requires a valid ownership marker for '$root'." }
+        }
+        elseif (-not $resuming) { throw "Owned root '$root' is absent; refusing uninstall success." }
+    }
+    if ((Test-Path -LiteralPath $ShortcutPath -PathType Leaf) -and -not (Test-OwnedShortcut)) {
+        throw 'The shortcut is not installer-owned.'
+    }
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($null -ne $existingService) {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
+        if ($service.PathName.Trim('"') -ne (Join-Path $InstallRoot 'overseas-agent.exe')) { throw 'The service is not installer-owned.' }
+    }
+    foreach ($name in $OwnedFirewallRules) {
+        $rules = @(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+        if ($rules.Count -gt 1 -or ($rules.Count -eq 1 -and $rules[0].Group -ne $OwnedFirewallGroup)) {
+            throw "Firewall rule '$name' is not installer-owned."
+        }
+    }
+}
+
+function Test-ValidRootMarker {
+    param([Parameter(Mandatory = $true)][string] $Root)
+    $markerPath = Join-Path $Root $RootOwnerFileName
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
+    try {
+        $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+        return $marker.SchemaVersion -eq 2 -and $marker.ProductId -eq 'RegenBioOverseasAccess' -and
+            [string]::Equals((Get-CanonicalPath ([string] $marker.Root)), (Get-CanonicalPath $Root), [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
+
+function Write-RootOwnershipMarker {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][guid] $TransactionId,
+        [string[]] $OwnedFiles = @()
+    )
+    Assert-ExactRoot -Actual $Root -Expected $(if ($Root -eq $InstallRoot) { $InstallRoot } else { $DataRoot })
+    Write-AtomicJson -Path (Join-Path $Root $RootOwnerFileName) -Value ([ordered] @{
+        SchemaVersion = 2; ProductId = 'RegenBioOverseasAccess'; Root = $Root
+        TransactionId = $TransactionId.ToString('D'); ProductVersion = $ProductVersion.ToString()
+        OwnedFiles = @($OwnedFiles)
+    })
+}
+
+function Remove-RootOwnershipMarker {
+    param([Parameter(Mandatory = $true)][string] $Root)
+    if (-not (Test-ValidRootMarker -Root $Root)) { throw "Ownership marker for '$Root' is absent or invalid." }
+    Remove-Item -LiteralPath (Join-Path $Root $RootOwnerFileName) -Force
 }
 
 function Resolve-PayloadPath {
@@ -224,7 +334,7 @@ function Assert-PayloadSignatures {
     if ($thumbprints.Count -eq 0 -or @($thumbprints | Where-Object { $_ -notmatch '^[A-F0-9]{40,64}$' }).Count -ne 0) {
         throw 'The signer thumbprint allowlist is invalid.'
     }
-    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'wintun.dll')) {
+    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'wintun.dll')) {
         Assert-AuthenticodePayload -Path $Paths[$name] -AllowedThumbprints $thumbprints
     }
     Assert-DetachedPolicySignature -PolicyPath $Paths['agent.yaml'] -SignaturePath $Paths['agent.yaml.p7s'] -AllowedThumbprints $thumbprints
@@ -278,13 +388,57 @@ function Write-TransactionJournal {
     Protect-OwnedDirectory -Path $TransactionRoot
     $path = Join-Path $TransactionRoot ($TransactionId.ToString('D') + '.json')
     Write-AtomicJson -Path $path -Value ([ordered] @{
-        SchemaVersion = 1
+        SchemaVersion = 2
         TransactionId = $TransactionId.ToString('D')
         Operation = $Operation
+        Phase = 'Prepared'
+        PendingResource = $null
+        CreatedResources = @()
         ProductVersion = $ProductVersion.ToString()
         StartedUtc = [DateTime]::UtcNow.ToString('o')
     })
     return $path
+}
+
+function Write-TransactionPhase {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Phase,
+        [string] $PendingResource,
+        [string] $CompletedResource
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'Transaction journal is absent.' }
+    $journal = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ($journal.SchemaVersion -ne 2 -or [string] $journal.TransactionId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'Transaction journal is invalid.' }
+    $created = @($journal.CreatedResources)
+    if (-not [string]::IsNullOrWhiteSpace($CompletedResource) -and $created -notcontains $CompletedResource) { $created += $CompletedResource }
+    Write-AtomicJson -Path $Path -Value ([ordered] @{
+        SchemaVersion = 2; TransactionId = [string] $journal.TransactionId; Operation = [string] $journal.Operation
+        Phase = $Phase; PendingResource = $PendingResource; CreatedResources = @($created)
+        ProductVersion = [string] $journal.ProductVersion; StartedUtc = [string] $journal.StartedUtc
+        UpdatedUtc = [DateTime]::UtcNow.ToString('o')
+    })
+}
+
+function Get-ResumableJournal {
+    param([Parameter(Mandatory = $true)][string] $Operation)
+    if (-not (Test-Path -LiteralPath $TransactionRoot -PathType Container)) { return $null }
+    $matches = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $TransactionRoot -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $journal = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            if ($journal.SchemaVersion -eq 2 -and $journal.Operation -eq $Operation) { $matches += $file.FullName }
+        }
+        catch { throw "Invalid transaction journal '$($file.FullName)' blocks lifecycle changes." }
+    }
+    if ($matches.Count -gt 1) { throw "Multiple unfinished $Operation transactions require operator review." }
+    return $(if ($matches.Count -eq 1) { $matches[0] } else { $null })
+}
+
+function Resume-ClientTransaction {
+    param([Parameter(Mandatory = $true)][string] $JournalPath)
+    if (-not (Test-Path -LiteralPath $JournalPath -PathType Leaf)) { throw 'Resume journal is absent.' }
+    return Get-Content -LiteralPath $JournalPath -Raw | ConvertFrom-Json
 }
 
 function Copy-PayloadFile {
@@ -362,7 +516,26 @@ function Ensure-OwnedFirewallRules {
     }
 }
 
+function Test-OwnedShortcut {
+    if (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf)) { return $false }
+
+    $shell = $null
+    $shortcut = $null
+    try {
+        $shell = New-Object -ComObject 'WScript.Shell'
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        return [string]::Equals((Get-CanonicalPath $shortcut.TargetPath), (Join-Path $InstallRoot 'overseas-client.exe'), [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    finally {
+        if ($null -ne $shortcut) { [void] [Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
+        if ($null -ne $shell) { [void] [Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+    }
+}
+
 function Ensure-OwnedShortcut {
+    if ((Test-Path -LiteralPath $ShortcutPath -PathType Leaf) -and -not (Test-OwnedShortcut)) {
+        throw 'Refusing to overwrite a shortcut that is not installer-owned.'
+    }
     $shell = New-Object -ComObject 'WScript.Shell'
     $shortcut = $shell.CreateShortcut($ShortcutPath)
     $shortcut.TargetPath = Join-Path $InstallRoot 'overseas-client.exe'
@@ -386,6 +559,9 @@ function Remove-OwnedFirewallRules {
 
 function Remove-OwnedShortcut {
     if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
+        if (-not (Test-OwnedShortcut)) {
+            throw 'Refusing to remove a shortcut that is not installer-owned.'
+        }
         Remove-Item -LiteralPath $ShortcutPath -Force
     }
 }
@@ -401,9 +577,28 @@ function Remove-OwnedService {
 }
 
 function Remove-OwnedDirectory {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    Assert-OwnedPath -Path $Path
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $MarkerRemoved
+    )
+    Assert-ExactRoot -Actual $Path -Expected $(if ($Path -eq $InstallRoot) { $InstallRoot } else { $DataRoot })
+    if (-not $MarkerRemoved) { Assert-OwnedPath -Path $Path }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
+        throw "Owned root '$Path' contains foreign or unremoved content; refusing directory removal."
+    }
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Remove-OwnedPayloadFiles {
+    param([Parameter(Mandatory = $true)][string] $Root)
+    if (-not (Test-ValidRootMarker -Root $Root)) { throw "Ownership marker for '$Root' is invalid." }
+    $marker = Get-Content -LiteralPath (Join-Path $Root $RootOwnerFileName) -Raw | ConvertFrom-Json
+    foreach ($name in @($marker.OwnedFiles)) {
+        if ([string] $name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or ([string] $name).Contains('..')) { throw 'Owned file name is invalid.' }
+        $path = Join-Path $Root ([string] $name)
+        if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+    }
 }
 
 function Request-ControlledDisconnect {
@@ -477,24 +672,37 @@ function Assert-NetworkRestored {
 }
 
 function Write-OwnershipManifest {
-    param([Parameter(Mandatory = $true)][guid] $TransactionId)
-    Write-AtomicJson -Path $OwnerPath -Value ([ordered] @{
-        SchemaVersion = 1; ProductVersion = $ProductVersion.ToString(); TransactionId = $TransactionId.ToString('D')
-        ServiceName = $ServiceName; OwnedRoots = @($InstallRoot, $DataRoot)
-        FirewallRules = @($OwnedFirewallRules); ShortcutPath = $ShortcutPath
-    })
+    param(
+        [Parameter(Mandatory = $true)][guid] $TransactionId,
+        [Parameter(Mandatory = $true)] $Manifest
+    )
+    $installFiles = @($Manifest.files | Where-Object { $_.name -notin @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS') } | ForEach-Object { [string] $_.name })
+    $dataFiles = @($Manifest.files | Where-Object { $_.name -in @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS') } | ForEach-Object { [string] $_.name })
+    Write-RootOwnershipMarker -Root $InstallRoot -TransactionId $TransactionId -OwnedFiles $installFiles
+    Write-RootOwnershipMarker -Root $DataRoot -TransactionId $TransactionId -OwnedFiles $dataFiles
 }
 
 function Undo-ClientTransaction {
     param([Parameter(Mandatory = $true)][string] $JournalPath)
-    Remove-OwnedFirewallRules
-    Remove-OwnedShortcut
-    Remove-OwnedService
-    if (Test-Path -LiteralPath $OwnerPath) {
-        Remove-OwnedDirectory -Path $InstallRoot
-        Remove-OwnedDirectory -Path $DataRoot
+    try {
+        Write-TransactionPhase -Path $JournalPath -Phase 'Compensating' -PendingResource 'FirewallRules'
+        Remove-OwnedFirewallRules
+        Remove-OwnedShortcut
+        Remove-OwnedService
+        foreach ($root in @($InstallRoot, $DataRoot)) {
+            if (Test-ValidRootMarker -Root $root) {
+                Remove-OwnedPayloadFiles -Root $root
+                Remove-RootOwnershipMarker -Root $root
+                Remove-OwnedDirectory -Path $root -MarkerRemoved
+            }
+        }
+        Write-TransactionPhase -Path $JournalPath -Phase 'Compensated'
+        Remove-Item -LiteralPath $JournalPath -Force
     }
-    if (Test-Path -LiteralPath $JournalPath) { Remove-Item -LiteralPath $JournalPath -Force }
+    catch {
+        Write-TransactionPhase -Path $JournalPath -Phase 'CompensationIncomplete'
+        throw
+    }
 }
 
 function Install-ClientTransaction {
@@ -505,17 +713,31 @@ function Install-ClientTransaction {
         [Parameter(Mandatory = $true)][hashtable] $Paths
     )
     try {
+        Write-TransactionPhase -Path $JournalPath -Phase 'CreatingInstallRoot' -PendingResource $InstallRoot
         Protect-OwnedDirectory -Path $InstallRoot -ReadOnlyForUsers
+        Write-RootOwnershipMarker -Root $InstallRoot -TransactionId $TransactionId
+        Write-TransactionPhase -Path $JournalPath -Phase 'CreatingDataRoot' -PendingResource $DataRoot -CompletedResource $InstallRoot
         Protect-OwnedDirectory -Path $DataRoot
-        Write-OwnershipManifest -TransactionId $TransactionId
+        Write-RootOwnershipMarker -Root $DataRoot -TransactionId $TransactionId
+        Write-TransactionPhase -Path $JournalPath -Phase 'CopyingPayloads' -CompletedResource $DataRoot
         foreach ($entry in @($Manifest.files)) {
-            $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s')) { $DataRoot } else { $InstallRoot }
-            Copy-PayloadFile -Source $Paths[[string] $entry.name] -Destination (Join-Path $destinationRoot ([string] $entry.name)) -ExpectedHash ([string] $entry.sha256)
+            $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')) { $DataRoot } else { $InstallRoot }
+            $destination = Join-Path $destinationRoot ([string] $entry.name)
+            Write-TransactionPhase -Path $JournalPath -Phase 'CopyingPayloads' -PendingResource $destination
+            Copy-PayloadFile -Source $Paths[[string] $entry.name] -Destination $destination -ExpectedHash ([string] $entry.sha256)
+            Write-TransactionPhase -Path $JournalPath -Phase 'CopyingPayloads' -CompletedResource $destination
         }
+        Write-OwnershipManifest -TransactionId $TransactionId -Manifest $Manifest
+        Write-TransactionPhase -Path $JournalPath -Phase 'CreatingService' -PendingResource $ServiceName
         Ensure-OwnedService
+        Write-TransactionPhase -Path $JournalPath -Phase 'CreatingFirewall' -PendingResource $OwnedFirewallGroup -CompletedResource $ServiceName
         Ensure-OwnedFirewallRules
+        Write-TransactionPhase -Path $JournalPath -Phase 'CreatingShortcut' -PendingResource $ShortcutPath -CompletedResource $OwnedFirewallGroup
         Ensure-OwnedShortcut
-        Start-Service -Name $ServiceName -ErrorAction Stop
+        if (Test-Path -LiteralPath $CredentialPath -PathType Leaf) {
+            Start-Service -Name $ServiceName -ErrorAction Stop
+        }
+        Write-TransactionPhase -Path $JournalPath -Phase 'Completed' -CompletedResource $ShortcutPath
         Remove-Item -LiteralPath $JournalPath -Force
     }
     catch {
@@ -531,28 +753,40 @@ function Repair-ClientTransaction {
         [Parameter(Mandatory = $true)] $Manifest,
         [Parameter(Mandatory = $true)][hashtable] $Paths
     )
-    Request-ControlledDisconnect
-    Assert-NetworkRestored
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($null -ne $service -and $service.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -ErrorAction Stop }
-    Protect-OwnedDirectory -Path $InstallRoot -ReadOnlyForUsers
-    Protect-OwnedDirectory -Path $DataRoot
-    Write-OwnershipManifest -TransactionId $TransactionId
     $changed = $false
-    foreach ($entry in @($Manifest.files)) {
-        $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s')) { $DataRoot } else { $InstallRoot }
-        $destination = Join-Path $destinationRoot ([string] $entry.name)
-        if (-not (Test-Path -LiteralPath $destination) -or (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne ([string] $entry.sha256)) {
-            Copy-PayloadFile -Source $Paths[[string] $entry.name] -Destination $destination -ExpectedHash ([string] $entry.sha256)
-            $changed = $true
+    try {
+        $resume = Resume-ClientTransaction -JournalPath $JournalPath
+        Write-TransactionPhase -Path $JournalPath -Phase 'RepairDisconnect'
+        Request-ControlledDisconnect
+        Assert-NetworkRestored
+        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -ne $service -and $service.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -ErrorAction Stop }
+        Protect-OwnedDirectory -Path $InstallRoot -ReadOnlyForUsers
+        Protect-OwnedDirectory -Path $DataRoot
+        Write-TransactionPhase -Path $JournalPath -Phase 'RepairPayloads'
+        foreach ($entry in @($Manifest.files)) {
+            $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')) { $DataRoot } else { $InstallRoot }
+            $destination = Join-Path $destinationRoot ([string] $entry.name)
+            if (-not (Test-Path -LiteralPath $destination) -or (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne ([string] $entry.sha256)) {
+                Write-TransactionPhase -Path $JournalPath -Phase 'RepairPayloads' -PendingResource $destination
+                Copy-PayloadFile -Source $Paths[[string] $entry.name] -Destination $destination -ExpectedHash ([string] $entry.sha256)
+                Write-TransactionPhase -Path $JournalPath -Phase 'RepairPayloads' -CompletedResource $destination
+                $changed = $true
+            }
         }
+        Write-OwnershipManifest -TransactionId $TransactionId -Manifest $Manifest
+        Ensure-OwnedService
+        Ensure-OwnedFirewallRules
+        Ensure-OwnedShortcut
+        if (Test-Path -LiteralPath $CredentialPath -PathType Leaf) { Start-Service -Name $ServiceName -ErrorAction Stop }
+        Write-TransactionPhase -Path $JournalPath -Phase 'Completed'
+        Remove-Item -LiteralPath $JournalPath -Force
+        return $(if ($changed) { 'Repaired' } else { 'AlreadyCurrent' })
     }
-    Ensure-OwnedService
-    Ensure-OwnedFirewallRules
-    Ensure-OwnedShortcut
-    Start-Service -Name $ServiceName -ErrorAction Stop
-    Remove-Item -LiteralPath $JournalPath -Force
-    return $(if ($changed) { 'Repaired' } else { 'AlreadyCurrent' })
+    catch {
+        Write-TransactionPhase -Path $JournalPath -Phase 'RepairIncomplete'
+        throw
+    }
 }
 
 function Uninstall-ClientTransaction {
@@ -560,19 +794,40 @@ function Uninstall-ClientTransaction {
         [Parameter(Mandatory = $true)][guid] $TransactionId,
         [Parameter(Mandatory = $true)][string] $JournalPath
     )
-    Request-ControlledDisconnect
-    Assert-NetworkRestored
-    Remove-OwnedFirewallRules
-    Remove-OwnedShortcut
-    Remove-OwnedService
-    Remove-OwnedDirectory -Path $InstallRoot
-    Remove-OwnedDirectory -Path $DataRoot
-    Assert-ServiceAbsent
-    Assert-TunAbsent
-    Assert-OwnedRoutesAbsent
-    Assert-DnsRestored
-    Assert-OwnedFirewallAbsent
-    Remove-Item -LiteralPath $JournalPath -Force
+    try {
+        $resume = Resume-ClientTransaction -JournalPath $JournalPath
+        Write-TransactionPhase -Path $JournalPath -Phase 'UninstallDisconnect'
+        Request-ControlledDisconnect
+        Assert-NetworkRestored
+        Write-TransactionPhase -Path $JournalPath -Phase 'UninstallResources'
+        Remove-OwnedFirewallRules
+        Remove-OwnedShortcut
+        Remove-OwnedService
+        foreach ($root in @($InstallRoot, $DataRoot)) {
+            if (Test-Path -LiteralPath $root -PathType Container) {
+                Remove-OwnedPayloadFiles -Root $root
+            }
+        }
+        Assert-ServiceAbsent
+        Assert-TunAbsent
+        Assert-OwnedRoutesAbsent
+        Assert-DnsRestored
+        Assert-OwnedFirewallAbsent
+        if (Test-Path -LiteralPath $ShortcutPath) { throw 'Owned shortcut residue remains.' }
+        Write-TransactionPhase -Path $JournalPath -Phase 'ResidueProven'
+        foreach ($root in @($InstallRoot, $DataRoot)) {
+            if (Test-Path -LiteralPath $root -PathType Container) {
+                Remove-RootOwnershipMarker -Root $root
+                Remove-OwnedDirectory -Path $root -MarkerRemoved
+            }
+        }
+        Write-TransactionPhase -Path $JournalPath -Phase 'Completed'
+        Remove-Item -LiteralPath $JournalPath -Force
+    }
+    catch {
+        Write-TransactionPhase -Path $JournalPath -Phase 'UninstallIncomplete'
+        throw
+    }
 }
 
 function Get-ClientStatus {
@@ -601,14 +856,13 @@ if ($MsiPreRemove) {
 }
 
 if ($Mode -eq 'Uninstall') {
-    if (-not (Test-Path -LiteralPath $OwnerPath -PathType Leaf)) {
-        throw 'Ownership manifest is absent; refusing to report uninstall success.'
-    }
+    $resumePath = Get-ResumableJournal -Operation $Mode
+    Assert-RemoveOwnership -JournalPath $resumePath
     if (-not $PSCmdlet.ShouldProcess($InstallRoot, "Uninstall client; TransactionId=$transactionId")) {
         [ordered] @{ Mode = $Mode; WhatIf = $true; TransactionId = $transactionId.ToString('D') } | ConvertTo-Json -Compress
         return
     }
-    $journalPath = Write-TransactionJournal -TransactionId $transactionId -Operation $Mode
+    $journalPath = if ($null -ne $resumePath) { $resumePath } else { Write-TransactionJournal -TransactionId $transactionId -Operation $Mode }
     Uninstall-ClientTransaction -TransactionId $transactionId -JournalPath $journalPath
     [ordered] @{ Mode = $Mode; Succeeded = $true; TransactionId = $transactionId.ToString('D') } | ConvertTo-Json -Compress
     return
@@ -622,12 +876,21 @@ $manifest = Read-PayloadManifest -Path $PayloadManifestPath
 Assert-NotDowngrade -RequestedVersion ([version] $manifest.product_version)
 $payloadPaths = Assert-PayloadHashes -Root $bundleRoot -Manifest $manifest
 Assert-PayloadSignatures -Manifest $manifest -Paths $payloadPaths
+$resumePath = Get-ResumableJournal -Operation $Mode
+if ($Mode -eq 'Install') {
+    Assert-InstallCollisions -JournalPath $resumePath
+}
+else {
+    foreach ($root in @($InstallRoot, $DataRoot)) {
+        if (-not (Test-ValidRootMarker -Root $root)) { throw "Repair requires a valid ownership marker for '$root'." }
+    }
+}
 
 if (-not $PSCmdlet.ShouldProcess($InstallRoot, "$Mode client; TransactionId=$transactionId")) {
     [ordered] @{ Mode = $Mode; WhatIf = $true; TransactionId = $transactionId.ToString('D'); PreflightVerified = $true } | ConvertTo-Json -Compress
     return
 }
-$journalPath = Write-TransactionJournal -TransactionId $transactionId -Operation $Mode
+$journalPath = if ($null -ne $resumePath) { $resumePath } else { Write-TransactionJournal -TransactionId $transactionId -Operation $Mode }
 if ($Mode -eq 'Install') {
     Install-ClientTransaction -TransactionId $transactionId -JournalPath $journalPath -Manifest $manifest -Paths $payloadPaths
     $result = 'Installed'
