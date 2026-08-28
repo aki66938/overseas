@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
@@ -238,12 +237,15 @@ func writeConfigAtomic(path string, contents []byte) error {
 }
 
 type supervisedCore struct {
-	mu               sync.Mutex
-	current          *supervisor.Process
 	verifyExecutable func(string) error
 }
 
-func (s *supervisedCore) Start(ctx context.Context, executable, config string) agent.ProcessStartResult {
+type supervisedProcessInstance struct {
+	process *supervisor.Process
+	done    chan agent.ProcessTermination
+}
+
+func (s *supervisedCore) Start(ctx context.Context, executable, config string) (agent.ProcessInstance, agent.ProcessStartResult) {
 	process := &supervisor.Process{
 		ReadyTimeout:     10 * time.Second,
 		StopTimeout:      3 * time.Second,
@@ -251,48 +253,29 @@ func (s *supervisedCore) Start(ctx context.Context, executable, config string) a
 		MaxLogBytes:      64 * 1024,
 		VerifyExecutable: s.verifyExecutable,
 	}
-	s.mu.Lock()
-	s.current = process
-	s.mu.Unlock()
+	instance := &supervisedProcessInstance{process: process, done: make(chan agent.ProcessTermination, 1)}
 	// supervisor.Process invokes VerifyExecutable inside its suspended-launch
 	// boundary immediately before CreateProcess.
 	if err := process.Start(ctx, executable, config); err != nil {
-		return agent.ProcessStartResult{Err: err, TerminationProven: process.TerminationProven()}
+		return instance, agent.ProcessStartResult{Err: err, TerminationProven: process.TerminationProven()}
 	}
-	return agent.ProcessStartResult{}
+	go func() {
+		err := process.Wait()
+		instance.done <- agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
+	}()
+	return instance, agent.ProcessStartResult{}
 }
 
-func (s *supervisedCore) Ready(ctx context.Context) error {
-	process := s.process()
-	if process == nil {
-		return supervisor.ErrNotStarted
-	}
-	return process.Ready(ctx)
+func (s *supervisedProcessInstance) Ready(ctx context.Context) error {
+	return s.process.Ready(ctx)
 }
 
-func (s *supervisedCore) Stop(ctx context.Context) agent.ProcessTermination {
-	process := s.process()
-	if process == nil {
-		return agent.ProcessTermination{Proven: true}
-	}
-	err := process.Stop(ctx)
-	return agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
+func (s *supervisedProcessInstance) Stop(ctx context.Context) agent.ProcessTermination {
+	err := s.process.Stop(ctx)
+	return agent.ProcessTermination{Err: err, Proven: s.process.TerminationProven()}
 }
 
-func (s *supervisedCore) Wait() agent.ProcessTermination {
-	process := s.process()
-	if process == nil {
-		return agent.ProcessTermination{Err: supervisor.ErrNotStarted, Proven: true}
-	}
-	err := process.Wait()
-	return agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
-}
-
-func (s *supervisedCore) process() *supervisor.Process {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.current
-}
+func (s *supervisedProcessInstance) Done() <-chan agent.ProcessTermination { return s.done }
 
 func clear(data []byte) {
 	for index := range data {

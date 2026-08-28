@@ -51,12 +51,11 @@ type Credential struct {
 // reconcile residue after a service restart.
 type NetworkManager interface {
 	Capture(context.Context) (any, error)
-	InstallPublicTCPBlock(context.Context) error
+	InstallPublicTCPBlock(context.Context) (<-chan error, error)
 	WaitTUNReady(context.Context) error
 	ActivateTUNRoutes(context.Context) error
 	Restore(context.Context, any) error
 	Reconcile(context.Context) error
-	Failures() <-chan error
 }
 
 // ProcessStartResult distinguishes a failure before/after native creation.
@@ -73,13 +72,19 @@ type ProcessTermination struct {
 	Proven bool
 }
 
-// ProcessSupervisor is a reusable facade. A production implementation may
-// allocate a fresh single-use supervisor.Process for every Start call.
-type ProcessSupervisor interface {
-	Start(context.Context, string, string) ProcessStartResult
+// ProcessInstance is immutable generation-owned state. Done must belong only
+// to this native process tree and deliver exactly one terminal result.
+type ProcessInstance interface {
 	Ready(context.Context) error
 	Stop(context.Context) ProcessTermination
-	Wait() ProcessTermination
+	Done() <-chan ProcessTermination
+}
+
+// ProcessSupervisor allocates a fresh single-use instance for every Start.
+// It returns the instance even when a post-creation cleanup error occurred so
+// the controller can retry termination without permitting another launch.
+type ProcessSupervisor interface {
+	Start(context.Context, string, string) (ProcessInstance, ProcessStartResult)
 }
 
 // Dependencies are explicit so tests never need to touch the filesystem,
@@ -113,14 +118,17 @@ type Controller struct {
 	process ProcessSupervisor
 	deps    Dependencies
 
-	mu             sync.Mutex
-	status         Status
-	generation     uint64
-	transition     *transition
-	snapshot       any
-	hasSnapshot    bool
-	processStarted bool
-	reconciled     bool
+	mu              sync.Mutex
+	status          Status
+	generation      uint64
+	transition      *transition
+	snapshot        any
+	hasSnapshot     bool
+	processStarted  bool
+	processInstance ProcessInstance
+	monitorCancel   context.CancelFunc
+	monitorDone     chan struct{}
+	reconciled      bool
 }
 
 func NewController(policy accessmodel.Policy, network NetworkManager, process ProcessSupervisor, options ...Option) *Controller {
@@ -175,20 +183,30 @@ func (c *Controller) Connect(ctx context.Context) Status {
 		c.status = Status{State: accessmodel.StateConnecting, Message: "正在建立安全连接"}
 		c.mu.Unlock()
 
-		status, started := c.runConnect(operationContext)
+		status, instance, failures, started := c.runConnect(operationContext)
 		cancel()
 
 		c.mu.Lock()
 		if c.generation == generation {
 			c.status = status
 			c.processStarted = started
+			c.processInstance = instance
+		}
+		connected := status.State == accessmodel.StateConnected && c.generation == generation
+		var monitorContext context.Context
+		var monitorDone chan struct{}
+		if connected {
+			var monitorCancel context.CancelFunc
+			monitorContext, monitorCancel = context.WithCancel(context.Background())
+			monitorDone = make(chan struct{})
+			c.monitorCancel = monitorCancel
+			c.monitorDone = monitorDone
 		}
 		c.transition = nil
 		close(active.done)
-		connected := status.State == accessmodel.StateConnected && c.generation == generation
 		c.mu.Unlock()
 		if connected {
-			go c.monitorLifecycle(generation)
+			go c.monitorLifecycle(monitorContext, generation, instance, failures, monitorDone)
 		}
 		return status
 	}
@@ -241,6 +259,7 @@ func (c *Controller) disconnect(ctx context.Context, recovery bool) Status {
 				c.snapshot = nil
 				c.hasSnapshot = false
 				c.processStarted = false
+				c.processInstance = nil
 				c.reconciled = true
 			}
 		}
@@ -268,38 +287,39 @@ func (c *Controller) Diagnostics() Diagnostics {
 	}
 }
 
-func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
+func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <-chan error, bool) {
 	if err := contextError(ctx); err != nil {
-		return failure(ErrorCanceled), false
+		return failure(ErrorCanceled), nil, nil, false
 	}
 	c.mu.Lock()
 	processMayStillBeRunning := c.processStarted
+	previousInstance := c.processInstance
 	c.mu.Unlock()
 	if processMayStillBeRunning {
-		return failure(ErrorRestoreFailed), true
+		return failure(ErrorRestoreFailed), previousInstance, nil, true
 	}
 	if err := c.deps.ValidatePolicy(c.policy); err != nil {
-		return failure(ErrorInvalidPolicy), false
+		return failure(ErrorInvalidPolicy), nil, nil, false
 	}
 	if c.deps.VerifyExecutable == nil || c.deps.ExecutablePath == "" {
-		return failure(ErrorInvalidBinary), false
+		return failure(ErrorInvalidBinary), nil, nil, false
 	}
 	if err := c.deps.VerifyExecutable(c.deps.ExecutablePath); err != nil {
-		return failure(ErrorInvalidBinary), false
+		return failure(ErrorInvalidBinary), nil, nil, false
 	}
 	if c.deps.LoadCredential == nil {
-		return failure(ErrorCredential), false
+		return failure(ErrorCredential), nil, nil, false
 	}
 	credential, err := c.deps.LoadCredential(ctx, c.policy.Credential)
 	if err != nil {
-		return failure(ErrorCredential), false
+		return failure(ErrorCredential), nil, nil, false
 	}
 	defer clearBytes(credential.Password)
 	if credential.ExpiresAt.IsZero() || !credential.ExpiresAt.After(c.deps.Now()) {
-		return failure(ErrorExpiredCredential), false
+		return failure(ErrorExpiredCredential), nil, nil, false
 	}
 	if err := contextError(ctx); err != nil {
-		return failure(ErrorCanceled), false
+		return failure(ErrorCanceled), nil, nil, false
 	}
 
 	c.mu.Lock()
@@ -307,74 +327,80 @@ func (c *Controller) runConnect(ctx context.Context) (Status, bool) {
 	c.mu.Unlock()
 	if !hasSnapshot {
 		if c.network == nil {
-			return failure(ErrorNetworkCapture), false
+			return failure(ErrorNetworkCapture), nil, nil, false
 		}
 		snapshot, err := c.network.Capture(ctx)
 		if err != nil {
-			return failure(ErrorNetworkCapture), false
+			return failure(ErrorNetworkCapture), nil, nil, false
 		}
 		c.mu.Lock()
 		c.snapshot = snapshot
 		c.hasSnapshot = true
 		c.mu.Unlock()
 	}
-	if err := c.network.InstallPublicTCPBlock(ctx); err != nil {
-		return failure(ErrorPublicTCPBlock), false
+	failures, err := c.network.InstallPublicTCPBlock(ctx)
+	if err != nil {
+		return failure(ErrorPublicTCPBlock), nil, nil, false
 	}
 	if c.deps.RenderConfig == nil || c.deps.WriteConfigAtomic == nil || c.deps.ConfigPath == "" {
-		return failure(ErrorRender), false
+		return failure(ErrorRender), nil, failures, false
 	}
 	config, err := c.deps.RenderConfig(c.policy, credential)
 	if err != nil {
-		return failure(ErrorRender), false
+		return failure(ErrorRender), nil, failures, false
 	}
 	defer clearBytes(config)
 	if err := c.deps.WriteConfigAtomic(c.deps.ConfigPath, config); err != nil {
-		return failure(ErrorRender), false
+		return failure(ErrorRender), nil, failures, false
 	}
 	if err := contextError(ctx); err != nil {
-		return failure(ErrorCanceled), false
+		return failure(ErrorCanceled), nil, failures, false
 	}
 	if c.process == nil {
-		return failure(ErrorCoreStart), false
+		return failure(ErrorCoreStart), nil, failures, false
 	}
 	// Start owns the core lifetime until Disconnect. The transition deadline
 	// still bounds Ready below, but must not terminate a successfully connected
 	// core when the connect operation itself returns.
-	startResult := c.process.Start(context.WithoutCancel(ctx), c.deps.ExecutablePath, c.deps.ConfigPath)
+	instance, startResult := c.process.Start(context.WithoutCancel(ctx), c.deps.ExecutablePath, c.deps.ConfigPath)
 	if startResult.Err != nil {
-		return failure(ErrorCoreStart), !startResult.TerminationProven
+		return failure(ErrorCoreStart), instance, failures, !startResult.TerminationProven
+	}
+	if instance == nil {
+		return failure(ErrorCoreStart), nil, failures, false
 	}
 	started := true
-	if err := c.process.Ready(ctx); err != nil {
-		return failure(codeForContext(ctx, ErrorCoreNotReady)), c.stopCouldNotBeProven()
+	if err := instance.Ready(ctx); err != nil {
+		unproven := !instance.Stop(context.Background()).Proven
+		return failure(codeForContext(ctx, ErrorCoreNotReady)), instance, failures, unproven
 	}
 	if err := c.network.WaitTUNReady(ctx); err != nil {
-		return failure(codeForContext(ctx, ErrorCoreNotReady)), c.stopCouldNotBeProven()
+		unproven := !instance.Stop(context.Background()).Proven
+		return failure(codeForContext(ctx, ErrorCoreNotReady)), instance, failures, unproven
 	}
 	if err := contextError(ctx); err != nil {
-		return failure(ErrorCanceled), c.stopCouldNotBeProven()
+		unproven := !instance.Stop(context.Background()).Proven
+		return failure(ErrorCanceled), instance, failures, unproven
 	}
 	if err := c.network.ActivateTUNRoutes(ctx); err != nil {
-		return failure(ErrorRouteActivationFailed), c.stopCouldNotBeProven()
+		unproven := !instance.Stop(context.Background()).Proven
+		return failure(ErrorRouteActivationFailed), instance, failures, unproven
 	}
-	return Status{State: accessmodel.StateConnected, Message: "海外访问已连接"}, started
-}
-
-func (c *Controller) stopCouldNotBeProven() bool {
-	return !c.process.Stop(context.Background()).Proven
+	return Status{State: accessmodel.StateConnected, Message: "海外访问已连接"}, instance, failures, started
 }
 
 func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	c.mu.Lock()
 	started := c.processStarted
+	instance := c.processInstance
 	hasSnapshot := c.hasSnapshot
 	snapshot := c.snapshot
 	reconciled := c.reconciled
 	c.mu.Unlock()
+	c.stopLifecycleMonitor()
 
-	if started && c.process != nil {
-		termination := c.process.Stop(ctx)
+	if started && instance != nil {
+		termination := instance.Stop(ctx)
 		if !termination.Proven {
 			// Restoring routes, DNS, or the leak block is unsafe until the whole
 			// supervised process tree is proven terminated.
@@ -393,18 +419,28 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	return Status{State: accessmodel.StateDisconnected, Message: "海外访问已关闭"}, true
 }
 
-func (c *Controller) monitorLifecycle(generation uint64) {
-	processDone := make(chan ProcessTermination, 1)
-	go func() { processDone <- c.process.Wait() }()
-	var failures <-chan error
-	if c.network != nil {
-		failures = c.network.Failures()
+func (c *Controller) stopLifecycleMonitor() {
+	c.mu.Lock()
+	cancel, done := c.monitorCancel, c.monitorDone
+	c.monitorCancel, c.monitorDone = nil, nil
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *Controller) monitorLifecycle(ctx context.Context, generation uint64, instance ProcessInstance, failures <-chan error, done chan struct{}) {
+	defer close(done)
 	var termination ProcessTermination
 	select {
-	case termination = <-processDone:
+	case termination = <-instance.Done():
 	case <-failures:
-		termination = c.process.Stop(context.Background())
+		termination = instance.Stop(context.Background())
+	case <-ctx.Done():
+		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

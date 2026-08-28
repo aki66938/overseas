@@ -370,6 +370,46 @@ func TestControllerDisconnectRaceWithUnexpectedExitHasOneTerminalOwner(t *testin
 	}
 }
 
+func TestControllerDelayedGenerationACannotConsumeGenerationBTermination(t *testing.T) {
+	network := newFakeNetwork()
+	a := newFakeProcess()
+	a.stopSignalsDone = false
+	b := newFakeProcess()
+	factory := &queuedProcessSupervisor{instances: []*fakeProcess{a, b}}
+	controller := NewController(validPolicy(), network, factory, WithDependencies(testDependencies(nil)))
+
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect(A) = %#v", got)
+	}
+	oldFailures := network.failures
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateDisconnected {
+		t.Fatalf("Disconnect(A) = %#v", got)
+	}
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect(B) = %#v", got)
+	}
+
+	// A's terminal channel is generation-owned. A delayed duplicate event may
+	// never be observed by B's monitor, nor may A's canceled monitor observe B.
+	oldFailures <- errors.New("delayed generation A protection event")
+	a.tryExit(errors.New("delayed generation A process event"))
+	time.Sleep(10 * time.Millisecond)
+	if got := controller.Status(); got.State != accessmodel.StateConnected {
+		t.Fatalf("delayed generation A event changed B: %#v", got)
+	}
+	b.mu.Lock()
+	bStops := b.stopCalls
+	b.mu.Unlock()
+	if bStops != 0 {
+		t.Fatalf("delayed generation A event stopped B %d times", bStops)
+	}
+	b.exit(errors.New("generation B exited"))
+	waitForState(t, controller, accessmodel.StateFailed)
+	if got := controller.Status(); got.ErrorCode != ErrorReadinessLost {
+		t.Fatalf("Status(B) = %#v", got)
+	}
+}
+
 func TestControllerTUNIdentityFailureRemainsFailClosed(t *testing.T) {
 	network := newFakeNetwork()
 	network.readyErr = errors.New("new TUN identity was not proven")
@@ -517,16 +557,17 @@ func (f *fakeNetwork) Capture(context.Context) (any, error) {
 	return "original", nil
 }
 
-func (f *fakeNetwork) InstallPublicTCPBlock(context.Context) error {
+func (f *fakeNetwork) InstallPublicTCPBlock(context.Context) (<-chan error, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.failures = make(chan error, 1)
 	f.blockCalls++
 	f.blocked = true
 	f.log = append(f.log, "block")
 	if f.trace != nil {
 		f.trace.record("block")
 	}
-	return nil
+	return f.failures, nil
 }
 
 func (f *fakeNetwork) ActivateTUNRoutes(context.Context) error {
@@ -548,8 +589,6 @@ func (f *fakeNetwork) WaitTUNReady(context.Context) error {
 	defer f.mu.Unlock()
 	return f.readyErr
 }
-
-func (f *fakeNetwork) Failures() <-chan error { return f.failures }
 
 func (f *fakeNetwork) Restore(_ context.Context, _ any) error {
 	f.mu.Lock()
@@ -584,31 +623,31 @@ func (f *fakeNetwork) isBlocked() bool { f.mu.Lock(); defer f.mu.Unlock(); retur
 func (f *fakeNetwork) isActive() bool  { f.mu.Lock(); defer f.mu.Unlock(); return f.active }
 
 type fakeProcess struct {
-	mu           sync.Mutex
-	startErr     error
-	readyErr     error
-	stopErr      error
-	startProven  bool
-	stopProven   bool
-	waitProven   bool
-	readyGate    chan struct{}
-	started      chan struct{}
-	startOnce    sync.Once
-	waitDone     chan struct{}
-	waitErr      error
-	exitOnce     sync.Once
-	startCalls   int
-	stopCalls    int
-	log          []string
-	trace        *callTrace
-	startContext context.Context
+	mu              sync.Mutex
+	startErr        error
+	readyErr        error
+	stopErr         error
+	startProven     bool
+	stopProven      bool
+	waitProven      bool
+	readyGate       chan struct{}
+	started         chan struct{}
+	startOnce       sync.Once
+	done            chan ProcessTermination
+	exitOnce        sync.Once
+	startCalls      int
+	stopCalls       int
+	stopSignalsDone bool
+	log             []string
+	trace           *callTrace
+	startContext    context.Context
 }
 
 func newFakeProcess() *fakeProcess {
-	return &fakeProcess{started: make(chan struct{}), waitDone: make(chan struct{}), startProven: true, stopProven: true, waitProven: true}
+	return &fakeProcess{started: make(chan struct{}), done: make(chan ProcessTermination, 1), startProven: true, stopProven: true, waitProven: true, stopSignalsDone: true}
 }
 
-func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) ProcessStartResult {
+func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) (ProcessInstance, ProcessStartResult) {
 	f.mu.Lock()
 	f.startCalls++
 	f.startContext = ctx
@@ -619,7 +658,7 @@ func (f *fakeProcess) Start(ctx context.Context, _ string, _ string) ProcessStar
 	err := f.startErr
 	f.mu.Unlock()
 	f.startOnce.Do(func() { close(f.started) })
-	return ProcessStartResult{Err: err, TerminationProven: f.startProven}
+	return f, ProcessStartResult{Err: err, TerminationProven: f.startProven}
 }
 
 func (f *fakeProcess) Ready(ctx context.Context) error {
@@ -649,24 +688,40 @@ func (f *fakeProcess) Stop(context.Context) ProcessTermination {
 	}
 	err := f.stopErr
 	f.mu.Unlock()
-	f.exit(nil)
+	if f.stopSignalsDone {
+		f.exit(nil)
+	}
 	return ProcessTermination{Err: err, Proven: f.stopProven}
 }
 
-func (f *fakeProcess) Wait() ProcessTermination {
-	<-f.waitDone
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return ProcessTermination{Err: f.waitErr, Proven: f.waitProven}
-}
+func (f *fakeProcess) Done() <-chan ProcessTermination { return f.done }
 
 func (f *fakeProcess) exit(err error) {
 	f.exitOnce.Do(func() {
 		f.mu.Lock()
-		f.waitErr = err
+		termination := ProcessTermination{Err: err, Proven: f.waitProven}
 		f.mu.Unlock()
-		close(f.waitDone)
+		f.done <- termination
 	})
+}
+
+func (f *fakeProcess) tryExit(err error) { f.exit(err) }
+
+type queuedProcessSupervisor struct {
+	mu        sync.Mutex
+	instances []*fakeProcess
+}
+
+func (f *queuedProcessSupervisor) Start(ctx context.Context, executable, config string) (ProcessInstance, ProcessStartResult) {
+	f.mu.Lock()
+	if len(f.instances) == 0 {
+		f.mu.Unlock()
+		return nil, ProcessStartResult{Err: errors.New("no queued process"), TerminationProven: true}
+	}
+	instance := f.instances[0]
+	f.instances = f.instances[1:]
+	f.mu.Unlock()
+	return instance.Start(ctx, executable, config)
 }
 
 func (f *fakeProcess) waitForStart(t *testing.T) {

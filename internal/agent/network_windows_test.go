@@ -28,7 +28,8 @@ func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+	_, err = manager.InstallPublicTCPBlock(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Restore(context.Background(), snapshot) })
@@ -36,7 +37,7 @@ func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 	if snapshot == nil || !store.exists {
 		t.Fatal("captured network state was not persisted")
 	}
-	if got, want := trace.calls(), []string{"capture", "save", "scan", "block"}; !equalStrings(got, want) {
+	if got, want := trace.calls(), []string{"capture", "save", "guard", "scan", "block"}; !equalStrings(got, want) {
 		t.Fatalf("call order = %v, want %v", got, want)
 	}
 	block := runner.inputFor(t, networkOperationBlock)
@@ -70,12 +71,10 @@ func TestWindowsNetworkActivateUsesFixedTUNRoutesAndDNS(t *testing.T) {
 	if input.TUNInterface != windowsTUNInterface || input.TUNDNS != windowsTUNDNS {
 		t.Fatalf("TUN input = interface %q DNS %q", input.TUNInterface, input.TUNDNS)
 	}
-	if !equalStrings(input.TUNRoutePrefixes, []string{"0.0.0.0/1", "128.0.0.0/1"}) {
-		t.Fatalf("TUN routes = %v", input.TUNRoutePrefixes)
-	}
-	if input.OwnedTUN == nil || input.OwnedTUN.InterfaceGuid != "new-tun-guid" || len(input.OwnedRoutes) != 2 {
+	if input.OwnedTUN == nil || input.OwnedTUN.InterfaceGuid != "new-tun-guid" || len(input.OwnedRoutes) == 0 {
 		t.Fatalf("owned TUN activation input = %#v", input)
 	}
+	assertOwnedRouteCovers(t, input.OwnedRoutes, netip.MustParseAddr("8.8.8.8"), windowsOwnedRouteMetric, validTUNIdentity().InterfaceIndex)
 }
 
 func TestWindowsNetworkRestoreDeletesSnapshotOnlyAfterSuccess(t *testing.T) {
@@ -163,6 +162,178 @@ func TestWindowsNetworkBlocksPublicIPv6AndRetainsLocalIPv6(t *testing.T) {
 	assertAddressCovered(t, manager.blockedPrefixes, netip.MustParseAddr("fd00::1"), false)
 }
 
+func TestWindowsNetworkInstallsPersistentGuardBeforeAdapterFirewall(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), store.snapshot) })
+
+	guard := runner.inputFor(t, networkOperationGuard)
+	if len(guard.GuardRoutes) == 0 {
+		t.Fatal("persistent public route guard was not installed")
+	}
+	assertOwnedRouteCovers(t, guard.GuardRoutes, netip.MustParseAddr("8.8.8.8"), windowsGuardRouteMetric, 1)
+	assertOwnedRouteCovers(t, guard.GuardRoutes, netip.MustParseAddr("2001:4860:4860::8888"), windowsGuardRouteMetric, 1)
+	if firstIndex(runner.operations, networkOperationGuard) > firstIndex(runner.operations, networkOperationBlock) {
+		t.Fatalf("guard was installed after adapter firewall: %v", runner.operations)
+	}
+	if len(store.snapshot.GuardRoutes) != len(guard.GuardRoutes) {
+		t.Fatalf("guard routes were not persisted before mutation: snapshot=%d guard=%d", len(store.snapshot.GuardRoutes), len(guard.GuardRoutes))
+	}
+}
+
+func TestWindowsNetworkGuardBeatsNewDefaultAndRASForUnconstrainedLookupWithoutReconciliation(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), validWindowsSnapshot()) })
+
+	// No scan/reconciliation is performed after these ordinary new /0 paths
+	// appear. For an unconstrained lookup, longest-prefix routing must select
+	// the owned sink guard. This does not model Windows strong-host source-bound
+	// lookup, which is an explicitly documented integration boundary.
+	guard := runner.inputFor(t, networkOperationGuard).GuardRoutes
+	for _, address := range []string{"8.8.8.8", "2001:4860:4860::8888"} {
+		matched := mostSpecificOwnedRoute(guard, netip.MustParseAddr(address))
+		if matched == nil || netip.MustParsePrefix(matched.DestinationPrefix).Bits() == 0 {
+			t.Fatalf("new default/RAS route can beat guard for %s: %#v", address, matched)
+		}
+	}
+	if got := runner.count(networkOperationScan); got != 1 {
+		t.Fatalf("test unexpectedly relied on reconciliation: scans=%d", got)
+	}
+}
+
+func TestWindowsNetworkHealthyTUNRoutesBeatGuardAtSamePrefixes(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WaitTUNReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ActivateTUNRoutes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Restore(context.Background(), validWindowsSnapshot()) })
+
+	guard := runner.inputFor(t, networkOperationGuard).GuardRoutes
+	active := runner.inputFor(t, networkOperationActivate).OwnedRoutes
+	for _, sink := range guard {
+		prefix := netip.MustParsePrefix(sink.DestinationPrefix)
+		if !prefix.Addr().Is4() {
+			continue
+		}
+		found := false
+		for _, route := range active {
+			if route.DestinationPrefix == sink.DestinationPrefix && route.InterfaceIndex == validTUNIdentity().InterfaceIndex && route.RouteMetric < sink.RouteMetric {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no strictly preferred TUN route for guard %#v", sink)
+		}
+	}
+}
+
+func TestWindowsNetworkRestoreFailureRearmsEmergencyAndMonitor(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), runErrors: map[string][]error{networkOperationRestore: {errors.New("partial firewall removal")}}}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	snapshot, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), snapshot); err == nil {
+		t.Fatal("Restore() succeeded after partial removal")
+	}
+	if !store.exists || runner.count(networkOperationEmergency) == 0 {
+		t.Fatalf("failed restore did not retain snapshot/emergency: exists=%v emergency=%d", store.exists, runner.count(networkOperationEmergency))
+	}
+	if !strings.Contains(restoreNetworkPowerShell, "catch") || !strings.Contains(restoreNetworkPowerShell, "Install-Emergency") {
+		t.Fatal("restore script cannot re-arm emergency protection inside a partial-removal failure")
+	}
+	want := runner.count(networkOperationEmergency) + 1
+	waitForNetworkOperationCount(t, runner, networkOperationEmergency, want)
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatalf("retry Restore() = %v", err)
+	}
+}
+
+func TestWindowsNetworkReconcileFailureRearmsEmergencyAndMonitor(t *testing.T) {
+	runner := &fakeNetworkRunner{runErrors: map[string][]error{networkOperationRestore: {errors.New("restore failed")}}}
+	store := &fakeSnapshotStore{exists: true, snapshot: validWindowsSnapshot()}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	if err := manager.Reconcile(context.Background()); err == nil {
+		t.Fatal("Reconcile() succeeded after restore failure")
+	}
+	if !store.exists || runner.count(networkOperationEmergency) == 0 {
+		t.Fatalf("failed reconcile did not retain snapshot/emergency: exists=%v emergency=%d", store.exists, runner.count(networkOperationEmergency))
+	}
+	want := runner.count(networkOperationEmergency) + 1
+	waitForNetworkOperationCount(t, runner, networkOperationEmergency, want)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatalf("retry Reconcile() = %v", err)
+	}
+}
+
+func TestWindowsNetworkReconcileValidationFailureRearmsEmergencyAndMonitor(t *testing.T) {
+	corrupt := validWindowsSnapshot()
+	corrupt.Version = 0
+	runner := &fakeNetworkRunner{}
+	store := &fakeSnapshotStore{exists: true, snapshot: corrupt}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	if err := manager.Reconcile(context.Background()); err == nil {
+		t.Fatal("Reconcile() accepted corrupt persisted state")
+	}
+	if !store.exists || runner.count(networkOperationEmergency) == 0 {
+		t.Fatalf("validation failure did not retain snapshot/emergency: exists=%v emergency=%d", store.exists, runner.count(networkOperationEmergency))
+	}
+	want := runner.count(networkOperationEmergency) + 1
+	waitForNetworkOperationCount(t, runner, networkOperationEmergency, want)
+	manager.stopProtection()
+}
+
 func TestWindowsNetworkProtectionCoversRASAndHotPluggedAdaptersByIdentity(t *testing.T) {
 	runner := &fakeNetworkRunner{
 		capture: validWindowsSnapshot(),
@@ -182,7 +353,7 @@ func TestWindowsNetworkProtectionCoversRASAndHotPluggedAdaptersByIdentity(t *tes
 	if _, err := manager.Capture(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Restore(context.Background(), validWindowsSnapshot()) })
@@ -222,7 +393,7 @@ func TestWindowsNetworkProtectionExplicitlyExcludesOnlyOwnedTUNIdentity(t *testi
 	if _, err := manager.Capture(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
@@ -267,7 +438,7 @@ func TestWindowsNetworkReconciliationFailureInstallsCatchAllEmergencyBlock(t *te
 		t.Fatal(err)
 	}
 
-	if err := manager.InstallPublicTCPBlock(context.Background()); err == nil {
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err == nil {
 		t.Fatal("InstallPublicTCPBlock() succeeded after adapter reconciliation failure")
 	}
 	if got := runner.count(networkOperationEmergency); got != 1 {
@@ -295,7 +466,8 @@ func TestWindowsNetworkRestoreCancellationDoesNotLeakStaleMonitorFailure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+	failures, err := manager.InstallPublicTCPBlock(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -307,7 +479,7 @@ func TestWindowsNetworkRestoreCancellationDoesNotLeakStaleMonitorFailure(t *test
 		t.Fatal(err)
 	}
 	select {
-	case err := <-manager.Failures():
+	case err := <-failures:
 		t.Fatalf("normal monitor cancellation leaked failure: %v", err)
 	default:
 	}
@@ -323,13 +495,27 @@ func TestWindowsNetworkNewProtectionGenerationDropsOldFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.failures <- errors.New("previous protection generation")
-	if err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+	oldFailures, err := manager.InstallPublicTCPBlock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures, err := manager.InstallPublicTCPBlock(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Restore(context.Background(), snapshot) })
+	if oldFailures == failures {
+		t.Fatal("protection generations reused one terminal channel")
+	}
 	select {
-	case err := <-manager.Failures():
+	case err := <-failures:
 		t.Fatalf("new protection generation retained old failure: %v", err)
 	default:
 	}
@@ -399,8 +585,8 @@ func TestWindowsNetworkRestoreCarriesFullOwnedRouteTuples(t *testing.T) {
 	}
 
 	input := runner.inputFor(t, networkOperationRestore)
-	if len(input.OwnedRoutes) != 3 {
-		t.Fatalf("owned routes = %#v", input.OwnedRoutes)
+	if len(input.OwnedRoutes) < 2 || len(input.GuardRoutes) == 0 {
+		t.Fatalf("owned/guard routes were not carried: owned=%d guard=%d", len(input.OwnedRoutes), len(input.GuardRoutes))
 	}
 	for _, route := range input.OwnedRoutes {
 		if route.DestinationPrefix == "" || route.InterfaceIndex <= 0 || route.NextHop == "" {
@@ -489,6 +675,7 @@ func validWindowsSnapshot() WindowsNetworkSnapshot {
 			DNSServers:      []string{"172.20.9.1", "172.20.9.2"},
 		}},
 		RouteMetric:          windowsOwnedRouteMetric,
+		GuardInterfaceIndex:  1,
 		BaselineAdapterGuids: []string{"baseline-guid"},
 		NodeRoutes: []WindowsNodeRouteSnapshot{{
 			NodeAddress: "172.20.9.15", DestinationPrefix: "172.20.8.0/22", InterfaceIndex: 7,
@@ -521,6 +708,40 @@ func assertAddressCovered(t *testing.T, prefixes []string, address netip.Addr, w
 	if covered != want {
 		t.Fatalf("address %s covered = %v, want %v (prefixes=%v)", address, covered, want, prefixes)
 	}
+}
+
+func assertOwnedRouteCovers(t *testing.T, routes []WindowsOwnedRoute, address netip.Addr, metric, interfaceIndex int) {
+	t.Helper()
+	for _, route := range routes {
+		prefix, err := netip.ParsePrefix(route.DestinationPrefix)
+		if err == nil && prefix.Contains(address) && route.RouteMetric == metric && route.InterfaceIndex == interfaceIndex {
+			return
+		}
+	}
+	t.Fatalf("no owned route covers %s with metric=%d interface=%d: %#v", address, metric, interfaceIndex, routes)
+}
+
+func mostSpecificOwnedRoute(routes []WindowsOwnedRoute, address netip.Addr) *WindowsOwnedRoute {
+	var best *WindowsOwnedRoute
+	for index := range routes {
+		prefix, err := netip.ParsePrefix(routes[index].DestinationPrefix)
+		if err != nil || !prefix.Contains(address) {
+			continue
+		}
+		if best == nil || prefix.Bits() > netip.MustParsePrefix(best.DestinationPrefix).Bits() {
+			best = &routes[index]
+		}
+	}
+	return best
+}
+
+func firstIndex(values []string, target string) int {
+	for index, value := range values {
+		if value == target {
+			return index
+		}
+	}
+	return len(values)
 }
 
 type fakeNetworkRunner struct {

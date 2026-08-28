@@ -28,6 +28,7 @@ const (
 	networkOperationCapture   = "capture"
 	networkOperationScan      = "scan"
 	networkOperationBlock     = "block"
+	networkOperationGuard     = "guard"
 	networkOperationEmergency = "emergency"
 	networkOperationReady     = "ready"
 	networkOperationActivate  = "activate"
@@ -44,6 +45,7 @@ const (
 	windowsEmergencyBlockRule = "RegenBioOverseasAccess.BlockPublicEmergency"
 	windowsFirewallGroup      = "RegenBioOverseasAccess.Managed"
 	windowsOwnedRouteMetric   = 4096
+	windowsGuardRouteMetric   = 8192
 )
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
@@ -69,6 +71,7 @@ type WindowsNodeRouteSnapshot struct {
 }
 
 type WindowsOwnedRoute struct {
+	AddressFamily     string `json:"AddressFamily"`
 	DestinationPrefix string `json:"DestinationPrefix"`
 	InterfaceIndex    int    `json:"InterfaceIndex"`
 	NextHop           string `json:"NextHop"`
@@ -103,6 +106,10 @@ type WindowsNetworkSnapshot struct {
 	NodeRoutes                []WindowsNodeRouteSnapshot `json:"NodeRoutes"`
 	OwnedTUN                  *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
 	OwnedRoutes               []WindowsOwnedRoute        `json:"OwnedRoutes"`
+	GuardRoutes               []WindowsOwnedRoute        `json:"GuardRoutes"`
+	GuardInterfaceIndex       int                        `json:"GuardInterfaceIndex"`
+	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses"`
+	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses"`
 	RouteMetric               int                        `json:"RouteMetric"`
 }
 
@@ -122,6 +129,7 @@ type windowsNetworkInput struct {
 	BaselineAdapterGuids      []string                   `json:"BaselineAdapterGuids,omitempty"`
 	OwnedTUN                  *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
 	OwnedRoutes               []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
+	GuardRoutes               []WindowsOwnedRoute        `json:"GuardRoutes,omitempty"`
 }
 
 type networkRunner interface {
@@ -148,7 +156,6 @@ type WindowsNetworkManager struct {
 	protectionInterval time.Duration
 	protectionCancel   context.CancelFunc
 	protectionDone     chan struct{}
-	failures           chan error
 }
 
 func NewWindowsNetworkManager(policy accessmodel.Policy, statePath string) (*WindowsNetworkManager, error) {
@@ -206,7 +213,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 	for _, value := range policy.CorporateDNS {
 		dnsExcluded4 = append(dnsExcluded4, netip.PrefixFrom(netip.MustParseAddr(value), 32))
 	}
-	dnsBlocked := append(complementIPv4Prefixes(dnsExcluded4), complementIPv6Prefixes(nil)...)
+	dnsBlocked := append(complementIPv4Prefixes(dnsExcluded4), complementIPv6From(netip.MustParsePrefix("::/0"), nil)...)
 	return &WindowsNetworkManager{
 		policy:             clonePolicy(policy),
 		statePath:          statePath,
@@ -216,7 +223,6 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		blockedPrefixes:    blocked,
 		dnsBlockedPrefixes: dnsBlocked,
 		protectionInterval: 250 * time.Millisecond,
-		failures:           make(chan error, 1),
 	}, nil
 }
 
@@ -239,6 +245,13 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 		TUNAddress:        windowsTUNAddress,
 		NodeAddresses:     append([]string(nil), m.nodeAddresses...),
 	}
+	for _, prefix := range m.blockedPrefixes {
+		family, nextHop := "IPv6", "::"
+		if netip.MustParsePrefix(prefix).Addr().Is4() {
+			family, nextHop = "IPv4", "0.0.0.0"
+		}
+		input.GuardRoutes = append(input.GuardRoutes, WindowsOwnedRoute{AddressFamily: family, DestinationPrefix: prefix, NextHop: nextHop, RouteMetric: windowsGuardRouteMetric})
+	}
 	output, err := m.run(ctx, networkOperationCapture, input)
 	if err != nil {
 		return nil, err
@@ -249,6 +262,15 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 	}
 	snapshot.Version = 1
 	snapshot.RouteMetric = windowsOwnedRouteMetric
+	snapshot.BlockedRemoteAddresses = append([]string(nil), m.blockedPrefixes...)
+	snapshot.DNSBlockedRemoteAddresses = append([]string(nil), m.dnsBlockedPrefixes...)
+	if snapshot.GuardInterfaceIndex <= 0 {
+		return nil, errors.New("captured loopback guard interface is missing")
+	}
+	for _, route := range input.GuardRoutes {
+		route.InterfaceIndex = snapshot.GuardInterfaceIndex
+		snapshot.GuardRoutes = append(snapshot.GuardRoutes, route)
+	}
 	if err := validateWindowsSnapshot(snapshot); err != nil {
 		return nil, err
 	}
@@ -271,23 +293,36 @@ func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
 	return snapshot, nil
 }
 
-func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) error {
+func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) (<-chan error, error) {
 	m.mu.Lock()
 	if m.current == nil {
 		m.mu.Unlock()
-		return errors.New("network state was not captured")
+		return nil, errors.New("network state was not captured")
 	}
 	if m.protectionCancel != nil {
 		m.mu.Unlock()
-		return errors.New("network protection monitor is already running")
+		return nil, errors.New("network protection monitor is already running")
 	}
+	failures := make(chan error, 1)
 	m.mu.Unlock()
-	select {
-	case <-m.failures:
-	default:
+	m.mu.Lock()
+	guard := append([]WindowsOwnedRoute(nil), m.current.GuardRoutes...)
+	m.mu.Unlock()
+	// Each ordinary public path is more specific than a newly attached NIC's
+	// IPv4/IPv6 default route. The healthy TUN later installs the same IPv4
+	// prefixes at a lower effective metric. Windows longest-prefix selection
+	// means any more-specific public route can override both, including a
+	// public on-link prefix supplied with a new adapter as well as privileged
+	// route injection. The zero-gap claim is therefore deliberately limited to
+	// unconstrained route lookups on ordinary adapters that add IPv4/IPv6 /0
+	// Internet paths. Windows strong-host source-bound lookups may restrict the
+	// candidate set to the new interface and ignore this loopback guard even for
+	// /0; the adapter firewall monitor is eventual defense outside that bound.
+	if _, err := m.run(ctx, networkOperationGuard, windowsNetworkInput{GuardRoutes: guard}); err != nil {
+		return nil, errors.Join(err, m.installEmergencyProtection(ctx))
 	}
 	if err := m.reconcileProtection(ctx); err != nil {
-		return errors.Join(err, m.installEmergencyProtection(ctx))
+		return nil, errors.Join(err, m.installEmergencyProtection(ctx))
 	}
 	monitorContext, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -296,13 +331,11 @@ func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) error
 	m.protectionDone = done
 	interval := m.protectionInterval
 	m.mu.Unlock()
-	go m.monitorProtection(monitorContext, done, interval)
-	return nil
+	go m.monitorProtection(monitorContext, done, interval, failures)
+	return failures, nil
 }
 
-func (m *WindowsNetworkManager) Failures() <-chan error { return m.failures }
-
-func (m *WindowsNetworkManager) monitorProtection(ctx context.Context, done chan struct{}, interval time.Duration) {
+func (m *WindowsNetworkManager) monitorProtection(ctx context.Context, done chan struct{}, interval time.Duration, failures chan<- error) {
 	defer close(done)
 	if interval <= 0 {
 		interval = 250 * time.Millisecond
@@ -320,7 +353,7 @@ func (m *WindowsNetworkManager) monitorProtection(ctx context.Context, done chan
 				}
 				err = errors.Join(err, m.installEmergencyProtection(ctx))
 				select {
-				case m.failures <- err:
+				case failures <- err:
 				default:
 				}
 				return
@@ -385,6 +418,38 @@ func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) 
 	return err
 }
 
+func (m *WindowsNetworkManager) armEmergencyProtection(ctx context.Context) error {
+	installErr := m.installEmergencyProtection(context.WithoutCancel(ctx))
+	m.mu.Lock()
+	if m.protectionCancel != nil {
+		m.mu.Unlock()
+		return installErr
+	}
+	monitorContext, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.protectionCancel = cancel
+	m.protectionDone = done
+	interval := m.protectionInterval
+	m.mu.Unlock()
+	go func() {
+		defer close(done)
+		if interval <= 0 {
+			interval = 250 * time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-monitorContext.Done():
+				return
+			case <-ticker.C:
+				_ = m.installEmergencyProtection(monitorContext)
+			}
+		}
+	}()
+	return installErr
+}
+
 func windowsFirewallRuleNames() []string {
 	return []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule, windowsDNSUDPBlockRule, windowsDNSTCPBlockRule, windowsEmergencyBlockRule}
 }
@@ -429,13 +494,16 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 		m.mu.Unlock()
 		return err
 	}
-	ownedRoutes := []WindowsOwnedRoute{
-		{DestinationPrefix: "0.0.0.0/1", InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric},
-		{DestinationPrefix: "128.0.0.0/1", InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric},
+	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.current.GuardRoutes))
+	for _, guard := range m.current.GuardRoutes {
+		if guard.AddressFamily == "IPv4" {
+			ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: guard.DestinationPrefix, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
+		}
 	}
 	for _, route := range m.current.NodeRoutes {
 		if route.BypassRequired {
 			ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{
+				AddressFamily:     "IPv4",
 				DestinationPrefix: route.NodeAddress + "/32",
 				InterfaceIndex:    route.InterfaceIndex,
 				NextHop:           route.NextHop,
@@ -471,44 +539,50 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	}
 	m.stopProtection()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.current != nil {
 		snapshot = *m.current
 	}
-	if _, err := m.run(ctx, networkOperationRestore, activationInput(snapshot)); err != nil {
-		return err
+	m.mu.Unlock()
+	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	if err := m.store.Delete(m.statePath); err != nil {
-		return err
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
+	m.mu.Lock()
 	m.current = nil
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 	m.stopProtection()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	snapshot, err := m.store.Load(m.statePath)
 	if errors.Is(err, errSnapshotNotFound) {
+		m.mu.Unlock()
 		return nil
 	}
 	if err != nil {
-		return err
+		m.mu.Unlock()
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
+	m.mu.Unlock()
 	if err := validateWindowsSnapshot(snapshot); err != nil {
-		return err
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	if err := validateCapturedNodeRoutes(snapshot.NodeRoutes, m.nodeAddresses); err != nil {
-		return err
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
-	if _, err := m.run(ctx, networkOperationRestore, activationInput(snapshot)); err != nil {
-		return err
+	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	if err := m.store.Delete(m.statePath); err != nil {
-		return err
+		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
+	m.mu.Lock()
 	m.current = nil
+	m.mu.Unlock()
 	return nil
 }
 
@@ -522,17 +596,51 @@ func (m *WindowsNetworkManager) run(ctx context.Context, operation string, input
 
 func activationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
 	return windowsNetworkInput{
-		Interfaces:        append([]WindowsInterfaceSnapshot(nil), snapshot.Interfaces...),
-		FirewallRuleNames: windowsFirewallRuleNames(),
-		FirewallGroup:     windowsFirewallGroup,
-		TUNInterface:      windowsTUNInterface,
-		TUNAddress:        windowsTUNAddress,
-		TUNDNS:            windowsTUNDNS,
-		TUNRoutePrefixes:  []string{"0.0.0.0/1", "128.0.0.0/1"},
-		RouteMetric:       snapshot.RouteMetric,
-		OwnedTUN:          snapshot.OwnedTUN,
-		OwnedRoutes:       append([]WindowsOwnedRoute(nil), snapshot.OwnedRoutes...),
+		Interfaces:                append([]WindowsInterfaceSnapshot(nil), snapshot.Interfaces...),
+		FirewallRuleNames:         windowsFirewallRuleNames(),
+		FirewallGroup:             windowsFirewallGroup,
+		BlockedRemoteAddresses:    append([]string(nil), snapshot.BlockedRemoteAddresses...),
+		DNSBlockedRemoteAddresses: append([]string(nil), snapshot.DNSBlockedRemoteAddresses...),
+		TUNInterface:              windowsTUNInterface,
+		TUNAddress:                windowsTUNAddress,
+		TUNDNS:                    windowsTUNDNS,
+		TUNRoutePrefixes:          []string{"0.0.0.0/1", "128.0.0.0/1"},
+		RouteMetric:               snapshot.RouteMetric,
+		OwnedTUN:                  snapshot.OwnedTUN,
+		OwnedRoutes:               append([]WindowsOwnedRoute(nil), snapshot.OwnedRoutes...),
+		GuardRoutes:               append([]WindowsOwnedRoute(nil), snapshot.GuardRoutes...),
 	}
+}
+
+func (m *WindowsNetworkManager) restorationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
+	input := activationInput(snapshot)
+	// Version-1 snapshots written before the route-guard remediation did not
+	// persist these derived sets. Re-derive them from the validated immutable
+	// policy so the in-script catch path remains fail-closed during upgrade.
+	if len(input.BlockedRemoteAddresses) == 0 {
+		input.BlockedRemoteAddresses = append([]string(nil), m.blockedPrefixes...)
+	}
+	if len(input.DNSBlockedRemoteAddresses) == 0 {
+		input.DNSBlockedRemoteAddresses = append([]string(nil), m.dnsBlockedPrefixes...)
+	}
+	for index := range input.OwnedRoutes {
+		if input.OwnedRoutes[index].AddressFamily == "" {
+			input.OwnedRoutes[index].AddressFamily = addressFamilyForPrefix(input.OwnedRoutes[index].DestinationPrefix)
+		}
+	}
+	for index := range input.GuardRoutes {
+		if input.GuardRoutes[index].AddressFamily == "" {
+			input.GuardRoutes[index].AddressFamily = addressFamilyForPrefix(input.GuardRoutes[index].DestinationPrefix)
+		}
+	}
+	return input
+}
+
+func addressFamilyForPrefix(value string) string {
+	if prefix, err := netip.ParsePrefix(value); err == nil && prefix.Addr().Is6() {
+		return "IPv6"
+	}
+	return "IPv4"
 }
 
 func asWindowsSnapshot(value any) (WindowsNetworkSnapshot, error) {
@@ -785,7 +893,14 @@ func standardNonPublicIPv4Prefixes() []netip.Prefix {
 }
 
 func complementIPv6Prefixes(excluded []netip.Prefix) []string {
-	remaining := []netip.Prefix{netip.MustParsePrefix("::/0")}
+	// 2000::/3 is the IANA global-unicast space. The IPv4-only PoC keeps this
+	// public IPv6 space on the sink guard while leaving loopback, link-local,
+	// ULA, multicast, and other non-Internet protocol ranges untouched.
+	return complementIPv6From(netip.MustParsePrefix("2000::/3"), excluded)
+}
+
+func complementIPv6From(base netip.Prefix, excluded []netip.Prefix) []string {
+	remaining := []netip.Prefix{base}
 	for _, exclusion := range excluded {
 		if !exclusion.Addr().Is6() || exclusion.Addr().Is4In6() {
 			continue
@@ -841,6 +956,7 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationCapture:   captureNetworkPowerShell,
 	networkOperationScan:      scanNetworkPowerShell,
 	networkOperationBlock:     blockNetworkPowerShell,
+	networkOperationGuard:     guardNetworkPowerShell,
 	networkOperationEmergency: emergencyNetworkPowerShell,
 	networkOperationReady:     readyNetworkPowerShell,
 	networkOperationActivate:  activateNetworkPowerShell,
@@ -849,6 +965,8 @@ var networkPowerShellScripts = map[string]string{
 
 const captureNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+$loopback = @(Find-NetRoute -RemoteIPAddress '127.0.0.1' | Where-Object { $_.PSObject.Properties.Name -contains 'DestinationPrefix' } | Select-Object -First 1)
+if ($loopback.Count -ne 1) { throw 'Could not resolve the IPv4 loopback guard interface.' }
 $defaults = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric)
 if ($defaults.Count -eq 0) { throw 'No IPv4 default route exists.' }
 $interfaces = @()
@@ -872,8 +990,8 @@ foreach ($name in @($i.FirewallRuleNames)) {
 }
 if (Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue) { $collisions += [string]$i.FirewallGroup }
 $conflicting = @()
-foreach ($prefix in @($i.TUNRoutePrefixes)) {
-  if (Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue) { $conflicting += [string]$prefix }
+foreach ($route in @($i.GuardRoutes)) {
+  if (Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$loopback[0].InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric }) { $conflicting += [string]$route.DestinationPrefix }
 }
 $allAdapters = @(Get-NetAdapter -IncludeHidden)
 $baselineGuids = @($allAdapters | ForEach-Object { [string]$_.InterfaceGuid })
@@ -906,6 +1024,7 @@ foreach ($node in @($i.NodeAddresses)) {
   TUNAliasPresent = $tunAliasPresent
   TUNAddressPresent = $tunAddressPresent
   NodeRoutes = @($nodeRoutes)
+  GuardInterfaceIndex = [int]$loopback[0].InterfaceIndex
 } | ConvertTo-Json -Compress -Depth 8`
 
 const scanNetworkPowerShell = `$ErrorActionPreference = 'Stop'
@@ -966,6 +1085,14 @@ if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[5]))) { New-NetFirewall
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }`
 
+const guardNetworkPowerShell = `$ErrorActionPreference = 'Stop'
+$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+foreach ($route in @($i.GuardRoutes)) {
+  $existing = @(Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric })
+  if ($existing.Count -gt 1) { throw 'Duplicate owned route guard tuple.' }
+  if ($existing.Count -eq 0) { New-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore ActiveStore | Out-Null }
+}`
+
 const readyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
 $deadline = [DateTime]::UtcNow.AddSeconds(2)
@@ -1002,12 +1129,24 @@ foreach ($physical in @($i.Interfaces)) {
   Set-DnsClientServerAddress -InterfaceIndex $physical.Index -ServerAddresses @([string]$i.TUNDNS)
 }
 foreach ($route in @($i.OwnedRoutes)) {
-  Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
-  New-NetRoute -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore ActiveStore | Out-Null
+  Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+  New-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore ActiveStore | Out-Null
 }`
 
 const restoreNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+function Install-Emergency {
+  $name = [string]$i.FirewallRuleNames[5]
+  $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
+  if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Emergency firewall rule name collision.' }
+  if ($existing.Count -eq 0) { New-NetFirewallRule -Name $name -DisplayName $name -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol Any -RemoteAddress @($i.BlockedRemoteAddresses) -Profile Any | Out-Null }
+  foreach ($entry in @(@{Name=[string]$i.FirewallRuleNames[3]; Protocol='UDP'}, @{Name=[string]$i.FirewallRuleNames[4]; Protocol='TCP'})) {
+    $rule = @(Get-NetFirewallRule -Name $entry.Name -ErrorAction SilentlyContinue)
+    if ($rule.Count -gt 1 -or ($rule.Count -eq 1 -and [string]$rule[0].Group -ne [string]$i.FirewallGroup)) { throw 'Emergency DNS firewall rule name collision.' }
+    if ($rule.Count -eq 0) { New-NetFirewallRule -Name $entry.Name -DisplayName $entry.Name -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol $entry.Protocol -RemotePort 53 -RemoteAddress @($i.DNSBlockedRemoteAddresses) -Profile Any | Out-Null }
+  }
+}
+try {
 foreach ($physical in @($i.Interfaces)) {
   if ([bool]$physical.DNSAutomatic) {
     Set-DnsClientServerAddress -InterfaceIndex $physical.Index -ResetServerAddresses
@@ -1017,6 +1156,13 @@ foreach ($physical in @($i.Interfaces)) {
   Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $physical.Index -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric
 }
 foreach ($route in @($i.OwnedRoutes)) {
-  Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+  Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
 }
-Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop`
+foreach ($route in @($i.GuardRoutes)) {
+  Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+}
+Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+} catch {
+  Install-Emergency
+  throw
+}`
