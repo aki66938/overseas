@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 bin/
+dist/
 /configs/poc.yaml
 /artifacts/*
 !/artifacts/.gitkeep
