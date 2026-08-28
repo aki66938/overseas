@@ -189,3 +189,24 @@ The third-wave review requirements are implemented without privileged live mutat
 1. No corporate certificate/private key and no verified Microsoft signing tool were available, so a corporate-signed production artifact was intentionally not produced.
 2. No live install/repair/upgrade/rollback/uninstall or firewall/service mutation was run. Those destructive scenarios remain for a disposable Windows integration host using a corporate-signed artifact.
 3. GNU Make was unavailable; the exact tracked target commands were executed directly through the locked wrapper.
+
+---
+
+## Final firewall rollback ownership proof (2026-08-29)
+
+Implementation commit: `5d9550d1f7d2f6a7c5672ade988d5d7d2e24c384`
+
+The final review identified a valid ownership race: an `intended` journal entry with an earlier `absent_before` observation is not sufficient authority to delete by name during rollback. Another process can create or replace that name between the observation, the failed creation attempt, and rollback.
+
+Rollback now calls the same complete `Get-ExactFirewallRule` validator immediately before every possible deletion. This validates unique name plus display name, group, direction, action, enablement, profile, application/package, protocol and ports, local/remote addresses, service, interface type/alias, and all security-filter fields. A missing rule is durably marked `resolved`; an exact rule is removed and absence is proven; a mismatch or ambiguous name fails closed while preserving both the rule and transaction journal. Per-entry `pending`/`resolved` state makes interrupted compensation resumable without weakening ownership proof.
+
+Strict TDD evidence:
+
+- RED: the PowerShell 7 mocked lifecycle suite reported `39 passed, 1 failed`; rollback did not throw and deleted a foreign same-name rule created during an injected `New-NetFirewallRule` failure.
+- GREEN race test: a foreign process publishes the second rule name between absence proof and injected create failure; rollback rejects the mismatch, preserves the foreign rule, and retains `current_operation`.
+- GREEN drift/replacement test: the first newly created rule is replaced or mutated before rollback; rollback durably resolves the independently missing second rule, then rejects the changed first rule and preserves it and the journal.
+- Windows PowerShell 5.1 full Pester: `108 passed, 0 failed`.
+- PowerShell 7 full Pester: `108 passed, 0 failed`.
+- `go test -count=1 ./...`: all packages passed.
+- `go vet ./...`: exit 0.
+- No live or privileged firewall mutation was performed; the behavioral tests execute the extracted production lifecycle script with isolated mocks.
