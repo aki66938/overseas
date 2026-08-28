@@ -129,7 +129,7 @@ WiX decompilation emitted expected warnings for extension-owned custom tables an
 ## Third-wave transaction hardening (2026-08-29)
 
 Base: `3367ec61c541b316bfa290826c157aace624a07f`  
-Implementation commit: `492e0ca7046922a63ade570e8132ac68303b8211`
+Implementation commits: `492e0ca7046922a63ade570e8132ac68303b8211`, `f8f54b839f67f196a1d8d0e4318f3c2b0a0049e0`
 
 ### Outcome
 
@@ -148,6 +148,8 @@ The third-wave review requirements are implemented without privileged live mutat
 - Reviewer RED: a persistent post-publish secure-compensation failure lost ownership proof before correction.
 - Behavioral firewall test executes the extracted production lifecycle script against isolated mocked state: foreign exact pre-existing rejection, fresh install, idempotent repair, repair rollback preservation, uninstall, injected second-rule creation failure, and compensating rollback. It performs no live firewall call.
 - Runtime tests inject writer, finalization, canonical wipe, and backup wipe failures. Windows subprocess tests terminate at temporary-written, published, and finalized boundaries and prove every surviving pathname is present in the structured intent.
+- Follow-up review found that DPAPI's legacy atomic helper nested another `.credential-*.tmp` under the journaled publisher path. The provisioner now uses `StoreMachineExact`, which applies the protected ACL and `CREATE_NEW` directly to the already-journaled pathname. A subprocess exits immediately after DPAPI ciphertext flush and proves that this exact journaled path is the only residue.
+- Firewall exactness also validates `Get-NetFirewallSecurityFilter` defaults: authentication, encryption, local/remote user, remote machine, and override-block state. The behavioral lifecycle test mutates authentication to `Required` and proves uninstall rejects the drift before removal.
 - A two-process barrier test proves credential/config publication serialization. It exposed and fixed Windows mutex thread affinity and `ERROR_ALREADY_EXISTS` handling.
 - A behavioral harness test injects root deletion failure after the deletion journal is durable and proves `RootDeletionIncomplete` retains the exact root. Another test creates canonical/temp/backup/replaced sensitive residue and proves cleanup removes all of it before the ledger.
 
@@ -174,8 +176,8 @@ The third-wave review requirements are implemented without privileged live mutat
 ### Inspect-only MSI and raw-table evidence
 
 - Path: `dist/OverseasAccessSetup.msi`
-- SHA-256: `CE56DFA8A1C932C216E27B2E5968269441D0F9901FEDAE992A78A2BB3042AF8A`
-- Source commit in artifact manifest: `492e0ca7046922a63ade570e8132ac68303b8211`
+- SHA-256: `D5A12BFD5A96AE9FF50BC7A558232DE75E3FEC2AAE5E90A3956D4A75FC28CC4A`
+- Source commit in artifact manifest: `f8f54b839f67f196a1d8d0e4318f3c2b0a0049e0`
 - Extracted allowlist: exactly 18 payloads; source/extracted bytes and signed-envelope coverage matched.
 - Raw ordering: `VerifyPackageTrust=1499`, `InstallInitialize=1500`, `RemoveExistingProducts=1501`, `StopServices=1900`, `RemoveClientFirewall=1901`, `CleanupOwnedRuntime=1902`, `VerifyInstalledPayload=5797`, `RollbackClientFirewall=5798`, `InstallClientFirewall=5799`, `InstallServices=5800`.
 - Raw commands: rollback=`firewall-rollback` type 3330; install=`firewall-install` type 3074; uninstall=`firewall-uninstall` type 3074; runtime cleanup=`runtime-cleanup` type 3074; installed-payload verifier target is exactly `[CustomActionData]`.
