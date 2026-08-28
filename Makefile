@@ -6,7 +6,7 @@ SIGNTOOL ?= signtool.exe
 SIGNING_CERT_THUMBPRINT ?=
 
 .PHONY: test build
-.PHONY: test-integration-preflight test-integration-live
+.PHONY: test-integration-preflight test-integration-live build-integration-fixtures
 .PHONY: msi release-msi inspect-msi prepare-client-payload build-client-binaries
 .PHONY: generate-client-resources build-client verify-client-manifest build-server-service package-server-service test-server-install test-client-install
 
@@ -19,6 +19,10 @@ test-integration-preflight:
 
 test-integration-live:
 	pwsh -NoProfile -Command "if ($$env:OVERSEAS_ACCESS_INTEGRATION -ne '1') { throw 'Set OVERSEAS_ACCESS_INTEGRATION=1 explicitly before invoking the live target.' }; & '$(LOCKED_CLIENT_TOOL)' -Tool Go -ToolArguments @('test','-count=1','-v','./tests/integration'); exit $$LASTEXITCODE"
+
+build-integration-fixtures:
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/overseas-access-integration-driver.exe','./tests/integration/fixturedriver'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Go -GoOS windows -GoArch amd64 -ToolArguments @('build','-trimpath','-o','bin/fixture-sentinel.exe','./tests/integration/fixtureserver'); exit $$LASTEXITCODE"
 
 build:
 	$(MAKE) build-client-binaries

@@ -3,9 +3,12 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,9 +23,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/clientapi"
+	"corp.example/overseas-access-gateway/internal/coreverify"
+	"corp.example/overseas-access-gateway/tests/integration/fixtureproto"
 	"golang.org/x/sys/windows"
 )
 
@@ -33,15 +39,37 @@ const (
 	envDisposableToken           = "OVERSEAS_ACCESS_DISPOSABLE_HOST_TOKEN"
 	envEvidenceDirectory         = "OVERSEAS_ACCESS_BASELINE_DIR"
 	envIntegrationDriver         = "OVERSEAS_ACCESS_INTEGRATION_DRIVER"
+	envIntegrationDriverSHA256   = "OVERSEAS_ACCESS_INTEGRATION_DRIVER_SHA256"
+	envIntegrationDriverSigner   = "OVERSEAS_ACCESS_INTEGRATION_DRIVER_SIGNER"
+	envPayloadSHA256             = "OVERSEAS_ACCESS_PAYLOAD_SHA256"
+	envGeneratedConfigSHA256     = "OVERSEAS_ACCESS_GENERATED_CONFIG_SHA256"
+	envFakeUpstreamIdentity      = "OVERSEAS_ACCESS_FAKE_UPSTREAM_IDENTITY"
+	envPublicSentinelIdentity    = "OVERSEAS_ACCESS_PUBLIC_SENTINEL_IDENTITY"
+	envCorporateSentinelIdentity = "OVERSEAS_ACCESS_CORPORATE_SENTINEL_IDENTITY"
+	envFixtureConfig             = "OVERSEAS_ACCESS_FIXTURE_CONFIG"
+	envFixtureConfigSHA256       = "OVERSEAS_ACCESS_FIXTURE_CONFIG_SHA256"
 	envPublicSentinel            = "OVERSEAS_ACCESS_PUBLIC_SENTINEL"
 	envCorporateSentinel         = "OVERSEAS_ACCESS_CORPORATE_SENTINEL"
+	envPublicSentinelHealth      = "OVERSEAS_ACCESS_PUBLIC_SENTINEL_HEALTH"
+	envFakeUpstreamControl       = "OVERSEAS_ACCESS_FAKE_UPSTREAM_CONTROL"
 	envCorporateCIDR             = "OVERSEAS_ACCESS_CORPORATE_CIDR"
 
 	disposableAcknowledgement = "I_ACKNOWLEDGE_THIS_WINDOWS_HOST_IS_DISPOSABLE"
-	driverProtocolVersion     = 1
 	probeTimeout              = 1500 * time.Millisecond
 	stateTimeout              = 15 * time.Second
+	trustedBaselineSDDL       = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
 )
+
+type trustedBaseline struct {
+	data                  []byte
+	hash                  string
+	evidencePath          string
+	trustedPath           string
+	trustedHandle         *os.File
+	restoreInputs         []*os.File
+	caseDirectoryHandle   *os.File
+	caseDirectoryIdentity string
+}
 
 type preflightInput struct {
 	Environment map[string]string
@@ -52,6 +80,7 @@ type preflightInput struct {
 type preflightResult struct {
 	Enabled           bool
 	EvidenceDirectory string
+	Hostname          string
 }
 
 type scenario struct {
@@ -60,39 +89,42 @@ type scenario struct {
 }
 
 type liveConfig struct {
-	preflight         preflightResult
-	dryRun            bool
-	driverPath        string
-	publicSentinel    string
-	corporateSentinel string
-	corporateCIDR     netip.Prefix
-}
-
-type driverRequest struct {
-	ProtocolVersion   int    `json:"protocol_version"`
-	Action            string `json:"action"`
-	Scenario          string `json:"scenario,omitempty"`
-	EvidenceDirectory string `json:"evidence_directory"`
-	BaselinePath      string `json:"baseline_path,omitempty"`
-}
-
-type driverResponse struct {
-	ProtocolVersion int             `json:"protocol_version"`
-	OK              bool            `json:"ok"`
-	Message         string          `json:"message,omitempty"`
-	Snapshot        json.RawMessage `json:"snapshot,omitempty"`
+	preflight            preflightResult
+	dryRun               bool
+	driverPath           string
+	driverSHA256         string
+	driverSigners        []string
+	fixtureConfigPath    string
+	fixtureConfigSHA256  string
+	binding              fixtureproto.FixtureBinding
+	publicSentinel       string
+	publicSentinelHealth string
+	corporateSentinel    string
+	corporateCIDR        netip.Prefix
 }
 
 type liveHarness struct {
-	config      liveConfig
-	runDir      string
-	client      *clientapi.Client
-	actionMu    sync.Mutex
-	actionCount int
+	config               liveConfig
+	runDir               string
+	client               *clientapi.Client
+	recordMu             sync.Mutex
+	actionCount          int
+	runID                string
+	runDirectoryIdentity string
+	runDirectoryHandle   *os.File
+	invokeDriver         func(context.Context, fixtureproto.Request) ([]byte, error)
+	verifyAndLockDriver  func() (io.Closer, error)
+	validateRunDirectory func() error
+	actionTimeout        time.Duration
+	cleanupTimeout       time.Duration
+	restoreTimeout       time.Duration
+	reconciliationWindow time.Duration
+	probeInterval        time.Duration
+	probeReceipt         func(string, string, string) (bool, error)
 
 	mu             sync.Mutex
 	activeScenario string
-	activeBaseline string
+	activeBaseline *trustedBaseline
 	restorePoison  error
 }
 
@@ -250,55 +282,13 @@ func TestLastChanceReleaseRequiresProvenRestoration(t *testing.T) {
 	}
 }
 
-func TestCanonicalSnapshotRequiresEveryBaselineSurface(t *testing.T) {
-	complete := []byte(`{"routes":[],"dns":[],"adapters":[],"services":[],"processes":[],"owned_firewall_rules":[]}`)
-	first, err := canonicalSnapshot(complete)
-	if err != nil {
-		t.Fatalf("canonicalSnapshot() error = %v", err)
-	}
-	second, err := canonicalSnapshot([]byte(`{"services":[],"routes":[],"owned_firewall_rules":[],"processes":[],"adapters":[],"dns":[]}`))
-	if err != nil {
-		t.Fatalf("canonicalSnapshot() reordered error = %v", err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatalf("canonical snapshots differ:\n%s\n%s", first, second)
-	}
-	_, err = canonicalSnapshot([]byte(`{"routes":[],"dns":[],"adapters":[],"services":[],"processes":[]}`))
-	if err == nil || !strings.Contains(err.Error(), "owned_firewall_rules") {
-		t.Fatalf("canonicalSnapshot() missing-surface error = %v", err)
-	}
-	_, err = canonicalSnapshot([]byte(`{"routes":null,"dns":[],"adapters":[],"services":[],"processes":[],"owned_firewall_rules":[]}`))
-	if err == nil || !strings.Contains(err.Error(), "routes") {
-		t.Fatalf("canonicalSnapshot() null-surface error = %v", err)
-	}
-}
-
-func TestPreservedBaselineRejectsDriverModification(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "baseline.json")
-	want := []byte(`{"routes":[]}`)
-	if err := os.WriteFile(path, want, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := provePreservedBaseline(path, want); err != nil {
-		t.Fatalf("provePreservedBaseline() unchanged error = %v", err)
-	}
-	if err := os.WriteFile(path, []byte(`{"routes":["changed"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := provePreservedBaseline(path, want); err == nil {
-		t.Fatal("provePreservedBaseline() accepted modified evidence")
-	}
-}
-
 func TestDriverFailureDoesNotEchoDriverOutput(t *testing.T) {
 	const secret = "INTEGRATION-DRIVER-SECRET"
-	driver := filepath.Join(t.TempDir(), "failure.ps1")
-	script := "$null = [Console]::In.ReadToEnd(); [Console]::Error.Write('" + secret + "'); exit 9"
-	if err := os.WriteFile(driver, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
+	harness := boundHarness(t)
+	harness.invokeDriver = func(context.Context, fixtureproto.Request) ([]byte, error) {
+		return nil, errors.New(secret)
 	}
-	harness := &liveHarness{config: liveConfig{driverPath: driver}, runDir: t.TempDir()}
-	_, err := harness.callDriver(context.Background(), driverRequest{ProtocolVersion: driverProtocolVersion, Action: "preflight"})
+	_, err := harness.callDriver(context.Background(), fixtureproto.Request{Action: "preflight"})
 	if err == nil {
 		t.Fatal("callDriver() unexpectedly succeeded")
 	}
@@ -321,6 +311,10 @@ func TestRepositoryIntegrationContractDocumentsExternalLiveGate(t *testing.T) {
 		envDisposableToken,
 		envEvidenceDirectory,
 		envIntegrationDryRun,
+		envIntegrationDriverSHA256,
+		envIntegrationDriverSigner,
+		envFixtureConfigSHA256,
+		envPublicSentinelHealth,
 		"Task 10",
 		"must not be run on a developer workstation",
 		"routes, DNS, adapters, services, processes, and owned firewall rules",
@@ -329,7 +323,7 @@ func TestRepositoryIntegrationContractDocumentsExternalLiveGate(t *testing.T) {
 			t.Errorf("README is missing %q", required)
 		}
 	}
-	for _, required := range []string{"test-integration-preflight:", "test-integration-live:", "$$env:" + envIntegration + " -ne '1'"} {
+	for _, required := range []string{"test-integration-preflight:", "test-integration-live:", "build-integration-fixtures:", "$$env:" + envIntegration + " -ne '1'"} {
 		if !bytes.Contains(makefile, []byte(required)) {
 			t.Errorf("Makefile is missing %q", required)
 		}
@@ -361,10 +355,11 @@ func TestWindowsFailClosedLifecycle(t *testing.T) {
 	defer func() {
 		if harness.mayReleaseLastChance() {
 			registerLastChance(nil)
+			_ = harness.closeRunDirectory()
 		}
 	}()
 
-	if err := harness.action(context.Background(), "preflight", "", ""); err != nil {
+	if _, err := harness.action("preflight", "", nil); err != nil {
 		t.Fatalf("fixture preflight failed: %v", err)
 	}
 	if config.dryRun {
@@ -425,7 +420,7 @@ func evaluatePreflight(input preflightInput) (preflightResult, error) {
 	if len(entries) != 0 {
 		return preflightResult{}, fmt.Errorf("%s must be empty for a new evidence run", envEvidenceDirectory)
 	}
-	return preflightResult{Enabled: true, EvidenceDirectory: evidence}, nil
+	return preflightResult{Enabled: true, EvidenceDirectory: evidence, Hostname: strings.TrimSpace(input.Hostname)}, nil
 }
 
 func currentPreflightInput() (preflightInput, error) {
@@ -453,9 +448,23 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if err != nil {
 		return liveConfig{}, err
 	}
+	fakeControlEndpoint, fakeControlAddress, err := parseSentinel(envFakeUpstreamControl, os.Getenv(envFakeUpstreamControl))
+	if err != nil {
+		return liveConfig{}, err
+	}
 	corporateCIDR, err := netip.ParsePrefix(strings.TrimSpace(os.Getenv(envCorporateCIDR)))
 	if err != nil || corporateCIDR.String() != strings.TrimSpace(os.Getenv(envCorporateCIDR)) {
 		return liveConfig{}, fmt.Errorf("%s must be a canonical CIDR", envCorporateCIDR)
+	}
+	publicHealthEndpoint, publicHealthAddress, err := parseSentinel(envPublicSentinelHealth, os.Getenv(envPublicSentinelHealth))
+	if err != nil {
+		return liveConfig{}, err
+	}
+	if !corporateCIDR.Contains(publicHealthAddress) {
+		return liveConfig{}, fmt.Errorf("%s must use the independently permitted health path inside %s", envPublicSentinelHealth, envCorporateCIDR)
+	}
+	if !corporateCIDR.Contains(fakeControlAddress) {
+		return liveConfig{}, fmt.Errorf("%s must use the permitted fixture path inside %s", envFakeUpstreamControl, envCorporateCIDR)
 	}
 	if !corporateCIDR.Contains(corporateAddress) {
 		return liveConfig{}, fmt.Errorf("%s must be inside %s", envCorporateSentinel, envCorporateCIDR)
@@ -463,14 +472,67 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if corporateCIDR.Contains(publicAddress) {
 		return liveConfig{}, fmt.Errorf("%s must be outside %s", envPublicSentinel, envCorporateCIDR)
 	}
-	if publicAddress.IsLoopback() || corporateAddress.IsLoopback() || publicAddress == corporateAddress {
+	if publicAddress.IsLoopback() || corporateAddress.IsLoopback() || publicAddress == corporateAddress || publicHealthEndpoint == corporateEndpoint {
 		return liveConfig{}, errors.New("sentinels must be distinct non-loopback addresses")
 	}
 	dryRunText := os.Getenv(envIntegrationDryRun)
 	if dryRunText != "" && dryRunText != "1" {
 		return liveConfig{}, fmt.Errorf("%s must be empty or exactly 1", envIntegrationDryRun)
 	}
-	return liveConfig{preflight: preflight, dryRun: dryRunText == "1", driverPath: driver, publicSentinel: publicEndpoint, corporateSentinel: corporateEndpoint, corporateCIDR: corporateCIDR}, nil
+	driverHash, err := requiredSHA256(envIntegrationDriverSHA256)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	signer := strings.TrimSpace(os.Getenv(envIntegrationDriverSigner))
+	if signer == "" {
+		return liveConfig{}, fmt.Errorf("%s is required", envIntegrationDriverSigner)
+	}
+	fixtureConfigPath, err := validateOrdinaryFile(os.Getenv(envFixtureConfig))
+	if err != nil {
+		return liveConfig{}, fmt.Errorf("%s: %w", envFixtureConfig, err)
+	}
+	fixtureConfigHash, err := requiredSHA256(envFixtureConfigSHA256)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	binding := fixtureproto.FixtureBinding{
+		PayloadSHA256:             strings.TrimSpace(os.Getenv(envPayloadSHA256)),
+		ConfigSHA256:              strings.TrimSpace(os.Getenv(envGeneratedConfigSHA256)),
+		FakeUpstreamIdentity:      strings.TrimSpace(os.Getenv(envFakeUpstreamIdentity)),
+		PublicSentinelIdentity:    strings.TrimSpace(os.Getenv(envPublicSentinelIdentity)),
+		CorporateSentinelIdentity: strings.TrimSpace(os.Getenv(envCorporateSentinelIdentity)),
+		PublicSentinelEndpoint:    publicEndpoint, PublicSentinelHealthEndpoint: publicHealthEndpoint,
+		CorporateSentinelEndpoint: corporateEndpoint, FakeUpstreamControlEndpoint: fakeControlEndpoint,
+	}
+	if !isSHA256(binding.PayloadSHA256) {
+		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envPayloadSHA256)
+	}
+	if !isSHA256(binding.ConfigSHA256) {
+		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envGeneratedConfigSHA256)
+	}
+	if binding.FakeUpstreamIdentity == "" || binding.PublicSentinelIdentity == "" || binding.CorporateSentinelIdentity == "" {
+		return liveConfig{}, errors.New("all fixture and sentinel identities are required")
+	}
+	if binding.FakeUpstreamIdentity == binding.PublicSentinelIdentity || binding.FakeUpstreamIdentity == binding.CorporateSentinelIdentity || binding.PublicSentinelIdentity == binding.CorporateSentinelIdentity {
+		return liveConfig{}, errors.New("fixture and sentinel identities must be distinct")
+	}
+	return liveConfig{preflight: preflight, dryRun: dryRunText == "1", driverPath: driver, driverSHA256: driverHash, driverSigners: []string{signer}, fixtureConfigPath: fixtureConfigPath, fixtureConfigSHA256: fixtureConfigHash, binding: binding, publicSentinel: publicEndpoint, publicSentinelHealth: publicHealthEndpoint, corporateSentinel: corporateEndpoint, corporateCIDR: corporateCIDR}, nil
+}
+
+func requiredSHA256(name string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if !isSHA256(value) {
+		return "", fmt.Errorf("%s must be a lowercase SHA-256", name)
+	}
+	return value, nil
+}
+
+func isSHA256(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validateOrdinaryFile(path string) (string, error) {
@@ -514,11 +576,141 @@ func scenarioPlan() []scenario {
 }
 
 func newLiveHarness(config liveConfig) (*liveHarness, error) {
-	runDir := filepath.Join(config.preflight.EvidenceDirectory, "run-"+time.Now().UTC().Format("20060102T150405.000000000Z"))
+	runID := "run-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	runDir := filepath.Join(config.preflight.EvidenceDirectory, runID)
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create evidence run: %w", err)
 	}
-	return &liveHarness{config: config, runDir: runDir, client: clientapi.New()}, nil
+	runHandle, identity, err := openPinnedDirectory(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("identify evidence run: %w", err)
+	}
+	h := &liveHarness{config: config, runDir: runDir, runID: runID, runDirectoryIdentity: identity, runDirectoryHandle: runHandle, client: clientapi.New(), actionTimeout: 30 * time.Second, cleanupTimeout: 5 * time.Second, restoreTimeout: 60 * time.Second, reconciliationWindow: stateTimeout, probeInterval: time.Second, probeReceipt: probeSentinelReceipt}
+	h.validateRunDirectory = func() error {
+		current, err := directoryIdentity(runDir)
+		if err != nil {
+			return err
+		}
+		if current != identity {
+			return errors.New("evidence run directory identity changed")
+		}
+		return nil
+	}
+	h.verifyAndLockDriver = func() (io.Closer, error) { return verifyAndLockInputs(config) }
+	h.invokeDriver = h.invokeExecutableDriver
+	return h, nil
+}
+
+func directoryIdentity(path string) (string, error) {
+	file, identity, err := openPinnedDirectory(path)
+	if file != nil {
+		_ = file.Close()
+	}
+	return identity, err
+}
+
+func openPinnedDirectory(path string) (*os.File, string, error) {
+	attributes, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(path))
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return nil, "", errors.New("run directory is absent, not a directory, or a reparse point")
+	}
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(path), windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		windows.CloseHandle(handle)
+		return nil, "", errors.New("wrap run directory handle")
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		file.Close()
+		return nil, "", err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		file.Close()
+		return nil, "", errors.New("opened run directory handle is a reparse point or not a directory")
+	}
+	return file, fmt.Sprintf("volume:%08x/file:%08x%08x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow), nil
+}
+
+func (h *liveHarness) closeRunDirectory() error {
+	if h == nil || h.runDirectoryHandle == nil {
+		return nil
+	}
+	err := h.runDirectoryHandle.Close()
+	h.runDirectoryHandle = nil
+	return err
+}
+
+func verifyAndLockExecutable(config liveConfig) (io.Closer, error) {
+	if !strings.EqualFold(filepath.Ext(config.driverPath), ".exe") {
+		return nil, errors.New("integration driver must be a signed .exe")
+	}
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(config.driverPath), windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, fmt.Errorf("lock driver: %w", err)
+	}
+	file := os.NewFile(uintptr(handle), config.driverPath)
+	if file == nil {
+		windows.CloseHandle(handle)
+		return nil, errors.New("wrap driver handle")
+	}
+	if err := coreverify.Verify(config.driverPath, config.driverSHA256, config.driverSigners); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("verify pinned driver: %w", err)
+	}
+	return file, nil
+}
+
+type closerGroup []io.Closer
+
+func (c closerGroup) Close() error {
+	var errs []error
+	for index := len(c) - 1; index >= 0; index-- {
+		errs = append(errs, c[index].Close())
+	}
+	return errors.Join(errs...)
+}
+
+func verifyAndLockInputs(config liveConfig) (io.Closer, error) {
+	driver, err := verifyAndLockExecutable(config)
+	if err != nil {
+		return nil, err
+	}
+	fixtureConfig, err := lockPinnedData(config.fixtureConfigPath, config.fixtureConfigSHA256)
+	if err != nil {
+		_ = driver.Close()
+		return nil, fmt.Errorf("verify pinned fixture config: %w", err)
+	}
+	return closerGroup{driver, fixtureConfig}, nil
+}
+
+func lockPinnedData(path, expectedSHA256 string) (io.Closer, error) {
+	if _, err := validateOrdinaryFile(path); err != nil || !isSHA256(expectedSHA256) {
+		return nil, errors.New("pinned data path or hash is invalid")
+	}
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(path), windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		windows.CloseHandle(handle)
+		return nil, errors.New("wrap pinned data handle")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		file.Close()
+		return nil, err
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if subtle.ConstantTimeCompare([]byte(actual), []byte(expectedSHA256)) != 1 {
+		file.Close()
+		return nil, errors.New("pinned data hash mismatch")
+	}
+	return file, nil
 }
 
 func (h *liveHarness) runScenario(t *testing.T, testCase scenario) {
@@ -532,97 +724,101 @@ func (h *liveHarness) runScenario(t *testing.T, testCase scenario) {
 	if err != nil {
 		t.Fatalf("capture baseline: %v", err)
 	}
-	if err := writeNewFile(baselinePath, baseline); err != nil {
-		t.Fatalf("preserve baseline: %v", err)
+	custody, err := newTrustedBaseline(caseDir, baselinePath, baseline)
+	if err != nil {
+		t.Fatalf("preserve trusted baseline: %v", err)
 	}
-	h.setActive(testCase.Name, baselinePath)
+	h.setActive(testCase.Name, custody)
 	defer func() {
-		if err := h.restoreAndProve(testCase.Name, caseDir, baselinePath, baseline); err != nil {
+		if err := h.restoreAndProve(testCase.Name, caseDir, custody); err != nil {
 			h.markPoisoned(err)
 			t.Errorf("FINAL RESTORATION COULD NOT BE PROVEN: %v", err)
 			return
 		}
 		h.clearActive()
+		_ = custody.Close()
 	}()
 
-	assertReachable(t, "baseline public sentinel", h.config.publicSentinel)
-	assertReachable(t, "baseline corporate sentinel", h.config.corporateSentinel)
-	if err := h.action(context.Background(), "case-setup", testCase.Name, baselinePath); err != nil {
+	h.assertReceipt(t, "baseline public sentinel", h.config.publicSentinel, h.config.binding.PublicSentinelIdentity, "")
+	h.assertReceipt(t, "baseline corporate sentinel", h.config.corporateSentinel, h.config.binding.CorporateSentinelIdentity, "")
+	if _, err := h.action("case-setup", testCase.Name, custody); err != nil {
 		t.Fatalf("case setup: %v", err)
 	}
-	if err := h.action(context.Background(), "fake-upstream-stop", testCase.Name, baselinePath); err != nil {
+	if _, err := h.action("fake-upstream-stop", testCase.Name, custody); err != nil {
 		t.Fatalf("force fake upstream absent: %v", err)
 	}
 
 	switch testCase.Name {
 	case "connect-success-to-fake-upstream":
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
-		assertReachable(t, "public sentinel through fake upstream", h.config.publicSentinel)
-		assertReachable(t, "corporate sentinel while connected", h.config.corporateSentinel)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
+		h.assertReceipt(t, "public sentinel through fake upstream", h.config.publicSentinel, h.config.binding.PublicSentinelIdentity, h.config.binding.FakeUpstreamIdentity)
+		h.assertReceipt(t, "corporate sentinel while connected", h.config.corporateSentinel, h.config.binding.CorporateSentinelIdentity, "")
 		h.disconnect(t)
 	case "upstream-absent":
 		h.connectWithUnavailableUpstream(t)
 		h.assertLeakBlocked(t)
 		h.disconnect(t)
 	case "upstream-dies-while-connected":
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
-		h.mustAction(t, "fake-upstream-stop", testCase.Name, baselinePath)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
+		h.mustAction(t, "fake-upstream-stop", testCase.Name, custody)
 		h.assertLeakBlocked(t)
 		h.disconnect(t)
 	case "core-exits":
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
-		h.mustAction(t, "core-crash", testCase.Name, baselinePath)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
+		h.mustAction(t, "core-crash", testCase.Name, custody)
 		h.waitForState(t, accessmodel.StateFailed)
 		h.assertLeakBlocked(t)
 		h.disconnect(t)
 	case "ui-exits":
-		h.mustAction(t, "ui-start", testCase.Name, baselinePath)
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
-		h.mustAction(t, "ui-exit", testCase.Name, baselinePath)
+		h.mustAction(t, "ui-start", testCase.Name, custody)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
+		h.mustAction(t, "ui-exit", testCase.Name, custody)
 		h.waitForState(t, accessmodel.StateConnected)
-		assertReachable(t, "public sentinel after UI exit", h.config.publicSentinel)
-		assertReachable(t, "corporate sentinel after UI exit", h.config.corporateSentinel)
+		h.assertReceipt(t, "public sentinel after UI exit", h.config.publicSentinel, h.config.binding.PublicSentinelIdentity, h.config.binding.FakeUpstreamIdentity)
+		h.assertReceipt(t, "corporate sentinel after UI exit", h.config.corporateSentinel, h.config.binding.CorporateSentinelIdentity, "")
 		h.disconnect(t)
 	case "service-restarts":
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
-		h.mustAction(t, "agent-crash", testCase.Name, baselinePath)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
+		h.mustAction(t, "agent-crash", testCase.Name, custody)
 		h.assertLeakBlocked(t)
-		h.mustAction(t, "agent-start", testCase.Name, baselinePath)
+		h.mustAction(t, "agent-start", testCase.Name, custody)
 		h.waitForState(t, accessmodel.StateDisconnected)
 	case "machine-style-recovery":
-		h.mustAction(t, "stage-machine-recovery", testCase.Name, baselinePath)
+		h.mustAction(t, "stage-machine-recovery", testCase.Name, custody)
 		h.assertLeakBlocked(t)
-		h.mustAction(t, "machine-recover", testCase.Name, baselinePath)
+		h.mustAction(t, "machine-recover", testCase.Name, custody)
 		h.waitForState(t, accessmodel.StateDisconnected)
 	case "twenty-connect-disconnect-cycles":
-		h.mustAction(t, "fake-upstream-start", testCase.Name, baselinePath)
+		h.mustAction(t, "fake-upstream-start", testCase.Name, custody)
 		for cycle := 1; cycle <= testCase.ConnectCycles; cycle++ {
 			h.connectMustSucceed(t)
-			assertReachable(t, fmt.Sprintf("public sentinel cycle %d", cycle), h.config.publicSentinel)
-			assertReachable(t, fmt.Sprintf("corporate sentinel cycle %d", cycle), h.config.corporateSentinel)
+			h.assertReceipt(t, fmt.Sprintf("public sentinel cycle %d", cycle), h.config.publicSentinel, h.config.binding.PublicSentinelIdentity, h.config.binding.FakeUpstreamIdentity)
+			h.assertReceipt(t, fmt.Sprintf("corporate sentinel cycle %d", cycle), h.config.corporateSentinel, h.config.binding.CorporateSentinelIdentity, "")
 			h.disconnect(t)
-			assertReachable(t, fmt.Sprintf("restored public sentinel cycle %d", cycle), h.config.publicSentinel)
-			assertReachable(t, fmt.Sprintf("restored corporate sentinel cycle %d", cycle), h.config.corporateSentinel)
+			h.assertReceipt(t, fmt.Sprintf("restored public sentinel cycle %d", cycle), h.config.publicSentinel, h.config.binding.PublicSentinelIdentity, "")
+			h.assertReceipt(t, fmt.Sprintf("restored corporate sentinel cycle %d", cycle), h.config.corporateSentinel, h.config.binding.CorporateSentinelIdentity, "")
 		}
 	case "uninstall-cleanup":
-		h.startUpstreamAndConnect(t, testCase.Name, baselinePath)
+		h.startUpstreamAndConnect(t, testCase.Name, custody)
 		h.disconnect(t)
-		h.mustAction(t, "uninstall", testCase.Name, baselinePath)
+		h.mustAction(t, "uninstall", testCase.Name, custody)
 	default:
 		t.Fatalf("unimplemented scenario %q", testCase.Name)
 	}
 }
 
-func (h *liveHarness) mustAction(t *testing.T, action, scenarioName, baselinePath string) {
+func (h *liveHarness) mustAction(t *testing.T, action, scenarioName string, baseline *trustedBaseline) fixtureproto.Response {
 	t.Helper()
-	if err := h.action(context.Background(), action, scenarioName, baselinePath); err != nil {
+	response, err := h.action(action, scenarioName, baseline)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return response
 }
 
-func (h *liveHarness) startUpstreamAndConnect(t *testing.T, scenarioName, baselinePath string) {
+func (h *liveHarness) startUpstreamAndConnect(t *testing.T, scenarioName string, baseline *trustedBaseline) {
 	t.Helper()
-	h.mustAction(t, "fake-upstream-start", scenarioName, baselinePath)
+	h.mustAction(t, "fake-upstream-start", scenarioName, baseline)
 	h.connectMustSucceed(t)
 }
 
@@ -687,79 +883,130 @@ func (h *liveHarness) waitForState(t *testing.T, want accessmodel.ConnectionStat
 
 func (h *liveHarness) assertLeakBlocked(t *testing.T) {
 	t.Helper()
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err := dialSentinel(h.config.publicSentinel); err == nil {
-			t.Fatalf("PUBLIC TCP LEAK: ordinary-gateway sentinel %s was reachable on attempt %d while tunnel was unavailable", h.config.publicSentinel, attempt)
+	probe := h.probeReceipt
+	if probe == nil {
+		probe = probeSentinelReceipt
+	}
+	if err := proveLeakBlocked(h.reconciliationWindow, h.probeInterval, h.config.publicSentinel, h.config.publicSentinelHealth, h.config.corporateSentinel, probe, h.config.binding.PublicSentinelIdentity, h.config.binding.CorporateSentinelIdentity); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type sentinelReceipt struct {
+	Nonce           string `json:"nonce"`
+	Identity        string `json:"identity"`
+	ViaFakeUpstream string `json:"via_fake_upstream,omitempty"`
+}
+
+func proveLeakBlocked(window, interval time.Duration, publicEndpoint, publicHealthEndpoint, corporateEndpoint string, probe func(string, string, string) (bool, error), publicIdentity, corporateIdentity string) error {
+	if window <= 0 || interval <= 0 || probe == nil {
+		return errors.New("leak-proof timing and probe must be configured")
+	}
+	deadline := time.Now().Add(window)
+	for attempt := 1; ; attempt++ {
+		received, _ := probe(publicEndpoint, publicIdentity, "")
+		if received {
+			return fmt.Errorf("PUBLIC TCP LEAK: ordinary-gateway sentinel was reachable on attempt %d while tunnel was unavailable", attempt)
+		}
+		if _, err := probe(publicHealthEndpoint, publicIdentity, ""); err != nil {
+			return fmt.Errorf("public sentinel health/ownership failed on attempt %d: %w", attempt, err)
+		}
+		if _, err := probe(corporateEndpoint, corporateIdentity, ""); err != nil {
+			return fmt.Errorf("corporate sentinel health/ownership failed on attempt %d: %w", attempt, err)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		if remaining < interval {
+			time.Sleep(remaining)
+		} else {
+			time.Sleep(interval)
 		}
 	}
-	assertReachable(t, "corporate sentinel during fail-closed state", h.config.corporateSentinel)
 }
 
-func assertReachable(t *testing.T, description, endpoint string) {
-	t.Helper()
-	if err := dialSentinel(endpoint); err != nil {
-		t.Fatalf("%s %s is unreachable: %v", description, endpoint, err)
+func probeSentinelReceipt(endpoint, expectedIdentity, expectedVia string) (bool, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return false, err
 	}
-}
-
-func dialSentinel(endpoint string) error {
 	connection, err := net.DialTimeout("tcp4", endpoint, probeTimeout)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return connection.Close()
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(probeTimeout))
+	if err := json.NewEncoder(connection).Encode(map[string]string{"nonce": nonce}); err != nil {
+		return true, err
+	}
+	var receipt sentinelReceipt
+	decoder := json.NewDecoder(bufio.NewReader(io.LimitReader(connection, 4097)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&receipt); err != nil {
+		return true, err
+	}
+	return true, validateSentinelReceipt(nonce, expectedIdentity, expectedVia, receipt)
 }
 
-func (h *liveHarness) capture(ctx context.Context, scenarioName, evidenceDirectory string) ([]byte, error) {
-	response, err := h.callDriver(ctx, driverRequest{ProtocolVersion: driverProtocolVersion, Action: "capture", Scenario: scenarioName, EvidenceDirectory: evidenceDirectory})
+func validateSentinelReceipt(nonce, expectedIdentity, expectedVia string, receipt sentinelReceipt) error {
+	if receipt.Nonce != nonce || nonce == "" || receipt.Identity != expectedIdentity || expectedIdentity == "" {
+		return errors.New("sentinel nonce/identity receipt mismatch")
+	}
+	if receipt.ViaFakeUpstream != expectedVia {
+		return errors.New("sentinel traversal receipt mismatch")
+	}
+	return nil
+}
+
+func (h *liveHarness) assertReceipt(t *testing.T, description, endpoint, identity, via string) {
+	t.Helper()
+	probe := h.probeReceipt
+	if probe == nil {
+		probe = probeSentinelReceipt
+	}
+	if _, err := probe(endpoint, identity, via); err != nil {
+		t.Fatalf("%s %s receipt failed: %v", description, endpoint, err)
+	}
+}
+
+func (h *liveHarness) capture(ctx context.Context, scenarioName, _ string) ([]byte, error) {
+	response, err := h.callDriver(ctx, fixtureproto.Request{Action: "capture", Scenario: scenarioName})
 	if err != nil {
 		return nil, err
 	}
-	return canonicalSnapshot(response.Snapshot)
+	return response.Snapshot.CanonicalState()
 }
 
-func canonicalSnapshot(data []byte) ([]byte, error) {
-	var snapshot map[string]json.RawMessage
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return nil, fmt.Errorf("decode snapshot: %w", err)
-	}
-	required := []string{"adapters", "dns", "owned_firewall_rules", "processes", "routes", "services"}
-	for _, name := range required {
-		value, exists := snapshot[name]
-		if !exists {
-			return nil, fmt.Errorf("snapshot is missing %s", name)
-		}
-		trimmed := bytes.TrimSpace(value)
-		if len(trimmed) == 0 || trimmed[0] != '[' {
-			return nil, fmt.Errorf("snapshot %s must be an array", name)
-		}
-		var entries []json.RawMessage
-		if err := json.Unmarshal(value, &entries); err != nil {
-			return nil, fmt.Errorf("snapshot %s must be an array: %w", name, err)
-		}
-	}
-	if len(snapshot) != len(required) {
-		return nil, errors.New("snapshot contains an unapproved surface")
-	}
-	return json.Marshal(snapshot)
-}
-
-func (h *liveHarness) restoreAndProve(scenarioName, caseDir, baselinePath string, baseline []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func (h *liveHarness) restoreAndProve(scenarioName, caseDir string, baseline *trustedBaseline) error {
+	cleanupErr, restoreErr := runRestorationActions(
+		func(ctx context.Context) error {
+			_, err := h.actionWithContext(ctx, "case-cleanup", scenarioName, baseline)
+			return err
+		},
+		func(ctx context.Context) error {
+			restorePath, err := baseline.RestoreInput()
+			if err != nil {
+				return err
+			}
+			request := fixtureproto.Request{Action: "restore", Scenario: scenarioName, BaselinePath: restorePath, BaselineSHA256: baseline.hash}
+			_, err = h.callDriver(ctx, request)
+			return err
+		},
+		h.cleanupTimeout,
+		h.restoreTimeout,
+	)
+	captureCtx, cancel := context.WithTimeout(context.Background(), h.actionTimeout)
 	defer cancel()
-	beforeErr := provePreservedBaseline(baselinePath, baseline)
-	cleanupErr := h.action(ctx, "case-cleanup", scenarioName, baselinePath)
-	restoreErr := h.action(ctx, "restore", scenarioName, baselinePath)
-	afterErr := provePreservedBaseline(baselinePath, baseline)
-	final, captureErr := h.capture(ctx, scenarioName, caseDir)
+	final, captureErr := h.capture(captureCtx, scenarioName, caseDir)
 	if captureErr == nil {
 		captureErr = writeNewFile(filepath.Join(caseDir, "final.json"), final)
 	}
-	if beforeErr != nil || cleanupErr != nil || restoreErr != nil || afterErr != nil || captureErr != nil {
-		return errors.Join(beforeErr, cleanupErr, restoreErr, afterErr, captureErr)
+	if cleanupErr != nil || restoreErr != nil || captureErr != nil {
+		return errors.Join(cleanupErr, restoreErr, captureErr)
 	}
-	if !bytes.Equal(baseline, final) {
-		drift := map[string]string{"baseline_sha256": digest(baseline), "final_sha256": digest(final)}
+	if !bytes.Equal(baseline.data, final) {
+		drift := map[string]string{"baseline_sha256": baseline.hash, "final_sha256": digest(final)}
 		encoded, _ := json.MarshalIndent(drift, "", "  ")
 		_ = writeNewFile(filepath.Join(caseDir, "STATE-DRIFT.json"), encoded)
 		return fmt.Errorf("exact baseline mismatch: before %s, after %s", drift["baseline_sha256"], drift["final_sha256"])
@@ -767,62 +1014,166 @@ func (h *liveHarness) restoreAndProve(scenarioName, caseDir, baselinePath string
 	return nil
 }
 
-func provePreservedBaseline(path string, want []byte) error {
-	got, err := os.ReadFile(path)
+func (h *liveHarness) action(action, scenarioName string, baseline *trustedBaseline) (fixtureproto.Response, error) {
+	timeout := h.actionTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return h.actionWithContext(ctx, action, scenarioName, baseline)
+}
+
+func (h *liveHarness) actionWithContext(ctx context.Context, action, scenarioName string, baseline *trustedBaseline) (fixtureproto.Response, error) {
+	request := fixtureproto.Request{Action: action, Scenario: scenarioName}
+	if baseline != nil {
+		request.BaselinePath = baseline.trustedPath
+		request.BaselineSHA256 = baseline.hash
+	}
+	return h.callDriver(ctx, request)
+}
+
+func (h *liveHarness) callDriver(ctx context.Context, request fixtureproto.Request) (fixtureproto.Response, error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		timeout := h.actionTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	type callResult struct {
+		response fixtureproto.Response
+		err      error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		response, err := h.callDriverOnce(ctx, request)
+		done <- callResult{response, err}
+	}()
+	select {
+	case result := <-done:
+		return result.response, result.err
+	case <-ctx.Done():
+		return fixtureproto.Response{}, ctx.Err()
+	}
+}
+
+func (h *liveHarness) callDriverOnce(ctx context.Context, request fixtureproto.Request) (fixtureproto.Response, error) {
+	if h.validateRunDirectory == nil || h.verifyAndLockDriver == nil || h.invokeDriver == nil {
+		return fixtureproto.Response{}, errors.New("driver custody is not configured")
+	}
+	if err := h.validateRunDirectory(); err != nil {
+		return fixtureproto.Response{}, fmt.Errorf("refuse action %s: %w", request.Action, err)
+	}
+	locked, err := h.verifyAndLockDriver()
 	if err != nil {
-		return fmt.Errorf("read preserved baseline: %w", err)
+		return fixtureproto.Response{}, fmt.Errorf("refuse action %s: %w", request.Action, err)
 	}
-	if !bytes.Equal(got, want) {
-		return errors.New("preserved baseline evidence was modified")
+	nonce, err := randomNonce()
+	if err != nil {
+		return fixtureproto.Response{}, err
 	}
-	return nil
+	request.ProtocolVersion = fixtureproto.ProtocolVersion
+	request.RequestNonce = nonce
+	request.RunID = h.runID
+	request.EvidenceDirectory = h.runDir
+	request.EvidenceDirectoryIdentity = h.runDirectoryIdentity
+	type invocationResult struct {
+		data []byte
+		err  error
+	}
+	invocation := make(chan invocationResult, 1)
+	go func() {
+		data, invokeErr := h.invokeDriver(ctx, request)
+		closeErr := locked.Close()
+		invocation <- invocationResult{data: data, err: errors.Join(invokeErr, closeErr)}
+	}()
+	var responseData []byte
+	select {
+	case result := <-invocation:
+		responseData, err = result.data, result.err
+	case <-ctx.Done():
+		return fixtureproto.Response{}, ctx.Err()
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return fixtureproto.Response{}, ctx.Err()
+		}
+		return fixtureproto.Response{}, fmt.Errorf("driver action %s failed", request.Action)
+	}
+	var response fixtureproto.Response
+	decoder := json.NewDecoder(bytes.NewReader(responseData))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&response); err != nil {
+		return fixtureproto.Response{}, fmt.Errorf("driver action %s returned invalid JSON: %w", request.Action, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fixtureproto.Response{}, fmt.Errorf("driver action %s returned trailing data", request.Action)
+	}
+	if err := fixtureproto.ValidateResponse(request, h.config.binding, response); err != nil {
+		return fixtureproto.Response{}, fmt.Errorf("driver action %s evidence refused: %w", request.Action, err)
+	}
+	canonical, err := response.Snapshot.CanonicalState()
+	if err != nil {
+		return fixtureproto.Response{}, err
+	}
+	if response.Evidence.Facts["post_state_sha256"] != digest(canonical) {
+		return fixtureproto.Response{}, errors.New("driver post-state hash does not match the bound snapshot")
+	}
+	if h.config.preflight.Hostname != "" && !strings.EqualFold(response.Evidence.Facts["host_identity"], h.config.preflight.Hostname) {
+		return fixtureproto.Response{}, errors.New("driver host identity does not match the disposable host authorization")
+	}
+	if request.Action == "capture" && response.Evidence.Facts["snapshot_sha256"] != digest(canonical) {
+		return fixtureproto.Response{}, errors.New("driver snapshot hash does not match the structured capture")
+	}
+	h.recordMu.Lock()
+	defer h.recordMu.Unlock()
+	h.actionCount++
+	record := map[string]any{"sequence": h.actionCount, "request_nonce": request.RequestNonce, "run_id": request.RunID, "action": request.Action, "scenario": request.Scenario, "binding": response.Binding, "evidence": response.Evidence, "snapshot": response.Snapshot, "ok": response.OK, "timestamp_utc": time.Now().UTC().Format(time.RFC3339Nano)}
+	recordData, _ := json.Marshal(record)
+	if err := writeNewFile(filepath.Join(h.runDir, fmt.Sprintf("action-%04d.json", h.actionCount)), recordData); err != nil {
+		return fixtureproto.Response{}, fmt.Errorf("write action evidence: %w", err)
+	}
+	return response, nil
 }
 
-func (h *liveHarness) action(ctx context.Context, action, scenarioName, baselinePath string) error {
-	_, err := h.callDriver(ctx, driverRequest{ProtocolVersion: driverProtocolVersion, Action: action, Scenario: scenarioName, EvidenceDirectory: h.runDir, BaselinePath: baselinePath})
-	return err
-}
-
-func (h *liveHarness) callDriver(ctx context.Context, request driverRequest) (driverResponse, error) {
-	h.actionMu.Lock()
-	defer h.actionMu.Unlock()
+func (h *liveHarness) invokeExecutableDriver(ctx context.Context, request fixtureproto.Request) ([]byte, error) {
 	requestData, err := json.Marshal(request)
 	if err != nil {
-		return driverResponse{}, err
+		return nil, err
 	}
-	var command *exec.Cmd
-	if strings.EqualFold(filepath.Ext(h.config.driverPath), ".ps1") {
-		command = exec.CommandContext(ctx, "pwsh.exe", "-NoProfile", "-NonInteractive", "-File", h.config.driverPath)
-	} else {
-		command = exec.CommandContext(ctx, h.config.driverPath)
-	}
+	command := exec.CommandContext(ctx, h.config.driverPath)
+	command.Env = append(environmentWithout(os.Environ(), envFixtureConfig), envFixtureConfig+"="+h.config.fixtureConfigPath)
 	command.Stdin = bytes.NewReader(append(requestData, '\n'))
 	var stdout bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
-		return driverResponse{}, fmt.Errorf("driver action %s failed: %w", request.Action, err)
+		return nil, err
 	}
-	var response driverResponse
-	decoder := json.NewDecoder(&stdout)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
-		return driverResponse{}, fmt.Errorf("driver action %s returned invalid JSON: %w", request.Action, err)
+	return stdout.Bytes(), nil
+}
+
+func environmentWithout(environment []string, name string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.EqualFold(entry[:min(len(entry), len(prefix))], prefix) {
+			result = append(result, entry)
+		}
 	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return driverResponse{}, fmt.Errorf("driver action %s returned trailing data", request.Action)
+	return result
+}
+
+func randomNonce() (string, error) {
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generate action nonce: %w", err)
 	}
-	if response.ProtocolVersion != driverProtocolVersion || !response.OK {
-		return driverResponse{}, fmt.Errorf("driver action %s refused with protocol %d", request.Action, response.ProtocolVersion)
-	}
-	h.actionCount++
-	record := map[string]any{"sequence": h.actionCount, "action": request.Action, "scenario": request.Scenario, "ok": response.OK, "timestamp_utc": time.Now().UTC().Format(time.RFC3339Nano)}
-	recordData, _ := json.Marshal(record)
-	if err := writeNewFile(filepath.Join(h.runDir, fmt.Sprintf("action-%04d.json", h.actionCount)), recordData); err != nil {
-		return driverResponse{}, fmt.Errorf("write action evidence: %w", err)
-	}
-	return response, nil
+	return hex.EncodeToString(nonce[:]), nil
 }
 
 func writeNewFile(path string, data []byte) error {
@@ -849,6 +1200,146 @@ func writeNewFile(path string, data []byte) error {
 	return nil
 }
 
+func newTrustedBaseline(caseDir, evidencePath string, data []byte) (*trustedBaseline, error) {
+	directoryHandle, directoryIdentityValue, err := openPinnedDirectory(caseDir)
+	if err != nil {
+		return nil, fmt.Errorf("pin baseline directory: %w", err)
+	}
+	if err := writeNewFile(evidencePath, data); err != nil {
+		directoryHandle.Close()
+		return nil, err
+	}
+	path, file, err := createProtectedImmutable(caseDir, ".trusted-baseline-", data)
+	if err != nil {
+		directoryHandle.Close()
+		return nil, err
+	}
+	return &trustedBaseline{
+		data:                  append([]byte(nil), data...),
+		hash:                  digest(data),
+		evidencePath:          evidencePath,
+		trustedPath:           path,
+		trustedHandle:         file,
+		caseDirectoryHandle:   directoryHandle,
+		caseDirectoryIdentity: directoryIdentityValue,
+	}, nil
+}
+
+func (b *trustedBaseline) Verify() error {
+	if b == nil || b.trustedHandle == nil {
+		return errors.New("trusted baseline custody is unavailable")
+	}
+	currentDirectoryIdentity, err := directoryIdentity(filepath.Dir(b.evidencePath))
+	if err != nil || currentDirectoryIdentity != b.caseDirectoryIdentity {
+		return errors.New("trusted baseline directory identity changed")
+	}
+	data := make([]byte, len(b.data))
+	if _, err := b.trustedHandle.ReadAt(data, 0); err != nil {
+		return fmt.Errorf("read trusted baseline handle: %w", err)
+	}
+	if !bytes.Equal(data, b.data) || digest(data) != b.hash {
+		return errors.New("trusted baseline handle no longer matches memory")
+	}
+	return nil
+}
+
+func (b *trustedBaseline) RestoreInput() (string, error) {
+	if err := b.Verify(); err != nil {
+		return "", err
+	}
+	evidence, evidenceErr := os.ReadFile(b.evidencePath)
+	if evidenceErr == nil && bytes.Equal(evidence, b.data) {
+		return b.trustedPath, nil
+	}
+	directory := filepath.Dir(b.evidencePath)
+	path, file, err := createProtectedImmutable(directory, ".trusted-restore-input-", b.data)
+	if err != nil {
+		return "", fmt.Errorf("recreate trusted restore input: %w", err)
+	}
+	b.restoreInputs = append(b.restoreInputs, file)
+	verification := make([]byte, len(b.data))
+	if _, err := file.ReadAt(verification, 0); err != nil || !bytes.Equal(verification, b.data) || digest(verification) != b.hash {
+		return "", errors.New("recreated restore input could not be verified")
+	}
+	return path, nil
+}
+
+func (b *trustedBaseline) Close() error {
+	if b == nil {
+		return nil
+	}
+	var errs []error
+	for _, file := range append([]*os.File{b.trustedHandle, b.caseDirectoryHandle}, b.restoreInputs...) {
+		if file != nil {
+			errs = append(errs, file.Close())
+		}
+	}
+	b.trustedHandle = nil
+	b.caseDirectoryHandle = nil
+	b.restoreInputs = nil
+	return errors.Join(errs...)
+}
+
+func createProtectedImmutable(directory, prefix string, data []byte) (string, *os.File, error) {
+	securityDescriptor, err := windows.SecurityDescriptorFromString(trustedBaselineSDDL)
+	if err != nil {
+		return "", nil, err
+	}
+	attributes := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: securityDescriptor}
+	for range 32 {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", nil, err
+		}
+		path := filepath.Join(directory, prefix+hex.EncodeToString(random[:])+".json")
+		pathUTF16, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return "", nil, err
+		}
+		handle, err := windows.CreateFile(pathUTF16, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ, attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		file := os.NewFile(uintptr(handle), path)
+		if file == nil {
+			_ = windows.CloseHandle(handle)
+			return "", nil, errors.New("wrap trusted baseline handle")
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			return "", nil, err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return "", nil, err
+		}
+		return path, file, nil
+	}
+	return "", nil, errors.New("could not allocate trusted baseline file")
+}
+
+func runRestorationActions(cleanup, restore func(context.Context) error, cleanupBudget, restoreBudget time.Duration) (error, error) {
+	cleanupErr := runBoundedAction(cleanup, cleanupBudget)
+	restoreErr := runBoundedAction(restore, restoreBudget)
+	return cleanupErr, restoreErr
+}
+
+func runBoundedAction(action func(context.Context) error, budget time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- action(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -863,16 +1354,16 @@ func clonePreflightInput(input preflightInput) preflightInput {
 	return result
 }
 
-func (h *liveHarness) setActive(scenarioName, baselinePath string) {
+func (h *liveHarness) setActive(scenarioName string, baseline *trustedBaseline) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.activeScenario, h.activeBaseline = scenarioName, baselinePath
+	h.activeScenario, h.activeBaseline = scenarioName, baseline
 }
 
 func (h *liveHarness) clearActive() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.activeScenario, h.activeBaseline = "", ""
+	h.activeScenario, h.activeBaseline = "", nil
 }
 
 func (h *liveHarness) markPoisoned(err error) {
@@ -890,30 +1381,46 @@ func (h *liveHarness) poisoned() error {
 func (h *liveHarness) mayReleaseLastChance() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.activeScenario == "" && h.activeBaseline == "" && h.restorePoison == nil
+	return h.activeScenario == "" && h.activeBaseline == nil && h.restorePoison == nil
 }
 
 func (h *liveHarness) lastChanceRestore() error {
 	h.mu.Lock()
-	scenarioName, baselinePath := h.activeScenario, h.activeBaseline
+	scenarioName, baseline := h.activeScenario, h.activeBaseline
 	h.mu.Unlock()
-	if scenarioName == "" || baselinePath == "" {
+	if scenarioName == "" || baseline == nil {
 		return h.poisoned()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	caseDir := filepath.Dir(baseline.evidencePath)
+	cleanupErr, restoreErr := runRestorationActions(
+		func(ctx context.Context) error {
+			_, err := h.actionWithContext(ctx, "case-cleanup", scenarioName, baseline)
+			return err
+		},
+		func(ctx context.Context) error {
+			restorePath, err := baseline.RestoreInput()
+			if err != nil {
+				return err
+			}
+			_, err = h.callDriver(ctx, fixtureproto.Request{Action: "restore", Scenario: scenarioName, BaselinePath: restorePath, BaselineSHA256: baseline.hash})
+			return err
+		},
+		h.cleanupTimeout,
+		h.restoreTimeout,
+	)
+	finalCtx, cancel := context.WithTimeout(context.Background(), h.actionTimeout)
 	defer cancel()
-	baseline, baselineErr := os.ReadFile(baselinePath)
-	cleanupErr := h.action(ctx, "case-cleanup", scenarioName, baselinePath)
-	restoreErr := h.action(ctx, "restore", scenarioName, baselinePath)
-	final, captureErr := h.capture(ctx, scenarioName, filepath.Dir(baselinePath))
+	final, captureErr := h.capture(finalCtx, scenarioName, caseDir)
 	var writeErr, driftErr error
 	if captureErr == nil {
-		writeErr = writeNewFile(filepath.Join(filepath.Dir(baselinePath), "last-chance-final.json"), final)
-		if baselineErr == nil && !bytes.Equal(baseline, final) {
-			driftErr = fmt.Errorf("last-chance state differs: before %s, after %s", digest(baseline), digest(final))
+		writeErr = writeNewFile(filepath.Join(caseDir, "last-chance-final.json"), final)
+		if !bytes.Equal(baseline.data, final) {
+			driftErr = fmt.Errorf("last-chance state differs: before %s, after %s", baseline.hash, digest(final))
 		}
 	}
-	return errors.Join(baselineErr, cleanupErr, restoreErr, captureErr, writeErr, driftErr)
+	closeErr := baseline.Close()
+	runCloseErr := h.closeRunDirectory()
+	return errors.Join(cleanupErr, restoreErr, captureErr, writeErr, driftErr, closeErr, runCloseErr)
 }
 
 func registerLastChance(harness *liveHarness) {
