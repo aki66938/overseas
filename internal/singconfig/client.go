@@ -175,11 +175,6 @@ func RenderClient(input ClientInput) ([]byte, error) {
 					Outbound: "direct",
 				},
 				{
-					DomainSuffix: internalSuffixes,
-					Action:       "route",
-					Outbound:     "direct",
-				},
-				{
 					Network: []string{"udp"},
 					Port:    []int{443},
 					Action:  "reject",
@@ -202,6 +197,13 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Final:          "public-dns",
 			ReverseMapping: true,
 		},
+	}
+	if len(internalSuffixes) > 0 {
+		config.Route.Rules = append(config.Route.Rules[:2], append([]routeRule{{
+			DomainSuffix: internalSuffixes,
+			Action:       "route",
+			Outbound:     "direct",
+		}}, config.Route.Rules[2:]...)...)
 	}
 	return json.Marshal(config)
 }

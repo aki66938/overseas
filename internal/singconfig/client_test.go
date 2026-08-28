@@ -155,6 +155,36 @@ func TestRenderClientRejectsInvalidNodeOrCredential(t *testing.T) {
 	}
 }
 
+func TestRenderClientOmitsInternalSuffixDirectRuleWhenNoSuffixesConfigured(t *testing.T) {
+	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
+		Node: accessmodel.Node{
+			ID:      "vm101",
+			Address: "172.20.9.15",
+			Port:    18443,
+		},
+		CorporateCIDRs: []string{"172.20.8.0/22"},
+		CorporateDNS:   []string{"172.20.10.1"},
+		Method:         "2022-blake3-aes-128-gcm",
+		Password:       "MDEyMzQ1Njc4OWFiY2RlZg==",
+	}))
+
+	if len(config.Route.Rules) != 5 {
+		t.Fatalf("route.rules = %d, want 5", len(config.Route.Rules))
+	}
+	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[2], nil, []string{"udp"}, []int{443}, nil, "")
+	assertRejectAction(t, config.Route.Rules[2])
+	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, nil, nil, "")
+	assertRejectAction(t, config.Route.Rules[3])
+	assertRouteRule(t, config.Route.Rules[4], nil, []string{"tcp"}, nil, nil, "tunnel")
+	for _, rule := range config.Route.Rules {
+		if _, ok := rule["domain_suffix"]; ok {
+			t.Fatalf("unexpected domain_suffix direct rule in %#v", rule)
+		}
+	}
+}
+
 func mustRenderClient(t *testing.T, input singconfig.ClientInput) []byte {
 	t.Helper()
 
