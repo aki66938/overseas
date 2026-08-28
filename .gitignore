@@ -9,3 +9,4 @@ dist/
 /artifacts/*.tmp
 /poc-probe.exe
 /coverage.out
+/build/

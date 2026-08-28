@@ -1,0 +1,111 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:fire="http://wixtoolset.org/schemas/v4/wxs/firewall">
+  <Fragment>
+    <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
+      <Component Id="InstallFolderAcl" Guid="2F06E3D6-B884-4D89-B63F-E692FB45D51E" Bitness="always64">
+        <CreateFolder>
+          <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)" />
+        </CreateFolder>
+      </Component>
+
+      <Component Id="AgentService" Guid="9C616B69-09D6-4430-9B5E-E93994734695" Bitness="always64">
+        <File Id="AgentExe" Source="overseas-agent.exe" KeyPath="yes" Checksum="yes">
+          <fire:FirewallException
+              Id="AgentOutboundRule"
+              Name="RegenBioOverseasAccess-AllowAgent-Out"
+              Description="RegenBio Overseas Access agent outbound control traffic"
+              Outbound="yes"
+              Protocol="tcp"
+              Scope="any"
+              Profile="all"
+              IgnoreFailure="no" />
+        </File>
+        <ServiceInstall
+              Id="AgentServiceInstall"
+              Name="RegenBioOverseasAccessAgent"
+              DisplayName="RegenBio Overseas Access Agent"
+              Description="Fail-closed RegenBio overseas-access controller"
+              Type="ownProcess"
+              Start="auto"
+              ErrorControl="normal"
+              Account="LocalSystem"
+              Vital="yes">
+            <util:ServiceConfig
+                FirstFailureActionType="restart"
+                SecondFailureActionType="restart"
+                ThirdFailureActionType="restart"
+                ResetPeriodInDays="1"
+                RestartServiceDelayInSeconds="5" />
+        </ServiceInstall>
+        <ServiceControl
+              Id="AgentServiceControl"
+              Name="RegenBioOverseasAccessAgent"
+              Start="install"
+              Stop="both"
+              Remove="uninstall"
+              Wait="yes" />
+        <RegistryValue
+            Root="HKLM"
+            Key="SYSTEM\CurrentControlSet\Services\RegenBioOverseasAccessAgent"
+            Name="DelayedAutostart"
+            Type="integer"
+            Value="1" />
+      </Component>
+
+      <Component Id="ClientUi" Guid="E22BA95A-6552-44AD-A61E-A8F21BE85A1C" Bitness="always64">
+        <File Id="ClientExe" Source="overseas-client.exe" KeyPath="yes" Checksum="yes">
+          <Shortcut
+              Id="StartMenuShortcut"
+              Directory="ProgramMenuFolder"
+              Name="RegenBio Overseas Access"
+              Description="Open RegenBio Overseas Access"
+              WorkingDirectory="INSTALLFOLDER"
+              Advertise="yes" />
+        </File>
+      </Component>
+
+      <Component Id="CoreRuntime" Guid="114DB7B9-FF83-4682-B2AC-411B9A6E6F36" Bitness="always64">
+        <File Id="SingBoxExe" Source="sing-box.exe" KeyPath="yes" Checksum="yes">
+          <fire:FirewallException
+              Id="CoreTcpOutboundRule"
+              Name="RegenBioOverseasAccess-AllowCoreTCP-Out"
+              Description="RegenBio Overseas Access core TCP traffic"
+              Outbound="yes"
+              Protocol="tcp"
+              Scope="any"
+              Profile="all"
+              IgnoreFailure="no" />
+          <fire:FirewallException
+              Id="CoreUdpOutboundRule"
+              Name="RegenBioOverseasAccess-AllowCoreUDP-Out"
+              Description="RegenBio Overseas Access core UDP traffic"
+              Outbound="yes"
+              Protocol="udp"
+              Scope="any"
+              Profile="all"
+              IgnoreFailure="no" />
+        </File>
+        <File Id="CoreManifest" Source="sing-box.manifest.json" Checksum="yes" />
+        <File Id="CronetRuntime" Source="libcronet.dll" Checksum="yes" />
+        <File Id="TunDriver" Source="wintun.dll" Checksum="yes" />
+        <File Id="ThirdPartyLicense" Source="LICENSE" Checksum="yes" />
+      </Component>
+      <Component Id="InstallerHarness" Guid="5AF50244-CB84-4B2D-80BD-B36315F29E54" Bitness="always64">
+        <File Id="InstallerHarnessFile" Source="install-client.ps1" KeyPath="yes" Checksum="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ClientPolicy" Directory="DATAFOLDER">
+      <Component Id="DataFolderAcl" Guid="4CF54659-6850-42C5-8564-54D62333A9D6" Bitness="always64">
+        <CreateFolder>
+          <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+        </CreateFolder>
+      </Component>
+      <Component Id="SignedPolicy" Guid="119915E6-1504-4D49-9EF0-9D76454629C6" Bitness="always64">
+        <File Id="AgentPolicy" Source="agent.yaml" KeyPath="yes" Checksum="yes" />
+        <File Id="AgentPolicySignature" Source="agent.yaml.p7s" Checksum="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

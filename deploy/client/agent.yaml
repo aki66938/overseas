@@ -1,0 +1,23 @@
+policy:
+  schema_version: 1
+  mode: poc
+  nodes:
+    - id: vm101
+      address: 172.20.9.15
+      port: 18443
+      priority: 10
+  corporate_cidrs:
+    - 172.20.8.0/22
+  corporate_dns:
+    - 172.20.9.1
+    - 172.20.9.2
+  internal_suffixes:
+    - ad.intra.regen-bio.com
+    - intra.regen-bio.com
+  block_udp: true
+  block_quic: true
+  credential:
+    kind: dpapi-file
+    path: C:\ProgramData\RegenBio\OverseasAccess\credential.bin
+core_sha256: a4476dd768168a77e249050066bb32774addefcc37da123978623e7b2819de28
+signer_allowlist: []

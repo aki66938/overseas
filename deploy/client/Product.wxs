@@ -1,0 +1,58 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="RegenBio Overseas Access"
+      Manufacturer="RegenBio"
+      Version="0.1.0"
+      UpgradeCode="A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1"
+      Scope="perMachine"
+      InstallerVersion="500"
+      Compressed="yes">
+    <SummaryInformation Description="RegenBio Overseas Access Windows client" Manufacturer="RegenBio" />
+    <MajorUpgrade
+        AllowSameVersionUpgrades="no"
+        DowngradeErrorMessage="A newer version of RegenBio Overseas Access is already installed. Downgrades are not permitted."
+        Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPCONTACT" Value="RegenBio IT" />
+    <Property Id="ARPCOMMENTS" Value="Managed corporate overseas-access client" />
+    <Property Id="ARPNOREPAIR" Value="0" />
+
+    <SetProperty
+        Id="MsiSafeRemove"
+        Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File &quot;[#InstallerHarnessFile]&quot; -Mode Uninstall -MsiPreRemove"
+        Before="MsiSafeRemove"
+        Sequence="execute"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction
+        Id="MsiSafeRemove"
+        BinaryRef="Wix4UtilCA_X64"
+        DllEntry="WixQuietExec"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+    <InstallExecuteSequence>
+      <Custom
+          Action="MsiSafeRemove"
+          Before="StopServices"
+          Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="CompanyFolder" Name="RegenBio">
+        <Directory Id="INSTALLFOLDER" Name="OverseasAccess" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="CompanyDataFolder" Name="RegenBio">
+        <Directory Id="DATAFOLDER" Name="OverseasAccess" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Complete" Title="RegenBio Overseas Access" Level="1">
+      <ComponentGroupRef Id="ClientFiles" />
+      <ComponentGroupRef Id="ClientPolicy" />
+    </Feature>
+  </Package>
+</Wix>
