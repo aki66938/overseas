@@ -3,9 +3,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"unicode/utf16"
 )
 
 type windowsTrustVerifier struct{}
@@ -13,19 +19,36 @@ type windowsTrustVerifier struct{}
 func main() { os.Exit(run(os.Args[1:], windowsTrustVerifier{}, os.Stderr)) }
 
 func runPowerShell(script string, args ...string) error {
-	commandArgs := []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "AllSigned", "-Command", script}
-	commandArgs = append(commandArgs, args...)
-	command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, commandArgs...)
+	preamble := `$payload=[Console]::In.ReadToEnd()|ConvertFrom-Json;$args=@($payload.arguments);Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop;`
+	encoded := encodePowerShellCommand(preamble + script)
+	var stdin bytes.Buffer
+	if err := json.NewEncoder(&stdin).Encode(map[string][]string{"arguments": args}); err != nil {
+		return errors.New("PowerShell trust input encoding failed")
+	}
+	command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-EncodedCommand", encoded)
+	command.Stdin = &stdin
 	command.Stdout = nil
 	command.Stderr = nil
 	if err := command.Run(); err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf("PowerShell trust verification failed with exit code %d", exitError.ExitCode())
+		}
 		return errors.New("PowerShell trust verification failed")
 	}
 	return nil
 }
 
+func encodePowerShellCommand(script string) string {
+	codeUnits := utf16.Encode([]rune(script))
+	encoded := make([]byte, len(codeUnits)*2)
+	for index, codeUnit := range codeUnits {
+		binary.LittleEndian.PutUint16(encoded[index*2:], codeUnit)
+	}
+	return base64.StdEncoding.EncodeToString(encoded)
+}
+
 func (windowsTrustVerifier) verifyPackage(msi, thumbprint string) error {
-	const script = `$ErrorActionPreference='Stop'; $signature=Get-AuthenticodeSignature -LiteralPath $args[0]; if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { exit 10 }; if ($signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $args[1].ToUpperInvariant()) { exit 11 }`
+	const script = `$ErrorActionPreference='Stop'; $signature=Get-AuthenticodeSignature -LiteralPath $args[0]; if ($signature.Status.ToString() -ne 'Valid' -or $null -eq $signature.SignerCertificate) { exit 10 }; if ($signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $args[1].ToUpperInvariant()) { exit 11 }`
 	return runPowerShell(script, msi, thumbprint)
 }
 
@@ -57,7 +80,7 @@ function Assert-Detached([byte[]]$Bytes,[string]$SignaturePath,[string]$Signer) 
 }
 function Assert-Authenticode([string]$Path,[string[]]$Signers) {
   $signature=Get-AuthenticodeSignature -LiteralPath $Path
-  if($signature.Status-ne'Valid'-or$null-eq$signature.SignerCertificate-or$Signers-notcontains$signature.SignerCertificate.Thumbprint.ToUpperInvariant()){throw 'Authenticode signer mismatch'}
+  if($signature.Status.ToString() -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $Signers -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){throw 'Authenticode signer mismatch'}
 }
 $bundle=$args[0];$msi=$args[1];$fixturePath=$args[2];$fixtureSignature=$args[3];$releasePath=$args[4];$releaseSignature=$args[5]
 $expectedCommit=$args[6];$expectedMSI=$args[7];$expectedFixture=$args[8];$expectedRelease=$args[9]
@@ -115,7 +138,7 @@ func (windowsTrustVerifier) verifyBundle(input bundleInput) error {
 }
 
 func (windowsTrustVerifier) verifyPayload(input payloadInput) error {
-	const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $manifestBytes=[IO.File]::ReadAllBytes($args[2]); $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$manifestBytes); $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true); $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[3]).Trim())); $cms.CheckSignature($true); if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $args[4].ToUpperInvariant()) { exit 20 }; $manifest=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json; if ($manifest.schema_version -ne 1 -or @($manifest.files).Count -eq 0) { exit 21 }; foreach($entry in @($manifest.files)){ $name=[string]$entry.name; if($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $name.Contains('..')){exit 22}; $root=switch([string]$entry.destination){'program-files'{$args[0]}'program-data'{$args[1]}default{exit 23}}; $path=Join-Path $root $name; if(-not(Test-Path -LiteralPath $path -PathType Leaf)){exit 24}; if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$entry.sha256).ToUpperInvariant()){exit 25}; if($entry.authenticode_required -eq $true){$signature=Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or @($entry.authenticode_thumbprints|ForEach-Object{$_.ToUpperInvariant()}) -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){exit 26}} }`
+	const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $manifestBytes=[IO.File]::ReadAllBytes($args[2]); $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$manifestBytes); $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true); $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[3]).Trim())); $cms.CheckSignature($true); if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $args[4].ToUpperInvariant()) { exit 20 }; $manifest=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json; if ($manifest.schema_version -ne 1 -or @($manifest.files).Count -eq 0) { exit 21 }; foreach($entry in @($manifest.files)){ $name=[string]$entry.name; if($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $name.Contains('..')){exit 22}; $root=switch([string]$entry.destination){'program-files'{$args[0]}'program-data'{$args[1]}default{exit 23}}; $path=Join-Path $root $name; if(-not(Test-Path -LiteralPath $path -PathType Leaf)){exit 24}; if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$entry.sha256).ToUpperInvariant()){exit 25}; if($entry.authenticode_required -eq $true){$signature=Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status.ToString() -ne 'Valid' -or $null -eq $signature.SignerCertificate -or @($entry.authenticode_thumbprints|ForEach-Object{$_.ToUpperInvariant()}) -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){exit 26}} }`
 	return runPowerShell(script, input.ProgramFiles, input.ProgramData, input.Manifest, input.Signature, input.Thumbprint)
 }
 
