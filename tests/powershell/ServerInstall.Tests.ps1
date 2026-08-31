@@ -558,7 +558,10 @@ Describe 'Server firewall and directory ownership units' {
         $ServiceName = 'RegenBioOverseasAccessServer'
         $ServerPort = 18443
         $ExpectedEmployeeCIDR = '172.20.8.0/22'
-        Mock Get-NetFirewallRule { [pscustomobject] @{ Name = 'PackagedRule'; Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow' } }
+        $packagedRule = New-CimInstance -ClassName MSFT_NetFirewallRule -Namespace root/standardcimv2 -ClientOnly -Property @{
+            Name = 'PackagedRule'; Enabled = 1; Direction = 1; Action = 2
+        }
+        Mock Get-NetFirewallRule { $packagedRule }
         Mock Get-NetFirewallPortFilter { [pscustomobject] @{ Protocol = 'Any'; LocalPort = 'Any' } }
         Mock Get-NetFirewallApplicationFilter { [pscustomobject] @{ Program = 'Any'; Package = 'S-1-15-2-2434737943-167758768-3180539153' } }
         Mock Get-NetFirewallServiceFilter { [pscustomobject] @{ Service = 'Any' } }
