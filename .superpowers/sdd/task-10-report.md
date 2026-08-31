@@ -16,8 +16,12 @@ or runtime state was intentionally mutated.
    `DESKTOP-1BVR2H6`, a fresh observation, a per-run nonce, fixed service/core/
    config paths, listener PID/image identity, service→core PID parentage, and the
    fixture-manifest hashes. The Ed25519 OpenSSH fingerprint must decode as an
-   exact 32-byte `SHA256:` value and is re-derived from the run-owned known_hosts
-   file used by the pinned SSH invocation.
+   exact 32-byte `SHA256:` value. The runbook creates a new ordinary known_hosts
+   file from exactly one independently approved `DESKTOP-1BVR2H6 ssh-ed25519`
+   public-key line, requires exactly one derived fingerprint equal to the
+   separately approved value, rejects ambiguity, and pins both that file and the
+   Ed25519 host-key algorithm on every SSH invocation. Live keyscan output is
+   never trusted.
 2. `installer-verifier.exe verify-bundle` is a real pre-install command. A clean-
    host staged verifier is pinned externally by SHA256 and Authenticode before it
    validates the MSI, fixture manifest/signature, release artifact manifest/
@@ -43,11 +47,21 @@ or runtime state was intentionally mutated.
    JSON references are cleared; no secret-bearing configuration is staged.
 7. Server WhatIf compares executable before/after canonical snapshots of sorted
    filesystem hashes, registry values, scheduled-task identity, server service,
-   firewall, and server-owned evidence/marker state. Volatile timestamps, process
-   IDs, process inventories, and network probes are excluded from that equality
+   the exact three fixed firewall-rule names with stable rule/description,
+   application, port, address, service, interface, interface-type, and security
+   filter surfaces, and server-owned evidence/marker state. Duplicate named
+   rules and capture errors fail closed. Volatile timestamps, process IDs,
+   process inventories, and network probes are excluded from that equality
    surface.
-8. The runbook invokes the pinned Go `provision-credential` helper after MSI and
-   clears its non-secret action-config environment variable in `finally`.
+8. The runbook invokes the pinned Go `provision-credential` helper after MSI with
+   four exact external SHA256 bindings for the action config, generated client
+   config, credential-source executable, and server attestation. The helper
+   verifies the action bytes before parsing and all other bytes before parsing or
+   execution; internal action-config hashes are only secondary cross-checks.
+   Expected hashes must originate in the already verified signed fixture/release
+   contract or an independently approved operator ledger, never from the files
+   being checked. The non-secret action-config environment variable is cleared
+   in `finally`.
 
 ## Strict RED → GREEN evidence
 
@@ -57,6 +71,11 @@ schema gates; provisioner contract mismatches and connected-pipe orchestration;
 dead local-server symbol rejection; runbook attestation/WhatIf/verifier/stdin/
 PID-capture requirements; exact standard TUN binding; and plaintext template
 property cleanup. Each focused suite was rerun to green after its implementation.
+The final trust-boundary follow-up likewise produced focused RED failures for
+the missing four-hash direct-provisioning contract, keyscan-derived/multi-key
+SSH trust, incomplete exact-name firewall capture, malformed nested canonical
+PowerShell, and non-fail-closed capture; each corresponding focused suite was
+then rerun to GREEN.
 
 ## Fresh non-live verification executed on 2026-08-31
 
@@ -84,7 +103,9 @@ property cleanup. Each focused suite was rerun to green after its implementation
   signature, MSI, verifier, and executable signer allowlists plus externally
   pinned hashes and exact source commit.
 - Locked generated client/server/action configurations and signed contract
-  values; the approved VM101 Ed25519 SHA256 host-key fingerprint.
+  values, the four externally authorized provisioning hashes, and both the sole
+  approved VM101 Ed25519 public-key line and its independently approved SHA256
+  host-key fingerprint.
 - An authorized disposable physical Windows host, empty ACL-protected evidence
   directory, telecom PIN-holder availability, maintenance/recovery ownership,
   and written stop/go approvals.

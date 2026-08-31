@@ -23,7 +23,7 @@ func TestCredentialPipelineUsesConnectedAnonymousPipeAndNoParentSecretChannels(t
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, required := range []string{"os.Pipe()", "provisioner.Stdin = readPipe", "sourceCommand.Stdout = writePipe", "plan.ProvisionerArgs...", "plan.SourceArgs...", `os.Args[1] == "provision-credential"`, "backend.provisionCredential(ctx)"} {
+	for _, required := range []string{"os.Pipe()", "provisioner.Stdin = readPipe", "sourceCommand.Stdout = writePipe", "plan.ProvisionerArgs...", "plan.SourceArgs...", `os.Args[1] == "provision-credential"`, "b.provisionCredential(ctx)"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("credential pipeline lacks %q", required)
 		}
@@ -32,6 +32,34 @@ func TestCredentialPipelineUsesConnectedAnonymousPipeAndNoParentSecretChannels(t
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("credential pipeline exposes parent channel %q", forbidden)
 		}
+	}
+}
+
+func TestDirectCredentialModeVerifiesExternalBindingsBeforeParsingOrExecution(t *testing.T) {
+	_, current, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller path unavailable")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(current), "main_windows.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"runProvisionCredential(os.Args[2:])",
+		"parseDirectProvisioningTrust(args)",
+		"loadRuntimeConfigWithExpectedActionHash(trust.ActionConfigSHA256)",
+		"verifyDirectProvisioningBindings(config, trust, clientData, attestationData, sourceHash)",
+		"fixtureconfig.ParseServerAttestation(attestationData)",
+		"attestation.Validate(manifest",
+		"provisionCredentialWithTrust(ctx, clientData, trust.CredentialSourceSHA256)",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("direct credential path lacks %q", required)
+		}
+	}
+	if strings.Index(text, "verifyDirectProvisioningBindings(config, trust, clientData, attestationData, sourceHash)") > strings.Index(text, "fixtureconfig.ParseServerAttestation(attestationData)") {
+		t.Fatal("remote attestation is parsed before its external hash is verified")
 	}
 }
 

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +12,88 @@ import (
 
 	"corp.example/overseas-access-gateway/tests/integration/fixtureconfig"
 )
+
+func digestForTest(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
+
+func TestDirectProvisioningTrustRequiresExactExternalHashArguments(t *testing.T) {
+	want := directProvisioningTrust{
+		ActionConfigSHA256:      strings.Repeat("a", 64),
+		ClientConfigSHA256:      strings.Repeat("b", 64),
+		CredentialSourceSHA256:  strings.Repeat("c", 64),
+		ServerAttestationSHA256: strings.Repeat("d", 64),
+	}
+	args := []string{
+		"--expected-action-config-sha256", want.ActionConfigSHA256,
+		"--expected-client-config-sha256", want.ClientConfigSHA256,
+		"--expected-credential-source-sha256", want.CredentialSourceSHA256,
+		"--expected-server-attestation-sha256", want.ServerAttestationSHA256,
+	}
+	if got, err := parseDirectProvisioningTrust(args); err != nil || got != want {
+		t.Fatalf("parseDirectProvisioningTrust() = %#v, %v", got, err)
+	}
+	for index := range args {
+		invalid := append([]string(nil), args...)
+		invalid = append(invalid[:index], invalid[index+1:]...)
+		if _, err := parseDirectProvisioningTrust(invalid); err == nil {
+			t.Fatalf("missing argument %d accepted", index)
+		}
+	}
+	invalid := append([]string(nil), args...)
+	invalid[1] = strings.Repeat("A", 64)
+	if _, err := parseDirectProvisioningTrust(invalid); err == nil {
+		t.Fatal("uppercase/self-normalized digest accepted")
+	}
+}
+
+func TestDirectProvisioningTrustRejectsSubstitutedConfigClientSourceAndAttestation(t *testing.T) {
+	actionConfig := []byte(`{"schema_version":1}`)
+	trustedConfig, err := parseExternallyTrustedActionConfig(actionConfig, digestForTest(actionConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseExternallyTrustedActionConfig([]byte(`{"schema_version":2}`), digestForTest(actionConfig)); err == nil {
+		t.Fatal("substituted action config accepted")
+	}
+
+	client, attestation := []byte("credentialless-client"), []byte("remote-attestation")
+	trust := directProvisioningTrust{
+		ClientConfigSHA256:      digestForTest(client),
+		CredentialSourceSHA256:  strings.Repeat("c", 64),
+		ServerAttestationSHA256: digestForTest(attestation),
+	}
+	trustedConfig.CredentialSourceSHA256 = trust.CredentialSourceSHA256
+	trustedConfig.ServerAttestationSHA256 = trust.ServerAttestationSHA256
+	if err := verifyDirectProvisioningBindings(trustedConfig, trust, client, attestation, trust.CredentialSourceSHA256); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		config      runtimeConfig
+		client      []byte
+		attestation []byte
+		sourceHash  string
+	}{
+		{name: "client", config: trustedConfig, client: []byte("substituted"), attestation: attestation, sourceHash: trust.CredentialSourceSHA256},
+		{name: "attestation", config: trustedConfig, client: client, attestation: []byte("substituted"), sourceHash: trust.CredentialSourceSHA256},
+		{name: "source bytes", config: trustedConfig, client: client, attestation: attestation, sourceHash: strings.Repeat("e", 64)},
+		{name: "source internal hash", config: func() runtimeConfig {
+			value := trustedConfig
+			value.CredentialSourceSHA256 = strings.Repeat("e", 64)
+			return value
+		}(), client: client, attestation: attestation, sourceHash: strings.Repeat("e", 64)},
+		{name: "attestation internal hash", config: func() runtimeConfig {
+			value := trustedConfig
+			value.ServerAttestationSHA256 = strings.Repeat("e", 64)
+			return value
+		}(), client: client, attestation: attestation, sourceHash: trust.CredentialSourceSHA256},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := verifyDirectProvisioningBindings(test.config, trust, test.client, test.attestation, test.sourceHash); err == nil {
+				t.Fatal("substitution accepted")
+			}
+		})
+	}
+}
 
 func TestDispatchSupportsExactlyReviewedLifecycleActions(t *testing.T) {
 	want := []string{"case-setup", "fake-upstream-start", "fake-upstream-stop", "core-crash", "ui-start", "ui-exit", "agent-crash", "agent-start", "stage-machine-recovery", "machine-recover", "uninstall", "case-cleanup", "restore"}

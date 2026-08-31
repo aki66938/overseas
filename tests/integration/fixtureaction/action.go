@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -46,6 +47,66 @@ type credentialPlan struct {
 	ProvisionerArgs []string
 	SourcePath      string
 	SourceArgs      []string
+}
+
+type directProvisioningTrust struct {
+	ActionConfigSHA256      string
+	ClientConfigSHA256      string
+	CredentialSourceSHA256  string
+	ServerAttestationSHA256 string
+}
+
+func parseDirectProvisioningTrust(args []string) (directProvisioningTrust, error) {
+	if len(args) != 8 ||
+		args[0] != "--expected-action-config-sha256" ||
+		args[2] != "--expected-client-config-sha256" ||
+		args[4] != "--expected-credential-source-sha256" ||
+		args[6] != "--expected-server-attestation-sha256" {
+		return directProvisioningTrust{}, errors.New("direct provisioning trust contract is invalid")
+	}
+	trust := directProvisioningTrust{
+		ActionConfigSHA256: args[1], ClientConfigSHA256: args[3],
+		CredentialSourceSHA256: args[5], ServerAttestationSHA256: args[7],
+	}
+	for _, value := range []string{trust.ActionConfigSHA256, trust.ClientConfigSHA256, trust.CredentialSourceSHA256, trust.ServerAttestationSHA256} {
+		if !validExternalSHA256(value) {
+			return directProvisioningTrust{}, errors.New("direct provisioning trust contract is invalid")
+		}
+	}
+	return trust, nil
+}
+
+func validExternalSHA256(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func sha256Bytes(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func parseExternallyTrustedActionConfig(data []byte, expectedSHA256 string) (runtimeConfig, error) {
+	if !validExternalSHA256(expectedSHA256) || sha256Bytes(data) != expectedSHA256 {
+		return runtimeConfig{}, errors.New("external action config hash mismatch")
+	}
+	return fixtureconfig.ParseActionConfig(data)
+}
+
+func verifyDirectProvisioningBindings(config runtimeConfig, trust directProvisioningTrust, clientData, attestationData []byte, sourceSHA256 string) error {
+	if config.CredentialSourceSHA256 != trust.CredentialSourceSHA256 || sourceSHA256 != trust.CredentialSourceSHA256 {
+		return errors.New("external credential source hash mismatch")
+	}
+	if config.ServerAttestationSHA256 != trust.ServerAttestationSHA256 || sha256Bytes(attestationData) != trust.ServerAttestationSHA256 {
+		return errors.New("external server attestation hash mismatch")
+	}
+	if sha256Bytes(clientData) != trust.ClientConfigSHA256 {
+		return errors.New("external client config hash mismatch")
+	}
+	return nil
 }
 
 func runCaseSetup(operation string, requireClean, install func(string) error, provision, startAgent func() error) error {

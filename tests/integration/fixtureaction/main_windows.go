@@ -43,8 +43,8 @@ type windowsBackend struct {
 
 func main() {
 	if len(os.Args) > 1 {
-		if len(os.Args) == 2 && os.Args[1] == "provision-credential" {
-			if err := runProvisionCredential(); err != nil {
+		if os.Args[1] == "provision-credential" {
+			if err := runProvisionCredential(os.Args[2:]); err != nil {
 				os.Exit(1)
 			}
 			return
@@ -60,15 +60,41 @@ func main() {
 	}
 }
 
-func runProvisionCredential() error {
-	config, manifest, payload, err := loadRuntimeConfig()
+func runProvisionCredential(args []string) error {
+	trust, err := parseDirectProvisioningTrust(args)
 	if err != nil {
+		return err
+	}
+	config, manifest, payload, err := loadRuntimeConfigWithExpectedActionHash(trust.ActionConfigSHA256)
+	if err != nil {
+		return err
+	}
+	clientData, err := os.ReadFile(config.GeneratedConfigPath)
+	if err != nil {
+		return errors.New("locked fixture client config is unavailable for credential provisioning")
+	}
+	attestationData, err := os.ReadFile(config.ServerAttestationPath)
+	if err != nil {
+		return errors.New("remote server attestation is unavailable for credential provisioning")
+	}
+	sourceHash, err := hashFile(config.CredentialSourcePath)
+	if err != nil {
+		return errors.New("credential source is unavailable for credential provisioning")
+	}
+	if err := verifyDirectProvisioningBindings(config, trust, clientData, attestationData, sourceHash); err != nil {
+		return err
+	}
+	attestation, err := fixtureconfig.ParseServerAttestation(attestationData)
+	if err != nil {
+		return err
+	}
+	if err := attestation.Validate(manifest, config.ServerListenerEndpoint, config.ServerConfigSHA256, config.ServerHostKeyFingerprint, config.ServerAttestationRunNonce); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), credentialTimeout)
 	defer cancel()
 	backend := &windowsBackend{config: config, manifest: manifest, payload: payload}
-	return backend.provisionCredential(ctx)
+	return backend.provisionCredentialWithTrust(ctx, clientData, trust.CredentialSourceSHA256)
 }
 
 func runAction() error {
@@ -102,6 +128,10 @@ func runAction() error {
 }
 
 func loadRuntimeConfig() (runtimeConfig, fixtureconfig.Manifest, fixtureconfig.PayloadManifest, error) {
+	return loadRuntimeConfigWithExpectedActionHash("")
+}
+
+func loadRuntimeConfigWithExpectedActionHash(expectedActionSHA256 string) (runtimeConfig, fixtureconfig.Manifest, fixtureconfig.PayloadManifest, error) {
 	path := os.Getenv(actionConfigEnvironment)
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return runtimeConfig{}, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, errors.New("action config path is invalid")
@@ -110,7 +140,12 @@ func loadRuntimeConfig() (runtimeConfig, fixtureconfig.Manifest, fixtureconfig.P
 	if err != nil {
 		return runtimeConfig{}, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, err
 	}
-	config, err := fixtureconfig.ParseActionConfig(data)
+	var config runtimeConfig
+	if expectedActionSHA256 == "" {
+		config, err = fixtureconfig.ParseActionConfig(data)
+	} else {
+		config, err = parseExternallyTrustedActionConfig(data, expectedActionSHA256)
+	}
 	if err != nil {
 		return config, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, err
 	}
@@ -351,6 +386,10 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 	if err != nil {
 		return errors.New("locked fixture client config is unavailable for credential provisioning")
 	}
+	return b.provisionCredentialWithTrust(ctx, clientData, b.config.CredentialSourceSHA256)
+}
+
+func (b *windowsBackend) provisionCredentialWithTrust(ctx context.Context, clientData []byte, expectedSourceSHA256 string) error {
 	plan, err := provisionerPlan(b.config, clientData, b.payload, time.Now().UTC())
 	if err != nil {
 		return err
@@ -364,7 +403,10 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 	if actual, hashErr := hashFile(plan.ProvisionerPath); hashErr != nil || actual != provisionerHash {
 		return errors.New("installed credential provisioner hash mismatch")
 	}
-	if actual, hashErr := hashFile(plan.SourcePath); hashErr != nil || actual != b.config.CredentialSourceSHA256 {
+	if b.config.CredentialSourceSHA256 != expectedSourceSHA256 {
+		return errors.New("external credential source binding mismatch")
+	}
+	if actual, hashErr := hashFile(plan.SourcePath); hashErr != nil || actual != expectedSourceSHA256 {
 		return errors.New("credential source hash mismatch")
 	}
 	readPipe, writePipe, err := os.Pipe()

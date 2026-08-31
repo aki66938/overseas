@@ -164,33 +164,42 @@ function Capture-ManagedProcess {
 
 ## 1. Pin the SSH host key and inspect VM facts (read-only)
 
-The actual SSH SHA256 host key fingerprint is a required external input. Replace
-only the placeholder below with the value approved out-of-band; never paste an
-SSH private key. Compare the `ssh-keygen` output exactly before pinning the
-scanned key. A mismatch is a hard stop.
+The exact Ed25519 known-host public-key line and its SSH SHA256 fingerprint are
+two independently approved external inputs. Replace only the placeholders below;
+never paste an SSH private key or construct trust from a live key scan. The file
+must contain that sole key, and its independently derived fingerprint must match
+exactly. Any ambiguity is a hard stop.
 
 ```powershell
 $VmSshHost = 'DESKTOP-1BVR2H6'
 $VmSshTarget = 'Administrator@DESKTOP-1BVR2H6'
 $KnownHostsPath = Join-Path $ArtifactsPath 'known_hosts'
-$ScannedHostKeyPath = Join-Path $ArtifactsPath 'vm-ed25519.pub'
+$ApprovedVmEd25519KnownHostLine = '<INDEPENDENTLY-APPROVED-DESKTOP-1BVR2H6-ED25519-KNOWN-HOST-LINE>'
 $ActualHostKeyFingerprint = '<SHA256-FINGERPRINT-SUPPLIED-OUT-OF-BAND>'
 if ($ActualHostKeyFingerprint -cnotmatch '^SHA256:[A-Za-z0-9+/]{43}$') { throw 'Approved SSH fingerprint is not an exact Ed25519 SHA256 fingerprint.' }
-& ssh-keyscan.exe -t ed25519 $VmSshHost > $ScannedHostKeyPath
-$SshKeyscanSucceeded = $?
-$SshKeyscanExitCode = $LASTEXITCODE
-if (-not $SshKeyscanSucceeded -or $SshKeyscanExitCode -ne 0) { throw '& ssh-keyscan.exe -t ed25519 $VmSshHost > $ScannedHostKeyPath failed to launch or exited with code $SshKeyscanExitCode.' }
-& ssh-keygen.exe -lf $ScannedHostKeyPath -E sha256
-$SshKeygenSucceeded = $?
-$SshKeygenExitCode = $LASTEXITCODE
-if (-not $SshKeygenSucceeded -or $SshKeygenExitCode -ne 0) { throw '& ssh-keygen.exe -lf $ScannedHostKeyPath -E sha256 failed to launch or exited with code $SshKeygenExitCode.' }
-Read-Host 'Compare the displayed fingerprint to $ActualHostKeyFingerprint; type the approved fingerprint to continue' | ForEach-Object { if ($_ -cne $ActualHostKeyFingerprint) { throw 'SSH host-key fingerprint mismatch.' } }
-Copy-Item -LiteralPath $ScannedHostKeyPath -Destination $KnownHostsPath -ErrorAction Stop
-$PinnedKnownHostsFingerprintLine = & ssh-keygen.exe -lf $KnownHostsPath -E sha256
+$ApprovedKnownHostParts = @($ApprovedVmEd25519KnownHostLine.Split([char[]] @(' '), [StringSplitOptions]::RemoveEmptyEntries))
+if ($ApprovedVmEd25519KnownHostLine -cnotmatch '^DESKTOP-1BVR2H6 ssh-ed25519 [A-Za-z0-9+/]+={0,2}$' -or $ApprovedKnownHostParts.Count -ne 3 -or $ApprovedKnownHostParts[0] -cne 'DESKTOP-1BVR2H6' -or $ApprovedKnownHostParts[1] -cne 'ssh-ed25519') { throw 'Approved known-host line is not exactly one DESKTOP-1BVR2H6 Ed25519 entry.' }
+try { $ApprovedKnownHostKeyBlob = [Convert]::FromBase64String($ApprovedKnownHostParts[2]) } catch { throw 'Approved Ed25519 known-host key is not valid base64.' }
+if ($ApprovedKnownHostKeyBlob.Count -eq 0) { throw 'Approved Ed25519 known-host key is empty.' }
+$KnownHostsStream = [IO.File]::Open($KnownHostsPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+    $KnownHostsBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($ApprovedVmEd25519KnownHostLine + [Environment]::NewLine)
+    $KnownHostsStream.Write($KnownHostsBytes, 0, $KnownHostsBytes.Length)
+    $KnownHostsStream.Flush($true)
+}
+finally { $KnownHostsStream.Dispose() }
+$KnownHostsItem = Get-Item -LiteralPath $KnownHostsPath -Force -ErrorAction Stop
+if (($KnownHostsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $KnownHostsItem.PSIsContainer) { throw 'Pinned known_hosts is not one ordinary file.' }
+$PinnedKnownHostLines = @(Get-Content -LiteralPath $KnownHostsPath -ErrorAction Stop)
+if ($PinnedKnownHostLines.Count -ne 1 -or $PinnedKnownHostLines[0] -cne $ApprovedVmEd25519KnownHostLine) { throw 'Pinned known_hosts does not contain exactly the approved entry.' }
+$PinnedKnownHostsFingerprintLines = @(& ssh-keygen.exe -lf $KnownHostsPath -E sha256)
 $PinnedKnownHostsFingerprintSucceeded = $?
 $PinnedKnownHostsFingerprintExitCode = $LASTEXITCODE
-if (-not $PinnedKnownHostsFingerprintSucceeded -or $PinnedKnownHostsFingerprintExitCode -ne 0) { throw '$PinnedKnownHostsFingerprintLine = & ssh-keygen.exe -lf $KnownHostsPath -E sha256 failed to launch or exited with code $PinnedKnownHostsFingerprintExitCode.' }
-$PinnedKnownHostsFingerprint = [regex]::Match(($PinnedKnownHostsFingerprintLine -join ' '), 'SHA256:[A-Za-z0-9+/]{43}').Value
+if (-not $PinnedKnownHostsFingerprintSucceeded -or $PinnedKnownHostsFingerprintExitCode -ne 0) { throw '$PinnedKnownHostsFingerprintLines = @(& ssh-keygen.exe -lf $KnownHostsPath -E sha256) failed to launch or exited with code $PinnedKnownHostsFingerprintExitCode.' }
+if ($PinnedKnownHostsFingerprintLines.Count -ne 1) { throw 'Pinned known_hosts did not produce exactly one fingerprint line.' }
+$PinnedKnownHostsFingerprintMatches = @([regex]::Matches($PinnedKnownHostsFingerprintLines[0], 'SHA256:[A-Za-z0-9+/]{43}'))
+if ($PinnedKnownHostsFingerprintMatches.Count -ne 1) { throw 'Pinned known_hosts did not produce exactly one SHA256 fingerprint.' }
+$PinnedKnownHostsFingerprint = $PinnedKnownHostsFingerprintMatches[0].Value
 if ($PinnedKnownHostsFingerprint -cne $ActualHostKeyFingerprint) { throw 'Pinned known_hosts fingerprint differs from the approved fingerprint.' }
 ```
 
@@ -203,20 +212,20 @@ $VmBaselinePath = Join-Path $BaselineDirectory 'baseline-vm.json'
 $TelecomConnectPath = Join-Path $BaselineDirectory 'telecom-connect.json'
 $VmFactsCommand = 'powershell.exe -NoProfile -Command "Get-ComputerInfo | Select-Object CsName,WindowsProductName,WindowsVersion,OsBuildNumber | ConvertTo-Json -Compress"'
 $VmBaselineCommand = 'powershell.exe -NoProfile -Command "[ordered]@{ adapters=Get-NetAdapter; routes=Get-NetRoute; dns=Get-DnsClientServerAddress; listeners=Get-NetTCPConnection -State Listen; services=Get-Service; processes=Get-Process; firewall=Get-NetFirewallRule; sing_box=(Get-Command sing-box.exe -ErrorAction SilentlyContinue); direct_google=(Test-NetConnection -ComputerName www.google.com -Port 443 -InformationLevel Detailed) } | ConvertTo-Json -Depth 6"'
-$VmCanonicalStateCommand = 'powershell.exe -NoProfile -Command "$roots=@(''C:\Program Files\RegenBio\OverseasAccessServer'',''C:\ProgramData\RegenBio\OverseasAccessServer'',''C:\Staging\OverseasAccessServer'');function H([string]$p){(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant()};$filesystem=@(foreach($root in $roots){if(Test-Path -LiteralPath $root){Get-ChildItem -LiteralPath $root -Recurse -Force|Sort-Object FullName|ForEach-Object{[ordered]@{path=$_.FullName;kind=$(if($_.PSIsContainer){''directory''}else{''file''});length=$(if($_.PSIsContainer){0}else{$_.Length});sha256=$(if($_.PSIsContainer){''''}else{H $_.FullName})}}}else{[ordered]@{path=$root;kind=''absent'';length=0;sha256=''''}}});$registry=@(foreach($key in @(''HKLM:\SYSTEM\CurrentControlSet\Services\RegenBioOverseasAccessServer'',''HKLM:\SOFTWARE\RegenBio\OverseasAccessServer'')){if(Test-Path -LiteralPath $key){$value=Get-ItemProperty -LiteralPath $key;[ordered]@{path=$key;values=@($value.PSObject.Properties|Where-Object{$_.Name-notlike''PS*''}|Sort-Object Name|ForEach-Object{[ordered]@{name=$_.Name;value=[string]$_.Value}})}}else{[ordered]@{path=$key;values=@()}}});$scheduled_tasks=@(Get-ScheduledTask|Where-Object{$_.TaskName-like''*RegenBio*''-or$_.TaskPath-like''*RegenBio*''}|Sort-Object TaskPath,TaskName|Select-Object TaskPath,TaskName);$server_service=@(Get-CimInstance Win32_Service -Filter ""Name=''RegenBioOverseasAccessServer''""|Select-Object Name,State,StartMode,PathName);$server_firewall=@(Get-NetFirewallRule|Where-Object{$_.Group-eq''RegenBioOverseasAccessServer''}|Sort-Object Name|Select-Object Name,DisplayName,Enabled,Direction,Action,Profile);$server_owned_state=@($filesystem|Where-Object{$_.path-like''*.fixture-owner.json''-or$_.path-like''*runtime-manifest.json''-or$_.path-like''*evidence.json''});[ordered]@{filesystem=$filesystem;registry=$registry;scheduled_tasks=$scheduled_tasks;server_service=$server_service;server_firewall=$server_firewall;server_owned_state=$server_owned_state}|ConvertTo-Json -Compress -Depth 10"'
+$VmCanonicalStateCommand = 'powershell.exe -NoProfile -Command "$ErrorActionPreference=''Stop'';$roots=@(''C:\Program Files\RegenBio\OverseasAccessServer'',''C:\ProgramData\RegenBio\OverseasAccessServer'',''C:\Staging\OverseasAccessServer'');function H([string]$p){(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant()};$filesystem=@(foreach($root in $roots){if(Test-Path -LiteralPath $root){Get-ChildItem -LiteralPath $root -Recurse -Force|Sort-Object FullName|ForEach-Object{[ordered]@{path=$_.FullName;kind=$(if($_.PSIsContainer){''directory''}else{''file''});length=$(if($_.PSIsContainer){0}else{$_.Length});sha256=$(if($_.PSIsContainer){''''}else{H $_.FullName})}}}else{[ordered]@{path=$root;kind=''absent'';length=0;sha256=''''}}});$registry=@(foreach($key in @(''HKLM:\SYSTEM\CurrentControlSet\Services\RegenBioOverseasAccessServer'',''HKLM:\SOFTWARE\RegenBio\OverseasAccessServer'')){if(Test-Path -LiteralPath $key){$value=Get-ItemProperty -LiteralPath $key;[ordered]@{path=$key;values=@($value.PSObject.Properties|Where-Object{$_.Name-notlike''PS*''}|Sort-Object Name|ForEach-Object{[ordered]@{name=$_.Name;value=[string]$_.Value}})}}else{[ordered]@{path=$key;values=@()}}});$scheduled_tasks=@(Get-ScheduledTask|Where-Object{$_.TaskName-like''*RegenBio*''-or$_.TaskPath-like''*RegenBio*''}|Sort-Object TaskPath,TaskName|Select-Object TaskPath,TaskName);$server_service=@(Get-CimInstance Win32_Service -Filter ""Name=''RegenBioOverseasAccessServer''""|Select-Object Name,State,StartMode,PathName);function A($v){return @($v|ForEach-Object{[string]$_}|Sort-Object)};$firewallNames=@(''RegenBioOverseasAccess-AllowEmployee-In'',''RegenBioOverseasAccess-Block8080-Remote'',''RegenBioOverseasAccess-BlockManagement-Employee'');$server_firewall=@(foreach($name in $firewallNames){$rules=@(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue);if($rules.Count-eq 0){[ordered]@{name=$name;present=$false;rule=$null;application=@();port=@();address=@();service=@();interface=@();interface_type=@();security=@()}}elseif($rules.Count-eq 1){$rule=$rules[0];$ruleDefinition=[ordered]@{Name=[string]$rule.Name;DisplayName=[string]$rule.DisplayName;Description=[string]$rule.Description;DisplayGroup=[string]$rule.DisplayGroup;Group=[string]$rule.Group;Enabled=[string]$rule.Enabled;Profile=(A $rule.Profile);Platform=(A $rule.Platform);Direction=[string]$rule.Direction;Action=[string]$rule.Action;EdgeTraversalPolicy=[string]$rule.EdgeTraversalPolicy;LooseSourceMapping=[string]$rule.LooseSourceMapping;LocalOnlyMapping=[string]$rule.LocalOnlyMapping;Owner=[string]$rule.Owner;PolicyStoreSourceType=[string]$rule.PolicyStoreSourceType;PolicyStoreSource=[string]$rule.PolicyStoreSource;RemoteDynamicKeywordAddresses=(A $rule.RemoteDynamicKeywordAddresses);PolicyAppId=[string]$rule.PolicyAppId};$application=@($rule|Get-NetFirewallApplicationFilter|ForEach-Object{[ordered]@{Program=[string]$_.Program;Package=[string]$_.Package}}|Sort-Object Program,Package);$port=@($rule|Get-NetFirewallPortFilter|ForEach-Object{[ordered]@{Protocol=[string]$_.Protocol;LocalPort=(A $_.LocalPort);RemotePort=(A $_.RemotePort);IcmpType=(A $_.IcmpType);DynamicTarget=[string]$_.DynamicTarget}}|Sort-Object Protocol,DynamicTarget);$address=@($rule|Get-NetFirewallAddressFilter|ForEach-Object{[ordered]@{LocalAddress=(A $_.LocalAddress);RemoteAddress=(A $_.RemoteAddress)}}|Sort-Object {$_.LocalAddress-join'',''},{$_.RemoteAddress-join'',''});$service=@($rule|Get-NetFirewallServiceFilter|ForEach-Object{[ordered]@{Service=(A $_.Service)}}|Sort-Object {$_.Service-join'',''});$interface=@($rule|Get-NetFirewallInterfaceFilter|ForEach-Object{[ordered]@{InterfaceAlias=(A $_.InterfaceAlias)}}|Sort-Object {$_.InterfaceAlias-join'',''});$interfaceType=@($rule|Get-NetFirewallInterfaceTypeFilter|ForEach-Object{[ordered]@{InterfaceType=(A $_.InterfaceType)}}|Sort-Object {$_.InterfaceType-join'',''});$security=@($rule|Get-NetFirewallSecurityFilter|ForEach-Object{[ordered]@{Authentication=(A $_.Authentication);Encryption=(A $_.Encryption);OverrideBlockRules=[string]$_.OverrideBlockRules;LocalUser=(A $_.LocalUser);RemoteUser=(A $_.RemoteUser);RemoteMachine=(A $_.RemoteMachine);RemoteMachineAuthorizedList=(A $_.RemoteMachineAuthorizedList);RemoteMachineExceptions=(A $_.RemoteMachineExceptions);RemoteUserAuthorizedList=(A $_.RemoteUserAuthorizedList);RemoteUserExceptions=(A $_.RemoteUserExceptions)}}|Sort-Object {$_|ConvertTo-Json -Compress -Depth 4});[ordered]@{name=$name;present=$true;rule=$ruleDefinition;application=$application;port=$port;address=$address;service=$service;interface=$interface;interface_type=$interfaceType;security=$security}}else{throw ''ambiguous server firewall rule $name''}});$server_owned_state=@($filesystem|Where-Object{$_.path-like''*.fixture-owner.json''-or$_.path-like''*runtime-manifest.json''-or$_.path-like''*evidence.json''});[ordered]@{filesystem=$filesystem;registry=$registry;scheduled_tasks=$scheduled_tasks;server_service=$server_service;server_firewall=$server_firewall;server_owned_state=$server_owned_state}|ConvertTo-Json -Compress -Depth 10"'
 $TelecomConnectCommand = 'powershell.exe -NoProfile -Command "curl.exe --proxy http://127.0.0.1:8080 --connect-timeout 15 https://www.google.com/generate_204 -o NUL; `$CurlSucceeded = `$?; `$CurlExitCode = `$LASTEXITCODE; if (-not `$CurlSucceeded -or `$CurlExitCode -ne 0) { exit `$CurlExitCode }"'
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath
 $VmFactsSucceeded = $?
 $VmFactsExitCode = $LASTEXITCODE
-if (-not $VmFactsSucceeded -or $VmFactsExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath failed to launch or exited with code $VmFactsExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath
+if (-not $VmFactsSucceeded -or $VmFactsExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath failed to launch or exited with code $VmFactsExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath
 $VmBaselineSucceeded = $?
 $VmBaselineExitCode = $LASTEXITCODE
-if (-not $VmBaselineSucceeded -or $VmBaselineExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath failed to launch or exited with code $VmBaselineExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath
+if (-not $VmBaselineSucceeded -or $VmBaselineExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath failed to launch or exited with code $VmBaselineExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath
 $TelecomConnectSucceeded = $?
 $TelecomConnectExitCode = $LASTEXITCODE
-if (-not $TelecomConnectSucceeded -or $TelecomConnectExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath failed to launch or exited with code $TelecomConnectExitCode.' }
+if (-not $TelecomConnectSucceeded -or $TelecomConnectExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath failed to launch or exited with code $TelecomConnectExitCode.' }
 ```
 
 Review and sign the facts: OS, adapter, interface index 4, routes, DNS,
@@ -283,18 +292,18 @@ if ($listeners.Count -ne 1 -or [int] $listeners[0].OwningProcess -ne [int] $core
 $ServerAttestationScript = $ServerAttestationScript.Replace('__HOST_KEY_FINGERPRINT__', $ActualHostKeyFingerprint).Replace('__RUN_NONCE__', $ServerAttestationRunNonce)
 $ServerAttestationEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ServerAttestationScript))
 $ServerAttestationCommand = "powershell.exe -NoProfile -EncodedCommand $ServerAttestationEncoded"
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath
 $VmWhatIfBeforeSucceeded = $?
 $VmWhatIfBeforeExitCode = $LASTEXITCODE
-if (-not $VmWhatIfBeforeSucceeded -or $VmWhatIfBeforeExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath failed to launch or exited with code $VmWhatIfBeforeExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath
+if (-not $VmWhatIfBeforeSucceeded -or $VmWhatIfBeforeExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath failed to launch or exited with code $VmWhatIfBeforeExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath
 $ServerWhatIfSucceeded = $?
 $ServerWhatIfExitCode = $LASTEXITCODE
-if (-not $ServerWhatIfSucceeded -or $ServerWhatIfExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath failed to launch or exited with code $ServerWhatIfExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath
+if (-not $ServerWhatIfSucceeded -or $ServerWhatIfExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath failed to launch or exited with code $ServerWhatIfExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath
 $VmWhatIfAfterSucceeded = $?
 $VmWhatIfAfterExitCode = $LASTEXITCODE
-if (-not $VmWhatIfAfterSucceeded -or $VmWhatIfAfterExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath failed to launch or exited with code $VmWhatIfAfterExitCode.' }
+if (-not $VmWhatIfAfterSucceeded -or $VmWhatIfAfterExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath failed to launch or exited with code $VmWhatIfAfterExitCode.' }
 Compare-CanonicalStateSnapshots -BeforePath $VmWhatIfBeforePath -AfterPath $VmWhatIfAfterPath -Label 'server-WhatIf filesystem registry scheduled tasks server-owned state'
 ```
 
@@ -310,18 +319,18 @@ match the detached manifest, and the code-prerequisite ledger must be closed.
 
 ```powershell
 $VmPreInstallPath = Join-Path $ArtifactsPath 'server-preinstall-inventory.json'
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmPreInstallPath
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmPreInstallPath
 $VmPreInstallSucceeded = $?
 $VmPreInstallExitCode = $LASTEXITCODE
-if (-not $VmPreInstallSucceeded -or $VmPreInstallExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmPreInstallPath failed to launch or exited with code $VmPreInstallExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath
+if (-not $VmPreInstallSucceeded -or $VmPreInstallExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmPreInstallPath failed to launch or exited with code $VmPreInstallExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath
 $ServerInstallSucceeded = $?
 $ServerInstallExitCode = $LASTEXITCODE
-if (-not $ServerInstallSucceeded -or $ServerInstallExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath failed to launch or exited with code $ServerInstallExitCode.' }
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath
+if (-not $ServerInstallSucceeded -or $ServerInstallExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath failed to launch or exited with code $ServerInstallExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath
 $ServerStatusSucceeded = $?
 $ServerStatusExitCode = $LASTEXITCODE
-if (-not $ServerStatusSucceeded -or $ServerStatusExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath failed to launch or exited with code $ServerStatusExitCode.' }
+if (-not $ServerStatusSucceeded -or $ServerStatusExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath failed to launch or exited with code $ServerStatusExitCode.' }
 & ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath
 $ServerAttestationSucceeded = $?
 $ServerAttestationExitCode = $LASTEXITCODE
@@ -494,6 +503,12 @@ $ExpectedMsiSha256 = '<EXTERNALLY-PINNED-MSI-SHA256>'
 $ExpectedFixtureManifestSha256 = '<EXTERNALLY-PINNED-FIXTURE-MANIFEST-SHA256>'
 $ExpectedReleaseManifestSha256 = '<EXTERNALLY-PINNED-ARTIFACT-MANIFEST-SHA256>'
 $ExpectedSourceCommit = '<SIGNED-SOURCE-COMMIT>'
+$ExpectedActionConfigSha256 = '<SIGNED-OR-INDEPENDENTLY-APPROVED-ACTION-CONFIG-SHA256>'
+$ExpectedClientConfigSha256 = '<SIGNED-OR-INDEPENDENTLY-APPROVED-CLIENT-CONFIG-SHA256>'
+$ExpectedCredentialSourceSha256 = '<SIGNED-OR-INDEPENDENTLY-APPROVED-CREDENTIAL-SOURCE-SHA256>'
+$ExpectedServerAttestationSha256 = '<SIGNED-OR-INDEPENDENTLY-APPROVED-SERVER-ATTESTATION-SHA256>'
+$DirectProvisioningExpectedHashes = @($ExpectedActionConfigSha256, $ExpectedClientConfigSha256, $ExpectedCredentialSourceSha256, $ExpectedServerAttestationSha256)
+if (@($DirectProvisioningExpectedHashes | Where-Object { $_ -cnotmatch '^[a-f0-9]{64}$' }).Count -ne 0) { throw 'Direct provisioning expected hashes are absent or malformed.' }
 if ((Get-FileHash -LiteralPath $StagedVerifierPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne $ExpectedStagedVerifierSha256) { throw 'clean-host staged verifier hash mismatch.' }
 $StagedVerifierSignature = Get-AuthenticodeSignature -FilePath $StagedVerifierPath -ErrorAction Stop
 if ($StagedVerifierSignature.Status -ne 'Valid' -or $StagedVerifierSignature.SignerCertificate.Thumbprint -cne $VerifierSignerThumbprint) { throw 'clean-host staged verifier signature mismatch.' }
@@ -509,10 +524,10 @@ if (-not $MsiInstallSucceeded -or $MsiInstallExitCode -ne 0) { throw '& msiexec.
 if ((Get-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction Stop).Status -ne 'Stopped') { throw 'Install must leave the agent stopped before provisioning.' }
 $env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG = $ActionConfigPath
 try {
-& $ActionHelperPath provision-credential
+& $ActionHelperPath provision-credential --expected-action-config-sha256 $ExpectedActionConfigSha256 --expected-client-config-sha256 $ExpectedClientConfigSha256 --expected-credential-source-sha256 $ExpectedCredentialSourceSha256 --expected-server-attestation-sha256 $ExpectedServerAttestationSha256
 $CredentialProvisioningSucceeded = $?
 $CredentialProvisioningExitCode = $LASTEXITCODE
-if (-not $CredentialProvisioningSucceeded -or $CredentialProvisioningExitCode -ne 0) { throw '& $ActionHelperPath provision-credential failed to launch or exited with code $CredentialProvisioningExitCode.' }
+if (-not $CredentialProvisioningSucceeded -or $CredentialProvisioningExitCode -ne 0) { throw '& $ActionHelperPath provision-credential --expected-action-config-sha256 $ExpectedActionConfigSha256 --expected-client-config-sha256 $ExpectedClientConfigSha256 --expected-credential-source-sha256 $ExpectedCredentialSourceSha256 --expected-server-attestation-sha256 $ExpectedServerAttestationSha256 failed to launch or exited with code $CredentialProvisioningExitCode.' }
 }
 finally { Remove-Item Env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG -ErrorAction SilentlyContinue }
 if (-not (Test-Path -LiteralPath 'C:\ProgramData\RegenBio\OverseasAccess\credential.bin' -PathType Leaf)) { throw 'credential.bin was not created.' }
@@ -522,6 +537,7 @@ if ((Get-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction Stop).Status -
 
 Never use a command line, response file, temporary file, registry entry,
 evidence field, or log for the credential. The source stdout is connected directly to provisioner stdin by the Go helper.
+The four expected hashes must come from the already verified signed fixture/release contract or independently approved operator ledger; never compute them from the action config, generated client config, credential source, or attestation being verified.
 The signed method, endpoint, and expiry are
 passed as non-secret fixed arguments to both processes; only the secret-bearing
 document traverses the anonymous pipe. Click the shipped UI's enable/disable
@@ -645,10 +661,10 @@ the VM immediately before and after the action; preserve the rollback evidence
 and compare it to the original VM baseline. The guarded exact action is:
 
 ```powershell
-& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath
 $ServerRollbackSucceeded = $?
 $ServerRollbackExitCode = $LASTEXITCODE
-if (-not $ServerRollbackSucceeded -or $ServerRollbackExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath failed to launch or exited with code $ServerRollbackExitCode.' }
+if (-not $ServerRollbackSucceeded -or $ServerRollbackExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath failed to launch or exited with code $ServerRollbackExitCode.' }
 ```
 
 Then uninstall the custom client (if present), confirm the standard-client

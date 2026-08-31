@@ -233,18 +233,17 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
     It 'requires guarded SSH, VM inventory, baseline, telecom CONNECT, and server operations' {
         $lines = Get-SingBoxRunbookLines
 
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh-keyscan.exe -t ed25519 $VmSshHost > $ScannedHostKeyPath' -Prefix 'SshKeyscan'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh-keygen.exe -lf $ScannedHostKeyPath -E sha256' -Prefix 'SshKeygen'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath' -Prefix 'VmFacts'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath' -Prefix 'VmBaseline'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath' -Prefix 'TelecomConnect'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath' -Prefix 'ServerWhatIf'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath' -Prefix 'ServerInstall'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath' -Prefix 'ServerStatus'
+        Assert-GuardedNativeCommand -Lines $lines -Command '$PinnedKnownHostsFingerprintLines = @(& ssh-keygen.exe -lf $KnownHostsPath -E sha256)' -Prefix 'PinnedKnownHostsFingerprint'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath' -Prefix 'VmFacts'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath' -Prefix 'VmBaseline'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath' -Prefix 'TelecomConnect'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath' -Prefix 'ServerWhatIf'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath' -Prefix 'ServerInstall'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath' -Prefix 'ServerStatus'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath' -Prefix 'ServerAttestation'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath' -Prefix 'ServerRollback'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath' -Prefix 'ServerRollback'
 
         $runbook = $lines -join "`n"
         foreach ($text in @(
@@ -260,15 +259,55 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 			'host_key_fingerprint', 'run_nonce', 'service_sha256', 'core_sha256', 'config_sha256',
 			'service_pid', 'core_pid', 'core_parent_pid', 'listener_image_path', 'listener_image_sha256',
 			'$PinnedKnownHostsFingerprint -cne $ActualHostKeyFingerprint',
+			'$ApprovedVmEd25519KnownHostLine',
+			'$ApprovedKnownHostParts.Count -ne 3',
+			"`$ApprovedKnownHostParts[0] -cne 'DESKTOP-1BVR2H6'",
+			"`$ApprovedKnownHostParts[1] -cne 'ssh-ed25519'",
+			'[IO.FileMode]::CreateNew',
+			'[IO.FileAttributes]::ReparsePoint',
+			'$PinnedKnownHostLines.Count -ne 1',
+			'$PinnedKnownHostsFingerprintLines.Count -ne 1',
+			'$PinnedKnownHostsFingerprintMatches.Count -ne 1',
 			'$ServerAttestationValue.host_identity -cne ''DESKTOP-1BVR2H6''',
 			'$ServerAttestationValue.run_nonce -cne $ServerAttestationRunNonce'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required VM evidence or server-operation contract.'
         }
+		Assert-NotMatches -Text $runbook -Pattern 'ssh-keyscan|ScannedHostKeyPath' -Message 'Known-host trust must not be constructed from keyscan output.'
+		$sshLines = @($lines | Where-Object { $_ -like '& ssh.exe *' })
+		Assert-True -Condition ($sshLines.Count -gt 0) -Message 'Runbook has no SSH commands.'
+		foreach ($sshLine in $sshLines) {
+			Assert-Matches -Text $sshLine -Pattern ([regex]::Escape('-o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath')) -Message 'Every SSH invocation must pin the sole Ed25519 key algorithm and known_hosts file.'
+		}
 
 		$canonicalLine = @($lines | Where-Object { $_ -like '$VmCanonicalStateCommand =*' })
 		Assert-Equal -Actual $canonicalLine.Count -Expected 1 -Message 'Canonical WhatIf command must be declared exactly once.'
+		. ([scriptblock]::Create($canonicalLine[0]))
+		$canonicalPrefix = 'powershell.exe -NoProfile -Command "'
+		Assert-True -Condition ($VmCanonicalStateCommand.StartsWith($canonicalPrefix) -and $VmCanonicalStateCommand.EndsWith('"')) -Message 'Canonical WhatIf command wrapper is malformed.'
+		$canonicalInner = $VmCanonicalStateCommand.Substring($canonicalPrefix.Length, $VmCanonicalStateCommand.Length - $canonicalPrefix.Length - 1)
+		$canonicalParseErrors = $null
+		[void] [Management.Automation.Language.Parser]::ParseInput($canonicalInner, [ref] $null, [ref] $canonicalParseErrors)
+		Assert-Equal -Actual @($canonicalParseErrors).Count -Expected 0 -Message 'Nested canonical WhatIf command must parse.'
+		Assert-Matches -Text $canonicalInner -Pattern ([regex]::Escape("`$ErrorActionPreference='Stop'")) -Message 'Nested canonical WhatIf command must fail closed on every capture error.'
 		Assert-NotMatches -Text $canonicalLine[0] -Pattern 'Get-Process|Test-NetConnection|captured_utc|ObservedAt|ProcessId' -Message 'Canonical WhatIf snapshot contains volatile state.'
+		foreach ($text in @(
+			"'RegenBioOverseasAccess-AllowEmployee-In'",
+			"'RegenBioOverseasAccess-Block8080-Remote'",
+			"'RegenBioOverseasAccess-BlockManagement-Employee'",
+			'Get-NetFirewallRule -Name $name', 'Description',
+			'Get-NetFirewallApplicationFilter', 'Get-NetFirewallPortFilter',
+			'Get-NetFirewallAddressFilter', 'Get-NetFirewallServiceFilter',
+			'Get-NetFirewallInterfaceFilter', 'Get-NetFirewallInterfaceTypeFilter',
+			'Get-NetFirewallSecurityFilter',
+			'DisplayName', 'Description', 'DisplayGroup', 'Group', 'Enabled', 'Profile', 'Platform', 'Direction', 'Action',
+			'EdgeTraversalPolicy', 'LooseSourceMapping', 'LocalOnlyMapping', 'Owner', 'PolicyStoreSourceType', 'PolicyStoreSource', 'RemoteDynamicKeywordAddresses', 'PolicyAppId',
+			'Protocol', 'LocalPort', 'RemotePort', 'IcmpType', 'DynamicTarget',
+			'Authentication', 'Encryption', 'OverrideBlockRules', 'LocalUser', 'RemoteUser', 'RemoteMachine', 'RemoteMachineAuthorizedList', 'RemoteMachineExceptions', 'RemoteUserAuthorizedList', 'RemoteUserExceptions'
+		)) {
+			Assert-Matches -Text $canonicalLine[0] -Pattern ([regex]::Escape($text)) -Message 'Canonical WhatIf firewall surface is incomplete.'
+		}
+		Assert-NotMatches -Text $canonicalLine[0] -Pattern 'Get-NetFirewallRule\|Where-Object\s*\{\s*\$_\.Group' -Message 'Canonical WhatIf firewall capture must use only the exact three rule names, not Group ownership.'
     }
 
     It 'gates the standard client, MSI verification, pipe-only provisioning, and lifecycle capture' {
@@ -276,7 +315,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         $runbook = $lines -join "`n"
 
         Assert-GuardedNativeCommand -Lines $lines -Command '& $StagedVerifierPath verify-bundle --bundle $ReleaseBundlePath --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --release-manifest $ReleaseArtifactManifestPath --release-signature $ReleaseArtifactManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-msi-sha256 $ExpectedMsiSha256 --expected-fixture-sha256 $ExpectedFixtureManifestSha256 --expected-release-sha256 $ExpectedReleaseManifestSha256 --fixture-signer $FixtureManifestSignerThumbprint --release-signer $ReleaseManifestSignerThumbprint --msi-signer $MsiSignerThumbprint --evidence $VerifierEvidencePath' -Prefix 'InstallerVerifier'
-		Assert-GuardedNativeCommand -Lines $lines -Command '& $ActionHelperPath provision-credential' -Prefix 'CredentialProvisioning'
+		Assert-GuardedNativeCommand -Lines $lines -Command '& $ActionHelperPath provision-credential --expected-action-config-sha256 $ExpectedActionConfigSha256 --expected-client-config-sha256 $ExpectedClientConfigSha256 --expected-credential-source-sha256 $ExpectedCredentialSourceSha256 --expected-server-attestation-sha256 $ExpectedServerAttestationSha256' -Prefix 'CredentialProvisioning'
         Assert-GuardedNativeCommand -Lines $lines -Command '& git.exe ls-remote $ApprovedGitProbeRepository > $GitProbePath' -Prefix 'GitProbe'
         Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $AgentCapture.pid /T /F' -Prefix 'AgentKill'
         Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $CoreCapture.pid /T /F' -Prefix 'CoreKill'
@@ -299,6 +338,10 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 			'$StandardClientProcess.Kill()', '$StandardClientProcess.WaitForExit()', '$StandardClientProcess.Dispose()',
 			'$StandardTunnel[0].password = $null', '$StandardTemplate = $null',
 			'$env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG = $ActionConfigPath',
+			'$ExpectedActionConfigSha256', '$ExpectedClientConfigSha256',
+			'$ExpectedCredentialSourceSha256', '$ExpectedServerAttestationSha256',
+			'verified signed fixture/release contract or independently approved operator ledger',
+			"if (@(`$DirectProvisioningExpectedHashes | Where-Object { `$_ -cnotmatch '^[a-f0-9]{64}$' }).Count -ne 0)",
 			'finally { Remove-Item Env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG -ErrorAction SilentlyContinue }',
 			'provision-credential', 'source stdout is connected directly to provisioner stdin by the Go helper',
             'Install must leave the agent stopped before provisioning.',
@@ -323,6 +366,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         Assert-NotMatches -Text $runbook -Pattern '\$UiProcessId\b' -Message 'Runbook must not rely on preset UI PID variables.'
 		Assert-NotMatches -Text $runbook -Pattern 'AnonymousPipeServerStream|RedirectStandardInput\s+\$clientHandle|\$StandardClientConfigPath|run'',''-c'',\$StandardClient' -Message 'Runbook must not stage plaintext or fake a pipe handle.'
 		Assert-NotMatches -Text $runbook -Pattern "Capture-ManagedProcess -ServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\\Program Files\\RegenBio\\OverseasAccess\\(sing-box|overseas-client)\.exe'" -Message 'Core/UI capture must not reuse the agent SCM PID.'
+		Assert-NotMatches -Text $runbook -Pattern '\$Expected(?:ActionConfig|ClientConfig|CredentialSource|ServerAttestation)Sha256\s*=\s*\(Get-FileHash' -Message 'Expected provisioning hashes must not be derived from files under verification.'
     }
 
     It 'requires evidence collection, zero-drift comparison, and a fail verdict on mandatory failure' {

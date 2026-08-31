@@ -31,12 +31,12 @@
 - Consumes: exact CLI flags `--expected-action-config-sha256`, `--expected-client-config-sha256`, `--expected-credential-source-sha256`, and `--expected-server-attestation-sha256`.
 - Produces: fail-closed parsing and direct provisioning only after all external bindings match.
 
-- [ ] Add Go tests for exact CLI parsing, substituted action-config bytes, substituted generated config/source/attestation, and internal/external hash disagreement.
-- [ ] Run focused fixtureaction tests and observe failures from the missing trust contract.
-- [ ] Implement external hash parsing, pre-parse byte hashing, strict attestation validation, and pre-execution source verification.
-- [ ] Run focused fixtureaction tests to GREEN.
-- [ ] Add Pester expectations for four fail-closed externally sourced placeholders and the exact helper command; observe RED.
-- [ ] Update the runbook invocation and trust-source wording, then run focused Pester to GREEN.
+- [x] Add Go tests for exact CLI parsing, substituted action-config bytes, substituted generated config/source/attestation, and internal/external hash disagreement.
+- [x] Run focused fixtureaction tests and observe failures from the missing trust contract.
+- [x] Implement external hash parsing, pre-parse byte hashing, strict attestation validation, and pre-execution source verification.
+- [x] Run focused fixtureaction tests to GREEN.
+- [x] Add Pester expectations for four fail-closed externally sourced placeholders and the exact helper command; observe RED.
+- [x] Update the runbook invocation and trust-source wording, then run focused Pester to GREEN.
 
 ### Task 2: Single independently approved SSH key
 
@@ -48,9 +48,9 @@
 - Consumes: one approved `DESKTOP-1BVR2H6 ssh-ed25519 <base64>` line plus one separately approved SHA256 fingerprint.
 - Produces: one exclusive ordinary known_hosts file and one exact fingerprint used by all SSH calls and attestation.
 
-- [ ] Add Pester expectations rejecting keyscan, multiple lines/tokens/fingerprints, wrong host/type, and missing Ed25519 algorithm pin; observe RED.
-- [ ] Implement exclusive one-line known_hosts construction, ordinary-file checks, exact single fingerprint validation, and uniform SSH options.
-- [ ] Run focused Pester to GREEN.
+- [x] Add Pester expectations rejecting keyscan, multiple lines/tokens/fingerprints, wrong host/type, and missing Ed25519 algorithm pin; observe RED.
+- [x] Implement exclusive one-line known_hosts construction, ordinary-file checks, exact single fingerprint validation, and uniform SSH options.
+- [x] Run focused Pester to GREEN.
 
 ### Task 3: Complete exact-name firewall WhatIf surface
 
@@ -62,9 +62,9 @@
 - Consumes: the three fixed server firewall rule names.
 - Produces: stable canonical rule/description/application/port/address/service/interface/security records in before/after snapshots.
 
-- [ ] Add Pester expectations for exact names, every filter cmdlet, ownership Description, and rejection of Group selection; observe RED.
-- [ ] Replace Group-based projection with exact-name deterministic complete filter capture and duplicate refusal.
-- [ ] Run focused Pester to GREEN.
+- [x] Add Pester expectations for exact names, every filter cmdlet, ownership Description, and rejection of Group selection; observe RED.
+- [x] Replace Group-based projection with exact-name deterministic complete filter capture and duplicate refusal.
+- [x] Run focused Pester to GREEN.
 
 ### Task 4: Report, full verification, and commit
 
@@ -75,8 +75,8 @@
 - Consumes: fresh verification output.
 - Produces: accurate non-live report, local commit, and clean worktree.
 
-- [ ] Run locked full Go tests, vet, and the locked 20x repetition suite.
-- [ ] Run PowerShell 5.1 and PowerShell 7 full Pester suites.
-- [ ] Build the eight locked Windows amd64 binaries.
-- [ ] Run AST, diff, and secret scans; inspect the complete diff.
-- [ ] Correct the report, mark this plan complete, commit, and prove empty `git status --short`.
+- [x] Run locked full Go tests, vet, and the locked 20x repetition suite.
+- [x] Run PowerShell 5.1 and PowerShell 7 full Pester suites.
+- [x] Build the eight locked Windows amd64 binaries.
+- [x] Run AST, diff, and secret scans; inspect the complete diff.
+- [x] Correct the report, mark this plan complete, commit, and prove empty `git status --short`.
