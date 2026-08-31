@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 
@@ -11,6 +12,31 @@ import (
 	"corp.example/overseas-access-gateway/internal/agent"
 	"golang.org/x/sys/windows/svc"
 )
+
+func TestRenderClientConfigUsesDirectTelecomHTTPOutbound(t *testing.T) {
+	policy := accessmodel.Policy{
+		SchemaVersion: 2, Mode: "poc",
+		Nodes:          []accessmodel.Node{{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080, Priority: 10}},
+		CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"},
+		BlockUDP: true, BlockQUIC: true,
+	}
+	contents, err := renderClientConfig(policy, agent.Credential{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Outbounds []map[string]any `json:"outbounds"`
+	}
+	if err := json.Unmarshal(contents, &config); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Outbounds) != 2 || config.Outbounds[1]["type"] != "http" || config.Outbounds[1]["server"] != "172.20.9.15" || config.Outbounds[1]["server_port"] != float64(8080) {
+		t.Fatalf("outbounds = %#v", config.Outbounds)
+	}
+	if _, exists := config.Outbounds[1]["password"]; exists {
+		t.Fatal("HTTP outbound contains a password")
+	}
+}
 
 func TestServiceStopDisconnectsAndReturnsServiceSpecificFailure(t *testing.T) {
 	controller := &fakeServiceController{

@@ -164,6 +164,32 @@ func TestControllerExpiredCredentialFailsBeforeNetworkMutation(t *testing.T) {
 	}
 }
 
+func TestControllerSchemaTwoConnectDoesNotLoadCredential(t *testing.T) {
+	loads := 0
+	deps := testDependencies(nil)
+	deps.LoadCredential = func(context.Context, accessmodel.CredentialRef) (Credential, error) {
+		loads++
+		return Credential{}, errors.New("credential must not be requested")
+	}
+	policy := accessmodel.Policy{
+		SchemaVersion: 2, Mode: "poc",
+		Nodes:          []accessmodel.Node{{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080}},
+		CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"},
+		BlockUDP: true, BlockQUIC: true,
+	}
+	controller := NewController(policy, newFakeNetwork(), newFakeProcess(), WithDependencies(deps))
+
+	got := controller.Connect(context.Background())
+
+	if got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v, want connected", got)
+	}
+	if loads != 0 {
+		t.Fatalf("LoadCredential calls = %d, want 0", loads)
+	}
+	controller.Disconnect(context.Background())
+}
+
 func TestControllerReadinessLossTransitionsToFailedAndKeepsBlock(t *testing.T) {
 	network := newFakeNetwork()
 	process := newFakeProcess()

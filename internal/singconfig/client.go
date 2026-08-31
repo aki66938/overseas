@@ -15,6 +15,8 @@ type ClientInput struct {
 	CorporateCIDRs   []string
 	CorporateDNS     []string
 	InternalSuffixes []string
+	Method           string
+	Password         string
 }
 
 type clientConfig struct {
@@ -37,6 +39,9 @@ type clientOutbound struct {
 	Tag            string `json:"tag"`
 	Server         string `json:"server,omitempty"`
 	ServerPort     uint16 `json:"server_port,omitempty"`
+	Method         string `json:"method,omitempty"`
+	Password       string `json:"password,omitempty"`
+	Network        string `json:"network,omitempty"`
 	DomainResolver string `json:"domain_resolver,omitempty"`
 }
 
@@ -77,6 +82,17 @@ func RenderClient(input ClientInput) ([]byte, error) {
 	nodeAddress, err := validateNode(input.Node)
 	if err != nil {
 		return nil, err
+	}
+	tunnel := clientOutbound{Type: "http", Tag: "tunnel", Server: nodeAddress, ServerPort: input.Node.Port}
+	if input.Node.Transport == "" {
+		method, password, err := validateMethodAndPassword(input.Method, input.Password)
+		if err != nil {
+			return nil, err
+		}
+		tunnel.Type = "shadowsocks"
+		tunnel.Method = method
+		tunnel.Password = password
+		tunnel.Network = "tcp"
 	}
 	corporateCIDRs, err := canonicalCorporateCIDRs(input.CorporateCIDRs)
 	if err != nil {
@@ -145,12 +161,7 @@ func RenderClient(input ClientInput) ([]byte, error) {
 				Tag:            "direct",
 				DomainResolver: directDomainResolverTag(corporateDNS),
 			},
-			{
-				Type:       "http",
-				Tag:        "tunnel",
-				Server:     nodeAddress,
-				ServerPort: input.Node.Port,
-			},
+			tunnel,
 		},
 		Route: clientRouteConfig{
 			Rules: []routeRule{
@@ -203,8 +214,8 @@ func RenderClient(input ClientInput) ([]byte, error) {
 }
 
 func validateNode(node accessmodel.Node) (string, error) {
-	if node.Transport != "http-connect" {
-		return "", fmt.Errorf("node transport must be http-connect")
+	if node.Transport != "" && node.Transport != "http-connect" {
+		return "", fmt.Errorf("node transport must be empty or http-connect")
 	}
 	if strings.TrimSpace(node.ID) == "" {
 		return "", fmt.Errorf("node id must not be empty")
@@ -222,7 +233,7 @@ func validateNode(node accessmodel.Node) (string, error) {
 	if node.Port < 1024 {
 		return "", fmt.Errorf("node port must be 1024 or higher")
 	}
-	if addr.String() != "172.20.9.15" || node.Port != 8080 {
+	if node.Transport == "http-connect" && (addr.String() != "172.20.9.15" || node.Port != 8080) {
 		return "", fmt.Errorf("node must be the approved telecom endpoint")
 	}
 	return addr.String(), nil

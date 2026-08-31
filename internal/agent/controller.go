@@ -307,16 +307,20 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 	if err := c.deps.VerifyExecutable(c.deps.ExecutablePath); err != nil {
 		return failure(ErrorInvalidBinary), nil, nil, false
 	}
-	if c.deps.LoadCredential == nil {
-		return failure(ErrorCredential), nil, nil, false
-	}
-	credential, err := c.deps.LoadCredential(ctx, c.policy.Credential)
-	if err != nil {
-		return failure(ErrorCredential), nil, nil, false
-	}
-	defer clearBytes(credential.Password)
-	if credential.ExpiresAt.IsZero() || !credential.ExpiresAt.After(c.deps.Now()) {
-		return failure(ErrorExpiredCredential), nil, nil, false
+	credential := Credential{}
+	if c.policy.SchemaVersion == 1 {
+		if c.deps.LoadCredential == nil {
+			return failure(ErrorCredential), nil, nil, false
+		}
+		var err error
+		credential, err = c.deps.LoadCredential(ctx, c.policy.Credential)
+		if err != nil {
+			return failure(ErrorCredential), nil, nil, false
+		}
+		defer clearBytes(credential.Password)
+		if credential.ExpiresAt.IsZero() || !credential.ExpiresAt.After(c.deps.Now()) {
+			return failure(ErrorExpiredCredential), nil, nil, false
+		}
 	}
 	if err := contextError(ctx); err != nil {
 		return failure(ErrorCanceled), nil, nil, false

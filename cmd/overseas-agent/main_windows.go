@@ -198,8 +198,6 @@ func renderClientConfig(policy accessmodel.Policy, credential agent.Credential) 
 		CorporateCIDRs:   policy.CorporateCIDRs,
 		CorporateDNS:     policy.CorporateDNS,
 		InternalSuffixes: policy.InternalSuffixes,
-		Method:           credential.Method,
-		Password:         string(credential.Password),
 	})
 }
 

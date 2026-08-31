@@ -1,10 +1,11 @@
 policy:
-  schema_version: 1
+  schema_version: 2
   mode: poc
   nodes:
     - id: vm101
+      transport: http-connect
       address: 172.20.9.15
-      port: 18443
+      port: 8080
       priority: 10
   corporate_cidrs:
     - 172.20.8.0/22
@@ -16,8 +17,5 @@ policy:
     - intra.regen-bio.com
   block_udp: true
   block_quic: true
-  credential:
-    kind: dpapi-file
-    path: C:\ProgramData\RegenBio\OverseasAccess\credential.bin
 core_sha256: a4476dd768168a77e249050066bb32774addefcc37da123978623e7b2819de28
 signer_allowlist: []
