@@ -170,6 +170,10 @@ function Test-SameDefinition($left,$right){
     [string]::Equals([string]$left.remote_machine,[string]$right.remote_machine,[StringComparison]::OrdinalIgnoreCase) -and
     [string]::Equals([string]$left.override_block_rules,[string]$right.override_block_rules,[StringComparison]::OrdinalIgnoreCase)
 }
+function Normalize-AnyValue($value){
+  if($null -eq $value -or [string]::IsNullOrEmpty([string]$value)){return 'Any'}
+  return [string]$value
+}
 function Get-Definition([string]$name){
   $matches=@($definitions|Where-Object{$_.name -eq $name})
   if($matches.Count -ne 1){throw 'Unknown firewall definition.'}
@@ -211,13 +215,13 @@ function Get-ExactFirewallRule($definition){
   $interfaces=@($rule|Get-NetFirewallInterfaceFilter)
   $security=@($rule|Get-NetFirewallSecurityFilter)
   if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1 -and $security.Count -eq 1){
-    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=[string]$interfaces[0].InterfaceType;authentication=[string]$security[0].Authentication;encryption=[string]$security[0].Encryption;local_user=[string]$security[0].LocalUser;remote_user=[string]$security[0].RemoteUser;remote_machine=[string]$security[0].RemoteMachine;override_block_rules=[string]$security[0].OverrideBlockRules}
+    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=(Normalize-AnyValue $interfaces[0].InterfaceType);authentication=[string]$security[0].Authentication;encryption=[string]$security[0].Encryption;local_user=[string]$security[0].LocalUser;remote_user=[string]$security[0].RemoteUser;remote_machine=[string]$security[0].RemoteMachine;override_block_rules=[string]$security[0].OverrideBlockRules}
   }else{$observed=$null}
   if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or $security.Count -ne 1 -or
     $rule.Group -ne $group -or $rule.DisplayName -ne $definition.display_name -or
     [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Allow' -or
     [string]$rule.Enabled -ne 'True' -or [string]$rule.Profile -ne 'Any' -or
-    -not [string]::Equals([string]$applications[0].Package,'Any',[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals((Normalize-AnyValue $applications[0].Package),'Any',[StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals([string]$interfaces[0].InterfaceAlias,'Any',[StringComparison]::OrdinalIgnoreCase) -or -not(Test-SameDefinition $observed $definition)){
     throw 'Firewall rule does not exactly match the product definition.'
   }

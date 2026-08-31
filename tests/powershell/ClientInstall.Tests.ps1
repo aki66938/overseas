@@ -508,6 +508,8 @@ Describe 'Transactional Windows client installer' {
         $verifier | Should Match 'Get-NetFirewallApplicationFilter'
         $verifier | Should Match 'Get-NetFirewallPortFilter'
         $verifier | Should Match 'Get-NetFirewallSecurityFilter'
+        $verifier | Should Match 'Normalize-AnyValue \$applications\[0\]\.Package'
+        $verifier | Should Match 'Normalize-AnyValue \$interfaces\[0\]\.InterfaceType'
         $verifier | Should Match 'Write-FirewallJournal'
         $verifier | Should Match "icacls\.exe[^\r\n]*/inheritance:r[^\r\n]*S-1-5-18[^\r\n]*S-1-5-32-544"
         $verifier.IndexOf('Write-FirewallJournal') | Should BeLessThan $verifier.IndexOf('New-NetFirewallRule')
