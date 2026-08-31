@@ -142,7 +142,7 @@ if ($manifest.mode -eq 'release') {
 elseif ($trustMode[0] -ne 'INSPECT_ONLY_REFUSES_INSTALL' -or $embeddedCorporateThumbprint -ne ('0' * 40)) {
     throw 'Inspect-only MSI does not contain the fail-closed trust sentinel.'
 }
-foreach ($table in @('ServiceInstall','ServiceControl','Registry','RemoveFile','Upgrade')) { [void] @(Get-MsiTableRows $table) }
+foreach ($table in @('ServiceInstall','ServiceControl','RemoveFile','Upgrade')) { [void] @(Get-MsiTableRows $table) }
 $database.Dispose()
 $database = $null
 $msiSignature = $null

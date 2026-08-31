@@ -750,6 +750,8 @@ Describe 'Transactional Windows client installer' {
         $inspector | Should Match '\$database\.Dispose\(\)'
         $inspector | Should Match '\[GC\]::Collect\(\)'
         $inspector | Should Match '\[GC\]::WaitForPendingFinalizers\(\)'
+        $inspector | Should Match "@\('ServiceInstall','ServiceControl','RemoveFile','Upgrade'\)"
+        $inspector | Should Not Match "@\('ServiceInstall','ServiceControl','Registry','RemoveFile','Upgrade'\)"
     }
 
     It 'uses only the Wintun Prebuilt Binaries License attribution' {
