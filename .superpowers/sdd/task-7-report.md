@@ -86,3 +86,14 @@ TDD evidence:
 Accepted risk: an internal device may connect directly to VM101 TCP 8080 and
 bypass the product's TCP 18443 authorization boundary. This exception is for
 the PoC and requires a fresh production decision.
+
+Live VM101 `-WhatIf` exposed two Windows PowerShell 5.1 compatibility gaps.
+The installer now preloads discovery modules and runs its read-only input
+verification with the global AllScope WhatIf preference disabled inside a
+`try/finally`, restoring it before any mutation boundary. Listener discovery
+reads the listener set and filters ports in memory, avoiding the VM build's
+ObjectNotFound behavior for an unused `-LocalPort`. A packaged-app firewall
+allow with a nonempty Package SID is no longer treated as applying to the
+desktop sing-box executable. Real VM101 WhatIf then passed with no evidence,
+service, listener, file, or firewall mutation. Fresh post-fix regression:
+locked Go test/vet passed and both full Pester engines passed 117/117.

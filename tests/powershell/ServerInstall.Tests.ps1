@@ -84,6 +84,17 @@ Describe 'Transactional sing-box server deployment' {
         $text | Should Match "@\('127\.0\.0\.1',\s*'::1',\s*'0\.0\.0\.0',\s*'::'\)"
     }
 
+    It 'loads discovery modules outside WhatIf and filters listener ports in memory' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match '(?s)\$savedGlobalWhatIfPreference\s*=\s*\$global:WhatIfPreference.*?\$global:WhatIfPreference\s*=\s*\$false.*?Import-Module\s+Microsoft\.PowerShell\.Utility,CimCmdlets,NetTCPIP,NetSecurity.*?\$global:WhatIfPreference\s*=\s*\$savedGlobalWhatIfPreference'
+        $text | Should Not Match 'Get-NetTCPConnection[^\r\n]*-LocalPort'
+        $text | Should Match 'Get-NetTCPConnection\s+-State\s+Listen\s+-ErrorAction\s+Stop\s*\|\s*Where-Object'
+        $verifiedStart = $text.IndexOf('function Get-VerifiedInputEvidence')
+        $verifiedEnd = $text.IndexOf('function Get-TelecomConnectEvidence', $verifiedStart)
+        $verifiedBlock = $text.Substring($verifiedStart, $verifiedEnd - $verifiedStart)
+        $verifiedBlock | Should Match '(?s)\$savedVerificationWhatIf\s*=\s*\$global:WhatIfPreference.*?\$global:WhatIfPreference\s*=\s*\$false.*?Get-FileHash.*?finally\s*\{\s*\$global:WhatIfPreference\s*=\s*\$savedVerificationWhatIf'
+    }
+
     It 'registers the pinned first-party SCM host with fixed runtime paths and no service argv' {
         $text = Get-Content -LiteralPath $scriptPath -Raw
         $text | Should Match 'overseas-server-service\.exe'
@@ -306,7 +317,6 @@ Describe 'Transactional sing-box server deployment' {
         }
         Mock Get-NetIPAddress { return [pscustomobject] @{ IPAddress = '172.20.9.15'; AddressFamily = 'IPv4'; InterfaceIndex = 4 } }
         Mock Get-NetTCPConnection {
-            if ($LocalPort -eq 18443) { return @() }
             return [pscustomobject] @{ LocalAddress = '127.0.0.1'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
         }
         Mock Get-Process { return [pscustomobject] @{ Id = 4242; ProcessName = 'TelecomClient'; Path = 'C:\Program Files\Telecom\client.exe'; HasExited = $false } }
@@ -346,7 +356,7 @@ Describe 'Transactional sing-box server deployment' {
         $result.WhatIf | Should Be $true
         (Test-Path -LiteralPath $evidencePath) | Should Be $false
         Assert-MockCalled New-Service -Times 0 -Exactly -Scope It
-        Assert-MockCalled Get-NetTCPConnection -Times 1 -Exactly -Scope It -ParameterFilter { $LocalPort -eq 18443 }
+        Assert-MockCalled Get-NetTCPConnection -Times 3 -Exactly -Scope It
         Assert-MockCalled New-NetFirewallRule -Times 0 -Exactly -Scope It
         Assert-MockCalled Copy-Item -Times 0 -Exactly -Scope It
         Assert-MockCalled Move-Item -Times 0 -Exactly -Scope It
@@ -444,19 +454,20 @@ Describe 'Transactional server behavioral refusal gates' {
             return [pscustomobject] @{ IPAddress = '172.20.9.15'; AddressFamily = 'IPv4'; InterfaceIndex = 4 }
         }
         Mock Get-NetTCPConnection {
-            if ($LocalPort -eq 18443) {
-                if ($global:Task7NegativeScenario -eq 'ServerPort') {
-                    return [pscustomobject] @{ LocalAddress = '0.0.0.0'; LocalPort = 18443; State = 'Listen'; OwningProcess = 8181 }
-                }
-                return @()
-            }
+            $listeners = @()
             if ($global:Task7NegativeScenario -eq 'Unsupported8080') {
-                return [pscustomobject] @{ LocalAddress = '172.20.9.15'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+                $listeners += [pscustomobject] @{ LocalAddress = '172.20.9.15'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
             }
-            if ($global:Task7NegativeScenario -eq 'Wildcard8080') {
-                return [pscustomobject] @{ LocalAddress = '::'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+            elseif ($global:Task7NegativeScenario -eq 'Wildcard8080') {
+                $listeners += [pscustomobject] @{ LocalAddress = '::'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
             }
-            return [pscustomobject] @{ LocalAddress = '127.0.0.1'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+            else {
+                $listeners += [pscustomobject] @{ LocalAddress = '127.0.0.1'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+            }
+            if ($global:Task7NegativeScenario -eq 'ServerPort') {
+                $listeners += [pscustomobject] @{ LocalAddress = '0.0.0.0'; LocalPort = 18443; State = 'Listen'; OwningProcess = 8181 }
+            }
+            return $listeners
         }
         Mock Get-Process { return [pscustomobject] @{ Id = 4242; ProcessName = 'TelecomClient'; Path = 'C:\Program Files\Telecom\client.exe'; HasExited = $false } }
         Mock Invoke-WebRequest {
@@ -464,7 +475,7 @@ Describe 'Transactional server behavioral refusal gates' {
             return [pscustomobject] @{ StatusCode = 204 }
         }
         Mock Get-NetFirewallRule {
-            if ($global:Task7NegativeScenario -in @('Firewall', 'FirewallMulti') -and [string]::IsNullOrWhiteSpace([string] $Name)) {
+            if ($global:Task7NegativeScenario -in @('Firewall', 'FirewallMulti', 'FirewallPackaged') -and [string]::IsNullOrWhiteSpace([string] $Name)) {
                 return $global:Task7BroadRule
             }
             return @()
@@ -475,7 +486,12 @@ Describe 'Transactional server behavioral refusal gates' {
             }
             return [pscustomobject] @{ Protocol = 'TCP'; LocalPort = '18000-19000' }
         }
-        Mock Get-NetFirewallApplicationFilter { return [pscustomobject] @{ Program = 'Any' } }
+        Mock Get-NetFirewallApplicationFilter {
+            if ($global:Task7NegativeScenario -eq 'FirewallPackaged') {
+                return [pscustomobject] @{ Program = 'Any'; Package = 'S-1-15-2-2434737943-167758768-3180539153' }
+            }
+            return [pscustomobject] @{ Program = 'Any'; Package = $null }
+        }
         Mock Get-NetFirewallServiceFilter { return [pscustomobject] @{ Service = 'RegenBioOverseasAccessServer' } }
         Mock Get-NetFirewallAddressFilter { return [pscustomobject] @{ RemoteAddress = 'Any' } }
         Mock Get-NetRoute { return @() }
@@ -513,12 +529,44 @@ Describe 'Transactional server behavioral refusal gates' {
                 -ExpectedServerServiceSha256 $singHash -EmployeeCIDR '172.20.8.0/22' `
                 -ServerPort 18443 -EvidencePath (Join-Path $TestDrive 'wildcard.json') -WhatIf } | Should Not Throw
 
+        $global:Task7NegativeScenario = 'FirewallPackaged'
+        { & $scriptPath -Mode Install -BundlePath $bundlePath -ConfigPath $configPath `
+                -ExpectedSingBoxSha256 $singHash -ExpectedConfigSha256 $configHash `
+                -ExpectedServerServiceSha256 $singHash -EmployeeCIDR '172.20.8.0/22' `
+                -ServerPort 18443 -EvidencePath (Join-Path $TestDrive 'packaged-firewall.json') -WhatIf } | Should Not Throw
+
         Assert-MockCalled New-Service -Times 0 -Exactly -Scope It
         Assert-MockCalled New-NetFirewallRule -Times 0 -Exactly -Scope It
     }
 }
 
 Describe 'Server firewall and directory ownership units' {
+    It 'ignores packaged-app allows that cannot apply to the desktop sing-box executable' {
+        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source | Should Match '\[string\]::IsNullOrWhiteSpace\(\[string\]\s+\$_.Package\)'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
+        foreach ($functionName in @('Test-PortSpecificationIncludes', 'Assert-NoConflictingServerPortAllow')) {
+            $definition = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
+            }, $true))[0]
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $InstallRoot = 'C:\Program Files\RegenBio\OverseasAccessServer'
+        $ServiceName = 'RegenBioOverseasAccessServer'
+        $ServerPort = 18443
+        $ExpectedEmployeeCIDR = '172.20.8.0/22'
+        Mock Get-NetFirewallRule { [pscustomobject] @{ Name = 'PackagedRule'; Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow' } }
+        Mock Get-NetFirewallPortFilter { [pscustomobject] @{ Protocol = 'Any'; LocalPort = 'Any' } }
+        Mock Get-NetFirewallApplicationFilter { [pscustomobject] @{ Program = 'Any'; Package = 'S-1-15-2-2434737943-167758768-3180539153' } }
+        Mock Get-NetFirewallServiceFilter { [pscustomobject] @{ Service = 'Any' } }
+        Mock Get-NetFirewallAddressFilter { [pscustomobject] @{ RemoteAddress = 'Any' } }
+
+        { Assert-NoConflictingServerPortAllow } | Should Not Throw
+    }
+
     It 'passes management ports to New-NetFirewallRule as four separate values' {
         $tokens = $null
         $errors = $null

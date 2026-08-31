@@ -30,6 +30,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$savedGlobalWhatIfPreference = $global:WhatIfPreference
+try {
+    $global:WhatIfPreference = $false
+    Import-Module Microsoft.PowerShell.Utility,CimCmdlets,NetTCPIP,NetSecurity -ErrorAction Stop
+}
+finally {
+    $global:WhatIfPreference = $savedGlobalWhatIfPreference
+}
+
 $InvocationParameters = @{}
 foreach ($invocationKey in $PSBoundParameters.Keys) {
     $InvocationParameters[$invocationKey] = $PSBoundParameters[$invocationKey]
@@ -260,9 +269,10 @@ function Assert-NoConflictingServerPortAllow {
 
         $applicationFilters = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop)
         $programApplies = @($applicationFilters | Where-Object {
-            [string]::IsNullOrWhiteSpace([string] $_.Program) -or
-            [string] $_.Program -eq 'Any' -or
-            [string] $_.Program -eq $installedExecutable
+            [string]::IsNullOrWhiteSpace([string] $_.Package) -and
+            ([string]::IsNullOrWhiteSpace([string] $_.Program) -or
+                [string] $_.Program -eq 'Any' -or
+                [string] $_.Program -eq $installedExecutable)
         }).Count -ne 0
         if (-not $programApplies) { continue }
 
@@ -284,6 +294,9 @@ function Assert-NoConflictingServerPortAllow {
 }
 
 function Get-VerifiedInputEvidence {
+    $savedVerificationWhatIf = $global:WhatIfPreference
+    try {
+        $global:WhatIfPreference = $false
     $singBoxPath = Join-Path ([System.IO.Path]::GetFullPath($BundlePath)) 'sing-box.exe'
     $serverServicePath = Join-Path ([System.IO.Path]::GetFullPath($BundlePath)) $ServerServiceName
     $manifestPath = Join-Path ([System.IO.Path]::GetFullPath($BundlePath)) 'sing-box.manifest.json'
@@ -336,10 +349,16 @@ function Get-VerifiedInputEvidence {
         ServerServiceSha256 = $actualServerServiceHash
         ConfigSha256 = $actualConfigHash
     }
+    }
+    finally {
+        $global:WhatIfPreference = $savedVerificationWhatIf
+    }
 }
 
 function Get-TelecomConnectEvidence {
-    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $TelecomProxyPort -ErrorAction Stop)
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object {
+        [int] $_.LocalPort -eq $TelecomProxyPort
+    })
     if ($listeners.Count -ne 1) {
         throw "Expected exactly one telecom listener on TCP $TelecomProxyPort."
     }
@@ -388,7 +407,9 @@ function Get-TelecomConnectEvidence {
 }
 
 function Assert-ServerPortAvailable {
-    $existingListeners = @(Get-NetTCPConnection -State Listen -LocalPort $ServerPort -ErrorAction Stop)
+    $existingListeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object {
+        [int] $_.LocalPort -eq $ServerPort
+    })
     if ($existingListeners.Count -ne 0) {
         $owners = @($existingListeners | ForEach-Object { [string] $_.OwningProcess } | Sort-Object -Unique)
         throw "TCP $ServerPort already has a listener (owner PID(s): $($owners -join ','))."
