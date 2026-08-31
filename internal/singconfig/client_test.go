@@ -10,15 +10,14 @@ import (
 func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
 		Node: accessmodel.Node{
-			ID:      "vm101",
-			Address: "172.20.9.15",
-			Port:    18443,
+			ID:        "vm101",
+			Transport: "http-connect",
+			Address:   "172.20.9.15",
+			Port:      8080,
 		},
 		CorporateCIDRs:   []string{"172.20.8.0/22"},
 		CorporateDNS:     []string{"172.20.10.1"},
 		InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-		Method:           "2022-blake3-aes-128-gcm",
-		Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
 	}))
 
 	if len(config.Inbounds) != 1 {
@@ -46,14 +45,22 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 		t.Fatalf("outbound[0].domain_resolver = %q, want corp-dns", got)
 	}
 	tunnel := config.Outbounds[1]
-	if got := stringValue(t, tunnel["type"]); got != "shadowsocks" {
-		t.Fatalf("outbound[1].type = %q, want shadowsocks", got)
+	if got := stringValue(t, tunnel["type"]); got != "http" {
+		t.Fatalf("outbound[1].type = %q, want http", got)
 	}
 	if got := stringValue(t, tunnel["tag"]); got != "tunnel" {
 		t.Fatalf("outbound[1].tag = %q, want tunnel", got)
 	}
-	if got := stringValue(t, tunnel["network"]); got != "tcp" {
-		t.Fatalf("outbound[1].network = %q, want tcp", got)
+	if got := stringValue(t, tunnel["server"]); got != "172.20.9.15" {
+		t.Fatalf("outbound[1].server = %q, want 172.20.9.15", got)
+	}
+	if got := intValue(t, tunnel["server_port"]); got != 8080 {
+		t.Fatalf("outbound[1].server_port = %d, want 8080", got)
+	}
+	for _, forbidden := range []string{"method", "password", "network"} {
+		if _, exists := tunnel[forbidden]; exists {
+			t.Fatalf("outbound[1].%s unexpectedly present", forbidden)
+		}
 	}
 
 	if len(config.Route.Rules) != 7 {
@@ -105,12 +112,10 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 
 func TestClientHijacksSystemDNSBeforeRejectingPublicUDP(t *testing.T) {
 	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
-		Node:             accessmodel.Node{ID: "vm101", Address: "172.20.9.15", Port: 18443},
+		Node:             accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080},
 		CorporateCIDRs:   []string{"172.20.8.0/22"},
 		CorporateDNS:     []string{"172.20.9.1"},
 		InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-		Method:           "2022-blake3-aes-128-gcm",
-		Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
 	}))
 
 	for index, rule := range config.Route.Rules {
@@ -125,55 +130,33 @@ func TestClientHijacksSystemDNSBeforeRejectingPublicUDP(t *testing.T) {
 	t.Fatal("route rules do not contain a DNS hijack action")
 }
 
-func TestRenderClientRejectsInvalidNodeOrCredential(t *testing.T) {
+func TestRenderClientRejectsInvalidHTTPNode(t *testing.T) {
 	tests := []singconfig.ClientInput{
 		{
 			Node: accessmodel.Node{
-				ID:      "vm101",
-				Address: "127.0.0.1",
-				Port:    18443,
+				ID: "vm101", Transport: "http-connect", Address: "127.0.0.1", Port: 8080,
 			},
 			CorporateCIDRs:   []string{"172.20.8.0/22"},
 			CorporateDNS:     []string{"172.20.10.1"},
 			InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-			Method:           "2022-blake3-aes-128-gcm",
-			Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
 		},
 		{
-			Node: accessmodel.Node{
-				ID:      "vm101",
-				Address: "172.20.9.15",
-				Port:    443,
-			},
+			Node:             accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "0.0.0.0", Port: 8080},
 			CorporateCIDRs:   []string{"172.20.8.0/22"},
 			CorporateDNS:     []string{"172.20.10.1"},
 			InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-			Method:           "2022-blake3-aes-128-gcm",
-			Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
 		},
 		{
-			Node: accessmodel.Node{
-				ID:      "vm101",
-				Address: "172.20.9.15",
-				Port:    18443,
-			},
+			Node:             accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.16", Port: 8080},
 			CorporateCIDRs:   []string{"172.20.8.0/22"},
 			CorporateDNS:     []string{"172.20.10.1"},
 			InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-			Method:           "2022-blake3-aes-128-gcm",
-			Password:         "AQIDBA==",
 		},
 		{
-			Node: accessmodel.Node{
-				ID:      "vm101",
-				Address: "172.20.9.15",
-				Port:    18443,
-			},
+			Node:             accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 18443},
 			CorporateCIDRs:   []string{"172.20.8.0/22"},
-			CorporateDNS:     []string{"2001:db8::53"},
+			CorporateDNS:     []string{"172.20.10.1"},
 			InternalSuffixes: []string{"ad.intra.regen-bio.com"},
-			Method:           "2022-blake3-aes-128-gcm",
-			Password:         "MDEyMzQ1Njc4OWFiY2RlZg==",
 		},
 	}
 
@@ -187,14 +170,13 @@ func TestRenderClientRejectsInvalidNodeOrCredential(t *testing.T) {
 func TestRenderClientOmitsInternalSuffixDirectRuleWhenNoSuffixesConfigured(t *testing.T) {
 	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
 		Node: accessmodel.Node{
-			ID:      "vm101",
-			Address: "172.20.9.15",
-			Port:    18443,
+			ID:        "vm101",
+			Transport: "http-connect",
+			Address:   "172.20.9.15",
+			Port:      8080,
 		},
 		CorporateCIDRs: []string{"172.20.8.0/22"},
 		CorporateDNS:   []string{"172.20.10.1"},
-		Method:         "2022-blake3-aes-128-gcm",
-		Password:       "MDEyMzQ1Njc4OWFiY2RlZg==",
 	}))
 
 	if len(config.Route.Rules) != 6 {

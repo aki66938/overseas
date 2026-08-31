@@ -30,6 +30,50 @@ func TestValidatePoCPolicy(t *testing.T) {
 	}
 }
 
+func TestValidateDirectHTTPPolicy(t *testing.T) {
+	p := accessmodel.Policy{
+		SchemaVersion: 2,
+		Mode:          "poc",
+		Nodes: []accessmodel.Node{{
+			ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080,
+		}},
+		CorporateCIDRs: []string{"172.20.8.0/22"},
+		CorporateDNS:   []string{"172.20.9.1"},
+		BlockUDP:       true,
+		BlockQUIC:      true,
+	}
+
+	if err := accessmodel.Validate(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateDirectHTTPPolicyRejectsUnapprovedTransportEndpointOrCredential(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*accessmodel.Policy)
+	}{
+		{name: "empty transport", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Transport = "" }},
+		{name: "shadowsocks", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Transport = "shadowsocks" }},
+		{name: "loopback", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Address = "127.0.0.1" }},
+		{name: "wildcard", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Address = "0.0.0.0" }},
+		{name: "other address", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Address = "172.20.9.16" }},
+		{name: "other port", mutate: func(p *accessmodel.Policy) { p.Nodes[0].Port = 18443 }},
+		{name: "credential", mutate: func(p *accessmodel.Policy) {
+			p.Credential = accessmodel.CredentialRef{Kind: "dpapi-file", Path: `C:\ProgramData\RegenBio\OverseasAccess\credential.bin`}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := validDirectHTTPPolicy()
+			test.mutate(&p)
+			if err := accessmodel.Validate(p); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
 func TestRejectsUnsafePolicy(t *testing.T) {
 	cases := []accessmodel.Policy{
 		{SchemaVersion: 1, Mode: "poc", Nodes: nil},
@@ -170,5 +214,20 @@ func validPolicy() accessmodel.Policy {
 			Kind: "dpapi-file",
 			Path: `C:\ProgramData\RegenBio\OverseasAccess\credential.bin`,
 		},
+	}
+}
+
+func validDirectHTTPPolicy() accessmodel.Policy {
+	return accessmodel.Policy{
+		SchemaVersion: 2,
+		Mode:          "poc",
+		Nodes: []accessmodel.Node{{
+			ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080, Priority: 10,
+		}},
+		CorporateCIDRs:   []string{"172.20.8.0/22"},
+		CorporateDNS:     []string{"172.20.9.1"},
+		InternalSuffixes: []string{"ad.intra.regen-bio.com"},
+		BlockUDP:         true,
+		BlockQUIC:        true,
 	}
 }

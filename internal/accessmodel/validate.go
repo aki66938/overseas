@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	schemaVersion = 1
-	modePoC       = "poc"
+	schemaVersionLegacy = 1
+	schemaVersionHTTP   = 2
+	modePoC             = "poc"
 )
 
 func Validate(policy Policy) error {
-	if policy.SchemaVersion != schemaVersion {
-		return fmt.Errorf("schema_version must be %d", schemaVersion)
+	if policy.SchemaVersion != schemaVersionLegacy && policy.SchemaVersion != schemaVersionHTTP {
+		return fmt.Errorf("schema_version must be %d or %d", schemaVersionLegacy, schemaVersionHTTP)
 	}
 	if policy.Mode != modePoC {
 		return fmt.Errorf("mode must be %q", modePoC)
@@ -29,10 +30,14 @@ func Validate(policy Policy) error {
 	if !policy.BlockQUIC {
 		return fmt.Errorf("block_quic must be true")
 	}
-	if err := validateCredential(policy.Credential); err != nil {
-		return err
+	if policy.SchemaVersion == schemaVersionLegacy {
+		if err := validateCredential(policy.Credential); err != nil {
+			return err
+		}
+	} else if policy.Credential != (CredentialRef{}) {
+		return fmt.Errorf("credential must be empty for schema_version %d", schemaVersionHTTP)
 	}
-	if err := validateNodes(policy.Nodes); err != nil {
+	if err := validateNodes(policy.SchemaVersion, policy.Nodes); err != nil {
 		return err
 	}
 	if err := validateCorporateCIDRs(policy.CorporateCIDRs); err != nil {
@@ -57,7 +62,7 @@ func validateCredential(credential CredentialRef) error {
 	return nil
 }
 
-func validateNodes(nodes []Node) error {
+func validateNodes(schemaVersion int, nodes []Node) error {
 	if len(nodes) == 0 {
 		return fmt.Errorf("nodes must not be empty")
 	}
@@ -81,6 +86,9 @@ func validateNodes(nodes []Node) error {
 		}
 		if node.Port < 1024 {
 			return fmt.Errorf("nodes.port must be 1024 or higher")
+		}
+		if schemaVersion == schemaVersionHTTP && (node.Transport != "http-connect" || addr.String() != "172.20.9.15" || node.Port != 8080) {
+			return fmt.Errorf("schema_version %d requires the approved http-connect endpoint", schemaVersionHTTP)
 		}
 
 		endpoint := addr.String() + ":" + fmt.Sprintf("%d", node.Port)
@@ -170,6 +178,8 @@ func CanonicalSHA256(policy Policy) (string, error) {
 		switch {
 		case left.ID != right.ID:
 			return left.ID < right.ID
+		case left.Transport != right.Transport:
+			return left.Transport < right.Transport
 		case left.Address != right.Address:
 			return left.Address < right.Address
 		case left.Port != right.Port:

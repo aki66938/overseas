@@ -13,10 +13,11 @@ type Policy struct {
 }
 
 type Node struct {
-	ID       string `yaml:"id" json:"id"`
-	Address  string `yaml:"address" json:"address"`
-	Port     uint16 `yaml:"port" json:"port"`
-	Priority int    `yaml:"priority" json:"priority"`
+	ID        string `yaml:"id" json:"id"`
+	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"`
+	Address   string `yaml:"address" json:"address"`
+	Port      uint16 `yaml:"port" json:"port"`
+	Priority  int    `yaml:"priority" json:"priority"`
 }
 
 type CredentialRef struct {

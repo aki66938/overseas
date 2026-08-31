@@ -15,8 +15,6 @@ type ClientInput struct {
 	CorporateCIDRs   []string
 	CorporateDNS     []string
 	InternalSuffixes []string
-	Method           string
-	Password         string
 }
 
 type clientConfig struct {
@@ -39,9 +37,6 @@ type clientOutbound struct {
 	Tag            string `json:"tag"`
 	Server         string `json:"server,omitempty"`
 	ServerPort     uint16 `json:"server_port,omitempty"`
-	Method         string `json:"method,omitempty"`
-	Password       string `json:"password,omitempty"`
-	Network        string `json:"network,omitempty"`
 	DomainResolver string `json:"domain_resolver,omitempty"`
 }
 
@@ -79,10 +74,6 @@ type dnsRule struct {
 }
 
 func RenderClient(input ClientInput) ([]byte, error) {
-	method, password, err := validateMethodAndPassword(input.Method, input.Password)
-	if err != nil {
-		return nil, err
-	}
 	nodeAddress, err := validateNode(input.Node)
 	if err != nil {
 		return nil, err
@@ -155,13 +146,10 @@ func RenderClient(input ClientInput) ([]byte, error) {
 				DomainResolver: directDomainResolverTag(corporateDNS),
 			},
 			{
-				Type:       "shadowsocks",
+				Type:       "http",
 				Tag:        "tunnel",
 				Server:     nodeAddress,
 				ServerPort: input.Node.Port,
-				Method:     method,
-				Password:   password,
-				Network:    "tcp",
 			},
 		},
 		Route: clientRouteConfig{
@@ -215,6 +203,9 @@ func RenderClient(input ClientInput) ([]byte, error) {
 }
 
 func validateNode(node accessmodel.Node) (string, error) {
+	if node.Transport != "http-connect" {
+		return "", fmt.Errorf("node transport must be http-connect")
+	}
 	if strings.TrimSpace(node.ID) == "" {
 		return "", fmt.Errorf("node id must not be empty")
 	}
@@ -230,6 +221,9 @@ func validateNode(node accessmodel.Node) (string, error) {
 	}
 	if node.Port < 1024 {
 		return "", fmt.Errorf("node port must be 1024 or higher")
+	}
+	if addr.String() != "172.20.9.15" || node.Port != 8080 {
+		return "", fmt.Errorf("node must be the approved telecom endpoint")
 	}
 	return addr.String(), nil
 }
