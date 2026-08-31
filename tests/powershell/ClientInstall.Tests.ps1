@@ -468,6 +468,9 @@ Describe 'Transactional Windows client installer' {
         $files = Get-Content -LiteralPath $filesPath -Raw
         $product | Should Match '<SetProperty[^>]*Id="VerifyInstalledPayload"'
         $product | Should Match 'ExeCommand="\[CustomActionData\]"'
+        $product | Should Match '--program-files &quot;\[INSTALLFOLDER\]\.&quot; --program-data &quot;\[DATAFOLDER\]\.&quot;'
+        $product | Should Not Match '--program-files &quot;\[INSTALLFOLDER\]&quot;'
+        $product | Should Not Match '--program-data &quot;\[DATAFOLDER\]&quot;'
         $product | Should Match 'RollbackClientFirewall'
         $product | Should Match 'InstallClientFirewall'
         $files | Should Not Match 'fire:FirewallException'

@@ -42,7 +42,7 @@
         Execute="deferred"
         Impersonate="no"
         Return="check" />
-    <SetProperty Id="VerifyInstalledPayload" Value="payload --program-files &quot;[INSTALLFOLDER]&quot; --program-data &quot;[DATAFOLDER]&quot; --manifest &quot;[DATAFOLDER]artifact-manifest.json&quot; --signature &quot;[DATAFOLDER]artifact-manifest.json.p7s&quot; --thumbprint &quot;$(var.CorporateSigningThumbprint)&quot;" Before="VerifyInstalledPayload" Sequence="execute" />
+    <SetProperty Id="VerifyInstalledPayload" Value="payload --program-files &quot;[INSTALLFOLDER].&quot; --program-data &quot;[DATAFOLDER].&quot; --manifest &quot;[DATAFOLDER]artifact-manifest.json&quot; --signature &quot;[DATAFOLDER]artifact-manifest.json.p7s&quot; --thumbprint &quot;$(var.CorporateSigningThumbprint)&quot;" Before="VerifyInstalledPayload" Sequence="execute" />
     <CustomAction Id="RollbackClientFirewall" BinaryRef="InstallerVerifierBinary" ExeCommand="firewall-rollback" Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="InstallClientFirewall" BinaryRef="InstallerVerifierBinary" ExeCommand="firewall-install" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="RemoveClientFirewall" BinaryRef="InstallerVerifierBinary" ExeCommand="firewall-uninstall" Execute="deferred" Impersonate="no" Return="check" />
