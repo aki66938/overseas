@@ -3,15 +3,12 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"unicode/utf16"
+	"strings"
 )
 
 type windowsTrustVerifier struct{}
@@ -19,14 +16,17 @@ type windowsTrustVerifier struct{}
 func main() { os.Exit(run(os.Args[1:], windowsTrustVerifier{}, os.Stderr)) }
 
 func runPowerShell(script string, args ...string) error {
-	preamble := `$payload=[Console]::In.ReadToEnd()|ConvertFrom-Json;$args=@($payload.arguments);Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop;Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NetSecurity\NetSecurity.psd1' -ErrorAction Stop;`
-	encoded := encodePowerShellCommand(preamble + script)
-	var stdin bytes.Buffer
-	if err := json.NewEncoder(&stdin).Encode(map[string][]string{"arguments": args}); err != nil {
+	preamble := `Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop;Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NetSecurity\NetSecurity.psd1' -ErrorAction Stop;`
+	payload, err := json.Marshal(struct {
+		Script    string   `json:"script"`
+		Arguments []string `json:"arguments"`
+	}{Script: preamble + script, Arguments: args})
+	if err != nil {
 		return errors.New("PowerShell trust input encoding failed")
 	}
-	command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-EncodedCommand", encoded)
-	command.Stdin = &stdin
+	bootstrap := `$payload=[Console]::In.ReadToEnd()|ConvertFrom-Json;$invokeArgs=@($payload.arguments);& ([ScriptBlock]::Create([string]$payload.script)) @invokeArgs`
+	command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-Command", bootstrap)
+	command.Stdin = strings.NewReader(string(payload))
 	command.Stdout = nil
 	command.Stderr = nil
 	if err := command.Run(); err != nil {
@@ -36,15 +36,6 @@ func runPowerShell(script string, args ...string) error {
 		return errors.New("PowerShell trust verification failed")
 	}
 	return nil
-}
-
-func encodePowerShellCommand(script string) string {
-	codeUnits := utf16.Encode([]rune(script))
-	encoded := make([]byte, len(codeUnits)*2)
-	for index, codeUnit := range codeUnits {
-		binary.LittleEndian.PutUint16(encoded[index*2:], codeUnit)
-	}
-	return base64.StdEncoding.EncodeToString(encoded)
 }
 
 func (windowsTrustVerifier) verifyPackage(msi, thumbprint string) error {
@@ -182,7 +173,7 @@ function Get-Definition([string]$name){
 function Read-FirewallJournal{
   if(!(Test-Path -LiteralPath $journal -PathType Leaf)){return $null}
   $value=Get-Content -LiteralPath $journal -Raw|ConvertFrom-Json
-  if($value.schema_version -ne 2 -or $value.product_id -ne 'RegenBioOverseasAccess' -or $null -eq $value.owned_rules){throw 'Invalid firewall ownership journal.'}
+  if($value.schema_version -ne 2 -or $value.product_id -ne 'RegenBioOverseasAccess' -or $value.PSObject.Properties.Name -notcontains 'owned_rules'){throw 'Invalid firewall ownership journal.'}
   foreach($owned in @($value.owned_rules)){if(-not(Test-SameDefinition $owned (Get-Definition ([string]$owned.name)))){throw 'Invalid owned firewall definition.'}}
   if($null -ne $value.current_operation){
     if([string]$value.current_operation.id -notmatch '^[0-9a-fA-F-]{36}$' -or [string]$value.current_operation.state -notin @('applying','committed')){throw 'Invalid firewall operation journal.'}

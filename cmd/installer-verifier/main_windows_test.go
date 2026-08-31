@@ -17,10 +17,30 @@ func TestRunPowerShellReceivesExactArguments(t *testing.T) {
 	}
 }
 
+func TestRunPowerShellKeepsArgumentsAcrossScriptLines(t *testing.T) {
+	err := runPowerShell("$null = 1\nif($args.Count-ne 1-or$args[0]-cne'kept'){exit 17}", "kept")
+	if err != nil {
+		t.Fatalf("runPowerShell() multiline arguments error: %v", err)
+	}
+}
+
 func TestRunPowerShellLoadsNetSecurityModule(t *testing.T) {
 	err := runPowerShell(`$command=Get-Command Get-NetFirewallRule -ErrorAction Stop;if($command.Source-cne'NetSecurity'){exit 18}`)
 	if err != nil {
 		t.Fatalf("runPowerShell() NetSecurity error: %v", err)
+	}
+}
+
+func TestRunPowerShellAcceptsScriptLargerThanWindowsCommandLineLimit(t *testing.T) {
+	if err := runPowerShell(strings.Repeat(`$null='0123456789abcdef';`, 2000)); err != nil {
+		t.Fatalf("runPowerShell() long script error: %v", err)
+	}
+}
+
+func TestRunPowerShellPropagatesScriptExitCode(t *testing.T) {
+	err := runPowerShell(`exit 19`)
+	if err == nil || !strings.Contains(err.Error(), "exit code 19") {
+		t.Fatalf("runPowerShell() exit error = %v, want exit code 19", err)
 	}
 }
 
