@@ -64,6 +64,41 @@ function Assert-SafeReleaseParent([string] $Path) {
     }
     return $parent
 }
+
+function Wait-ExclusiveFileAccess {
+    param([Parameter(Mandatory = $true)][string] $Path, [int] $TimeoutSeconds = 15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $stream.Dispose()
+            return
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out waiting for exclusive access to '$Path'." }
+            Start-Sleep -Milliseconds 200
+        }
+    } while ($true)
+}
+
+function Remove-TemporaryReleaseRoot {
+    param([Parameter(Mandatory = $true)][string] $Path, [int] $TimeoutSeconds = 15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop }
+            return
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out cleaning temporary release root '$Path'." }
+            Start-Sleep -Milliseconds 200
+        }
+        catch [UnauthorizedAccessException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out cleaning temporary release root '$Path'." }
+            Start-Sleep -Milliseconds 200
+        }
+    } while ($true)
+}
 Assert-SafeReleaseParent -Path $final | Out-Null
 Assert-SafeReleaseParent -Path $temporaryMsi | Out-Null
 try {
@@ -89,8 +124,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'signtool release signing failed.' }
     & (Join-Path $PSScriptRoot 'inspect-client-msi.ps1') -MsiPath $temporaryMsi -StagingPath $payload -OutputDirectory ('build/release-' + $id + '/inspect')
     if ($LASTEXITCODE -ne 0) { throw 'Release inspection failed.' }
+    Wait-ExclusiveFileAccess -Path $temporaryMsi -TimeoutSeconds 15
     [IO.File]::Move($temporaryMsi, $final)
 }
 finally {
-    if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $temporaryRoot) { Remove-TemporaryReleaseRoot -Path $temporaryRoot -TimeoutSeconds 15 }
 }

@@ -488,8 +488,8 @@ Describe 'Transactional Windows client installer' {
         (Test-Path -LiteralPath $releasePublisherPath -PathType Leaf) | Should Be $true
         if (Test-Path -LiteralPath $releasePublisherPath) {
             $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
-            $publisher | Should Match 'build-client-artifacts\.ps1[\s\S]*wix[\s\S]*signtool[\s\S]*inspect-client-msi\.ps1[\s\S]*Move-Item'
-            $publisher | Should Match 'finally[\s\S]*Remove-Item'
+            $publisher | Should Match 'build-client-artifacts\.ps1[\s\S]*wix[\s\S]*signtool[\s\S]*inspect-client-msi\.ps1[\s\S]*\[IO\.File\]::Move'
+            $publisher | Should Match 'finally[\s\S]*Remove-TemporaryReleaseRoot'
         }
     }
 
@@ -735,6 +735,15 @@ Describe 'Transactional Windows client installer' {
             $text | Should Match '\[IO\.(Directory|File)\]::Move\('
             $text.IndexOf('git -C $repo status --porcelain') | Should BeLessThan $text.IndexOf('Assert-SafeReleaseParent')
         }
+    }
+
+    It 'waits for exclusive MSI access before atomic publication and bounds temporary cleanup retries' {
+        $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+        $publisher | Should Match 'function Wait-ExclusiveFileAccess'
+        $publisher | Should Match '\[IO\.File\]::Open\([^\r\n]*FileShare\]::None'
+        $publisher | Should Match 'Wait-ExclusiveFileAccess\s+-Path\s+\$temporaryMsi\s+-TimeoutSeconds\s+15'
+        $publisher | Should Match 'function Remove-TemporaryReleaseRoot'
+        $publisher | Should Match 'Remove-TemporaryReleaseRoot\s+-Path\s+\$temporaryRoot\s+-TimeoutSeconds\s+15'
     }
 
     It 'uses only the Wintun Prebuilt Binaries License attribution' {
