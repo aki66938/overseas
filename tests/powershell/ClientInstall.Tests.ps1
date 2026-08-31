@@ -51,7 +51,7 @@ Describe 'Transactional Windows client installer' {
 
     It 'verifies every payload hash and required signature before the transaction journal or mutation' {
         $text = Get-Content -LiteralPath $scriptPath -Raw
-        foreach ($literal in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'install-client.ps1', 'PROVISIONING.md', 'sing-box.exe', 'sing-box.manifest.json', 'agent.yaml', 'agent.yaml.p7s', 'wintun.dll', 'sing-box-LICENSE.txt', 'wintun-LICENSE.txt')) {
+        foreach ($literal in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe', 'install-client.ps1', 'sing-box.exe', 'sing-box.manifest.json', 'agent.yaml', 'agent.yaml.p7s', 'wintun.dll', 'sing-box-LICENSE.txt', 'wintun-LICENSE.txt')) {
             $text | Should Match ([regex]::Escape($literal))
         }
         $hashIndex = $text.IndexOf('Assert-PayloadHashes')
@@ -65,7 +65,7 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'Get-AuthenticodeSignature'
         $text | Should Match 'SignedCms'
         $text | Should Match 'CheckSignature\(\$true\)'
-        $text | Should Match ([regex]::Escape("foreach (`$name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'wintun.dll'))"))
+        $text | Should Match ([regex]::Escape("foreach (`$name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe', 'wintun.dll'))"))
         $text | Should Not Match '(?i)Invoke-WebRequest|Start-BitsTransfer|System\.Net\.WebClient|HttpClient'
 
         $requiredStart = $text.IndexOf('$RequiredPayloads = @(')
@@ -296,10 +296,10 @@ Describe 'Transactional Windows client installer' {
         $product | Should Match 'RegenBio Overseas Access'
         $files | Should Match '<ServiceInstall[^>]*Name="RegenBioOverseasAccessAgent"'
         $files | Should Match 'Account="LocalSystem"'
-        $files | Should Match 'Start="auto"'
+        $files | Should Match 'Start="demand"'
         $files | Should Match '<ServiceControl'
         $files | Should Match '<Shortcut'
-        $files | Should Match 'Name="DelayedAutostart"[\s\S]*Value="1"'
+        $files | Should Not Match 'Name="DelayedAutostart"'
         $files | Should Match '<util:ServiceConfig[\s\S]*FirstFailureActionType="restart"'
     }
 
@@ -350,14 +350,15 @@ Describe 'Transactional Windows client installer' {
         $combined | Should Not Match '<CustomAction[^>]*(ExeCommand|CommandLine)[^>]*(credential|password|secret|token|pin)'
     }
 
-    It 'packages a stdin-only credential provisioner and leaves the service stopped until provisioning' {
+    It 'leaves the demand-start service stopped after installation' {
         $files = Get-Content -LiteralPath $filesPath -Raw
         $script = Get-Content -LiteralPath $scriptPath -Raw
-        $files | Should Match 'credential-provisioner\.exe'
-        $files | Should Match 'PROVISIONING\.md'
+        $files | Should Match 'Start="demand"'
+        $files | Should Not Match 'credential-provisioner\.exe|PROVISIONING\.md'
         $files | Should Not Match '<ServiceControl[^>]*Start="install"'
-        $script | Should Match '\$CredentialPath\s*=\s*Join-Path\s+\$DataRoot\s+''credential\.bin'''
-        $script | Should Match 'if\s*\(Test-Path\s+-LiteralPath\s+\$CredentialPath\s+-PathType\s+Leaf\)\s*\{[\s\S]*Start-Service'
+        $installStart = $script.IndexOf('function Install-ClientTransaction')
+        $installEnd = $script.IndexOf('function Uninstall-ClientTransaction', $installStart)
+        $script.Substring($installStart, $installEnd - $installStart) | Should Not Match 'Start-Service'
     }
 
     It 'wires reproducible local WiX restore MSI build inspection and dual-Pester targets' {
@@ -449,17 +450,15 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'inspect-client-msi\.ps1'
     }
 
-    It 'owns and resumably removes dynamic sensitive runtime files after process termination' {
+    It 'owns and resumably removes the generated runtime config after process termination' {
         $script = Get-Content -LiteralPath $scriptPath -Raw
         $files = Get-Content -LiteralPath $filesPath -Raw
         $product = Get-Content -LiteralPath $productPath -Raw
         $script | Should Match 'runtime-owned\.json'
-        $script | Should Match 'credential\.bin'
         $script | Should Match 'sing-box\.json'
         $script | Should Match 'Clear-OwnedSensitiveRuntimeFiles'
         $script.IndexOf('Remove-OwnedService') | Should BeLessThan $script.IndexOf('Clear-OwnedSensitiveRuntimeFiles')
         $script | Should Match 'SensitiveCleanupIncomplete'
-        $files | Should Match '<RemoveFile[^>]*Name="credential\.bin"'
         $files | Should Match '<RemoveFile[^>]*Name="sing-box\.json"'
         $product | Should Match 'CleanupOwnedRuntime'
     }
@@ -621,9 +620,8 @@ Describe 'Transactional Windows client installer' {
         @($driftJournal.current_operation.rules | Where-Object { $_.name -eq 'RegenBioOverseasAccess-AllowCoreTCP-Out' -and $_.rollback_state -eq 'resolved' }).Count | Should Be 1
     }
 
-    It 'publishes both sensitive runtime files through schema-v2 intents and finalization' {
+    It 'publishes the generated config through schema-v2 intents and finalization' {
         $owner = Get-Content -LiteralPath $runtimeOwnerPath -Raw
-        $credential = Get-Content -LiteralPath $credentialWriterPath -Raw
         $config = Get-Content -LiteralPath $configWriterPath -Raw
         $verifier = Get-Content -LiteralPath $verifierWindowsPath -Raw
         $owner | Should Match 'SchemaVersion\s+int[^\r\n]*json:"schema_version"'
@@ -632,10 +630,6 @@ Describe 'Transactional Windows client installer' {
         foreach ($field in @('Target', 'Temporary', 'Backup', 'Replaced', 'Phase')) { $owner | Should Match ("$field\s+string") }
         $owner | Should Match 'lockRuntimeOwnership'
         $owner | Should Match 'func Publish\('
-        $credential | Should Match 'runtimeowner\.Publish\('
-        $credential | Should Match 'secret\.StoreMachineExact\('
-        $credential | Should Not Match 'secret\.StoreMachine\('
-        $credential.IndexOf('runtimeowner.Publish(') | Should BeLessThan $credential.IndexOf('secret.StoreMachineExact(')
         $config | Should Match 'runtimeowner\.Publish\('
         $config.IndexOf('runtimeowner.Publish(') | Should BeLessThan $config.IndexOf('os.OpenFile(')
         $verifier | Should Match ([regex]::Escape("`$s=@('credential.bin','sing-box.json')"))
@@ -658,13 +652,8 @@ Describe 'Transactional Windows client installer' {
             backup = '.sing-box.json.backup-22222222222222222222222222222222.tmp'
             replaced = '.sing-box.json.replaced-33333333333333333333333333333333.tmp'; phase = 'published'
         }
-        $credentialIntent = [ordered]@{
-            target = 'credential.bin'; temporary = '.credential.bin.publish-44444444444444444444444444444444.tmp'
-            backup = '.credential.bin.backup-55555555555555555555555555555555.tmp'
-            replaced = '.credential.bin.replaced-66666666666666666666666666666666.tmp'; phase = 'prepared'
-        }
-        [IO.File]::WriteAllText($script:RuntimeOwnershipPath, ([ordered]@{ schema_version = 2; intents = @($intent, $credentialIntent); finalized = @('sing-box.json') } | ConvertTo-Json -Depth 6))
-        foreach ($name in @($intent.target, $intent.temporary, $intent.backup, $intent.replaced, $credentialIntent.target, $credentialIntent.temporary, $credentialIntent.backup, $credentialIntent.replaced)) {
+        [IO.File]::WriteAllText($script:RuntimeOwnershipPath, ([ordered]@{ schema_version = 2; intents = @($intent); finalized = @('sing-box.json') } | ConvertTo-Json -Depth 6))
+        foreach ($name in @($intent.target, $intent.temporary, $intent.backup, $intent.replaced)) {
             [IO.File]::WriteAllText((Join-Path $script:DataRoot $name), 'sensitive-residue')
         }
         Clear-OwnedSensitiveRuntimeFiles
@@ -757,5 +746,31 @@ Describe 'Transactional Windows client installer' {
         ) -join "`n"
         $combined | Should Match 'Wintun Prebuilt Binaries License'
         $combined | Should Not Match '(?i)GPL|General Public License'
+    }
+
+    It 'packages a disconnected proxy-neutral schema two HTTP CONNECT client' {
+        $files = Get-Content -LiteralPath $filesPath -Raw
+        $product = Get-Content -LiteralPath (Join-Path $repoRoot 'deploy\client\Product.wxs') -Raw
+        $script = Get-Content -LiteralPath $scriptPath -Raw
+        $policy = Get-Content -LiteralPath (Join-Path $repoRoot 'deploy\client\agent.yaml') -Raw
+        $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw
+        $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+        $verifier = Get-Content -LiteralPath (Join-Path $repoRoot 'cmd\installer-verifier\main_windows.go') -Raw
+        $combined = @($files, $product, $script, $builder, $publisher) -join "`n"
+
+        $policy | Should Match '(?m)^\s*schema_version:\s*2\s*$'
+        $policy | Should Match '(?m)^\s*transport:\s*http-connect\s*$'
+        $policy | Should Match '(?m)^\s*address:\s*172\.20\.9\.15\s*$'
+        $policy | Should Match '(?m)^\s*port:\s*8080\s*$'
+        $policy | Should Not Match '(?i)credential|18443|shadowsocks'
+        $combined | Should Not Match '(?i)credential-provisioner\.exe|PROVISIONING\.md|credential\.bin'
+        $verifier | Should Not Match "expectedPayloadNames[^\r\n]*(credential-provisioner\.exe|PROVISIONING\.md)"
+        $files | Should Match '<ServiceInstall[\s\S]*Start="demand"'
+        $files | Should Not Match '<ServiceControl[^>]*Start="install"'
+        $combined | Should Not Match '(?i)netsh\s+winhttp|Internet Settings|FlClash'
+        $installStart = $script.IndexOf('function Install-ClientTransaction')
+        $installEnd = $script.IndexOf('function Repair-ClientTransaction', $installStart)
+        $repairEnd = $script.IndexOf('function Uninstall-ClientTransaction', $installEnd)
+        $script.Substring($installStart, $repairEnd - $installStart) | Should Not Match '(?i)Start-Service'
     }
 }

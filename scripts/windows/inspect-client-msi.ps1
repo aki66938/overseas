@@ -30,8 +30,8 @@ New-Item -ItemType Directory -Path $output | Out-Null
 if (-not $? -or $LASTEXITCODE -ne 0) { throw 'MSI decompilation failed.' }
 
 $map = [ordered] @{
-    AgentExe='overseas-agent.exe'; ClientExe='overseas-client.exe'; CredentialProvisionerFile='credential-provisioner.exe'
-    InstallerVerifierFile='installer-verifier.exe'; InstallerHarnessFile='install-client.ps1'; ProvisioningGuide='PROVISIONING.md'
+    AgentExe='overseas-agent.exe'; ClientExe='overseas-client.exe'
+    InstallerVerifierFile='installer-verifier.exe'; InstallerHarnessFile='install-client.ps1'
     SingBoxExe='sing-box.exe'; CoreManifest='sing-box.manifest.json'; CronetRuntime='libcronet.dll'; TunDriver='wintun.dll'
     SingBoxLicense='sing-box-LICENSE.txt'; WintunLicense='wintun-LICENSE.txt'; AgentPolicy='agent.yaml'; AgentPolicySignature='agent.yaml.p7s'
     ArtifactManifest='artifact-manifest.json'; ArtifactManifestSignature='artifact-manifest.json.p7s'; ClientSbom='client-sbom.json'; PayloadChecksums='SHA256SUMS'

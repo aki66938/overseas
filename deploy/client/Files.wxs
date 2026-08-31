@@ -16,7 +16,7 @@
               DisplayName="RegenBio Overseas Access Agent"
               Description="Fail-closed RegenBio overseas-access controller"
               Type="ownProcess"
-              Start="auto"
+              Start="demand"
               ErrorControl="normal"
               Account="LocalSystem"
               Vital="yes">
@@ -33,12 +33,6 @@
               Stop="both"
               Remove="uninstall"
               Wait="yes" />
-        <RegistryValue
-            Root="HKLM"
-            Key="SYSTEM\CurrentControlSet\Services\RegenBioOverseasAccessAgent"
-            Name="DelayedAutostart"
-            Type="integer"
-            Value="1" />
       </Component>
 
       <Component Id="ClientUi" Guid="E22BA95A-6552-44AD-A61E-A8F21BE85A1C" Bitness="always64">
@@ -65,8 +59,6 @@
       <Component Id="InstallerHarness" Guid="5AF50244-CB84-4B2D-80BD-B36315F29E54" Bitness="always64">
         <File Id="InstallerHarnessFile" Source="install-client.ps1" KeyPath="yes" Checksum="yes" />
         <File Id="InstallerVerifierFile" Source="installer-verifier.exe" Checksum="yes" />
-        <File Id="CredentialProvisionerFile" Source="credential-provisioner.exe" Checksum="yes" />
-        <File Id="ProvisioningGuide" Source="PROVISIONING.md" Checksum="yes" />
       </Component>
     </ComponentGroup>
 
@@ -75,7 +67,6 @@
         <CreateFolder>
           <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
         </CreateFolder>
-        <RemoveFile Id="RemoveOwnedCredential" Name="credential.bin" On="uninstall" />
         <RemoveFile Id="RemoveOwnedRenderedConfig" Name="sing-box.json" On="uninstall" />
         <RemoveFile Id="RemoveRuntimeOwnershipLedger" Name="runtime-owned.json" On="uninstall" />
       </Component>

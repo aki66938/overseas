@@ -106,13 +106,12 @@ Expand-Archive -LiteralPath $tunArchive -DestinationPath (Join-Path $scratch 'tu
 
 $copies = @{
     'install-client.ps1' = 'deploy\client\install-client.ps1'
-    'PROVISIONING.md' = 'deploy\client\PROVISIONING.md'
     'agent.yaml' = 'deploy\client\agent.yaml'
     'agent.yaml.p7s' = 'deploy\client\agent.yaml.p7s'
     'sing-box.manifest.json' = 'sing-box.manifest.json'
 }
 foreach ($name in @($copies.Keys | Sort-Object)) { Copy-Item -LiteralPath (Join-Path $repo $copies[$name]) -Destination (Join-Path $target $name) }
-foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe')) {
+foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')) {
     Copy-Item -LiteralPath (Join-Path $firstPartyRoot $name) -Destination (Join-Path $target $name)
 }
 $coreRoot = Join-Path $scratch ('core\sing-box-' + $lock.sing_box.version + '-windows-amd64')
@@ -132,7 +131,7 @@ if ($Mode -eq 'Release') {
     if (-not $harness.Contains($sentinel)) { throw 'Installer harness trust-anchor sentinel is absent.' }
     [IO.File]::WriteAllText($harnessPath, $harness.Replace($sentinel, $SigningCertificateThumbprint.ToUpperInvariant()), (New-Object Text.UTF8Encoding($false)))
     Write-DetachedCms -ContentPath (Join-Path $target 'agent.yaml') -SignaturePath (Join-Path $target 'agent.yaml.p7s')
-    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe')) {
+    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')) {
         & $SignToolPath sign /fd SHA256 /sha1 $SigningCertificateThumbprint (Join-Path $target $name) | Out-Null
         if (-not $? -or $LASTEXITCODE -ne 0) { throw "Authenticode signing failed for '$name'." }
     }
@@ -151,7 +150,7 @@ $sbom = [ordered] @{
 $sumLines = @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name })
 [IO.File]::WriteAllLines((Join-Path $target 'SHA256SUMS'), $sumLines, (New-Object Text.UTF8Encoding($false)))
 $dataNames = @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')
-$firstParty = @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe')
+$firstParty = @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')
 $files = @()
 foreach ($item in @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name)) {
     $required = $item.Name -eq 'wintun.dll' -or ($Mode -eq 'Release' -and $firstParty -contains $item.Name)

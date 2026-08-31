@@ -72,7 +72,6 @@ try {
     $builds = @(
         @('overseas-agent.exe', './cmd/overseas-agent', @()),
         @('overseas-client.exe', './cmd/overseas-client', @('-ldflags', '-H windowsgui')),
-        @('credential-provisioner.exe', './cmd/credential-provisioner', @()),
         @('installer-verifier.exe', './cmd/installer-verifier', @())
     )
     foreach ($build in $builds) {

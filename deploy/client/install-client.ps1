@@ -23,7 +23,6 @@ $RootOwnerFileName = '.regenbio-overseas-access.owner.json'
 $InstallOwnerPath = Join-Path $InstallRoot $RootOwnerFileName
 $DataOwnerPath = Join-Path $DataRoot $RootOwnerFileName
 $OwnerPath = $DataOwnerPath
-$CredentialPath = Join-Path $DataRoot 'credential.bin'
 $RuntimeOwnershipPath = Join-Path $DataRoot 'runtime-owned.json'
 $ShortcutPath = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\RegenBio Overseas Access.lnk'
 $PipePath = '\\.\pipe\RegenBioOverseasAccess'
@@ -38,10 +37,8 @@ $OwnedFirewallRules = @(
 $RequiredPayloads = @(
     'overseas-agent.exe',
     'overseas-client.exe',
-    'credential-provisioner.exe',
     'installer-verifier.exe',
     'install-client.ps1',
-    'PROVISIONING.md',
     'sing-box.exe',
     'sing-box.manifest.json',
     'libcronet.dll',
@@ -353,7 +350,7 @@ function Assert-PayloadSignatures {
     if ($thumbprints.Count -eq 0 -or @($thumbprints | Where-Object { $_ -notmatch '^[A-F0-9]{40,64}$' }).Count -ne 0) {
         throw 'The signer thumbprint allowlist is invalid.'
     }
-    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'wintun.dll')) {
+    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe', 'wintun.dll')) {
         Assert-AuthenticodePayload -Path $Paths[$name] -AllowedThumbprints $thumbprints
     }
     Assert-DetachedPolicySignature -PolicyPath $Paths['agent.yaml'] -SignaturePath $Paths['agent.yaml.p7s'] -AllowedThumbprints $thumbprints
@@ -597,7 +594,7 @@ function Remove-OwnedService {
 
 function Clear-OwnedSensitiveRuntimeFiles {
     if (-not [IO.File]::Exists($RuntimeOwnershipPath)) {
-        foreach ($expected in @('credential.bin', 'sing-box.json')) {
+        foreach ($expected in @('sing-box.json')) {
             if ([IO.File]::Exists((Join-Path $DataRoot $expected))) {
                 throw "Sensitive runtime file '$expected' exists without an ownership ledger."
             }
@@ -606,7 +603,7 @@ function Clear-OwnedSensitiveRuntimeFiles {
     }
     $ledger = Get-Content -LiteralPath $RuntimeOwnershipPath -Raw | ConvertFrom-Json
     if ($ledger.schema_version -ne 2) { throw 'Runtime ownership ledger is invalid.' }
-    $supported = @('credential.bin', 'sing-box.json')
+    $supported = @('sing-box.json')
     $ownedTargets = @($ledger.finalized)
     $ownedPaths = @($ledger.finalized)
     foreach ($intent in @($ledger.intents)) {
@@ -628,7 +625,7 @@ function Clear-OwnedSensitiveRuntimeFiles {
     foreach ($name in @($ledger.finalized)) {
         if ([string] $name -notin $supported) { throw 'Runtime ownership ledger contains a foreign finalized path.' }
     }
-    foreach ($expected in @('credential.bin', 'sing-box.json')) {
+    foreach ($expected in @('sing-box.json')) {
         if ([IO.File]::Exists((Join-Path $DataRoot $expected)) -and $ownedTargets -notcontains $expected) {
             throw "Sensitive runtime file '$expected' is not ownership-proven."
         }
@@ -643,7 +640,7 @@ function Clear-OwnedSensitiveRuntimeFiles {
         elseif ([IO.Directory]::Exists($path)) { throw "Sensitive runtime path '$name' is not a regular file." }
         if ([IO.File]::Exists($path) -or [IO.Directory]::Exists($path)) { throw "Sensitive runtime residue '$name' remains." }
     }
-    foreach ($expected in @('credential.bin', 'sing-box.json')) {
+    foreach ($expected in @('sing-box.json')) {
         if ([IO.File]::Exists((Join-Path $DataRoot $expected)) -or [IO.Directory]::Exists((Join-Path $DataRoot $expected))) { throw "Sensitive runtime residue '$expected' remains." }
     }
     [IO.File]::Delete($RuntimeOwnershipPath)
@@ -837,9 +834,6 @@ function Install-ClientTransaction {
         Ensure-OwnedFirewallRules
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingShortcut' -PendingResource $ShortcutPath -CompletedResource $OwnedFirewallGroup
         Ensure-OwnedShortcut
-        if (Test-Path -LiteralPath $CredentialPath -PathType Leaf) {
-            Start-Service -Name $ServiceName -ErrorAction Stop
-        }
         Write-TransactionPhase -Path $JournalPath -Phase 'Completed' -CompletedResource $ShortcutPath
         Remove-Item -LiteralPath $JournalPath -Force
     }
@@ -881,7 +875,6 @@ function Repair-ClientTransaction {
         Ensure-OwnedService
         Ensure-OwnedFirewallRules
         Ensure-OwnedShortcut
-        if (Test-Path -LiteralPath $CredentialPath -PathType Leaf) { Start-Service -Name $ServiceName -ErrorAction Stop }
         Write-TransactionPhase -Path $JournalPath -Phase 'Completed'
         Remove-Item -LiteralPath $JournalPath -Force
         return $(if ($changed) { 'Repaired' } else { 'AlreadyCurrent' })

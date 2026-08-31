@@ -85,11 +85,11 @@ Assert-ExactProperties $release @('schema_version','product_version','source_com
 if($release.schema_version-ne 1-or[string]$release.product_version-cne'0.1.0'-or[string]$release.source_commit-cne$expectedCommit-or[string]$release.mode-cne'release'){throw 'release expected commit/schema mismatch'}
 $manifestSigners=@($release.signer_thumbprints|ForEach-Object{([string]$_).ToUpperInvariant()})
 if($manifestSigners.Count-eq 0-or@($manifestSigners|Sort-Object -Unique).Count-ne$manifestSigners.Count-or$manifestSigners-notcontains$releaseSigner-or@($manifestSigners|Where-Object{$_-cnotmatch'^[A-F0-9]{40}$'}).Count-ne 0){throw 'release signer_thumbprints invalid'}
-$expectedPayloadNames=@('PROVISIONING.md','SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','credential-provisioner.exe','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll')
+$expectedPayloadNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll')
 $names=@($release.files|ForEach-Object{[string]$_.name})
 if($names.Count-ne$expectedPayloadNames.Count-or@($names|Sort-Object -Unique).Count-ne$expectedPayloadNames.Count-or(Compare-Object -ReferenceObject ($expectedPayloadNames|Sort-Object) -DifferenceObject ($names|Sort-Object))){throw 'release manifest exact payload allowlist mismatch'}
 $programDataNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json')
-$authenticodeNames=@('credential-provisioner.exe','installer-verifier.exe','overseas-agent.exe','overseas-client.exe','wintun.dll')
+$authenticodeNames=@('installer-verifier.exe','overseas-agent.exe','overseas-client.exe','wintun.dll')
 foreach($entry in @($release.files)){
   Assert-ExactProperties $entry @('name','destination','sha256','authenticode_required','authenticode_thumbprints') 'release payload entry'
   $name=[string]$entry.name;if($name-cnotmatch'^[A-Za-z0-9][A-Za-z0-9._-]*$'-or$name.Contains('..')-or[string]$entry.sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'release payload entry invalid'}
