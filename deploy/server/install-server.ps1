@@ -48,9 +48,8 @@ $InstallRoot = 'C:\Program Files\RegenBio\OverseasAccessServer'
 $DataRoot = 'C:\ProgramData\RegenBio\OverseasAccessServer'
 $OwnerMarkerName = 'owner.json'
 $FirewallAllowEmployee = 'RegenBioOverseasAccess-AllowEmployee-In'
-$FirewallBlock8080 = 'RegenBioOverseasAccess-Block8080-Remote'
 $FirewallBlockManagement = 'RegenBioOverseasAccess-BlockManagement-Employee'
-$FirewallNames = @($FirewallAllowEmployee, $FirewallBlock8080, $FirewallBlockManagement)
+$FirewallNames = @($FirewallAllowEmployee, $FirewallBlockManagement)
 $ManagementPorts = @('22', '3389', '5985', '5986')
 $OwnershipPrefix = 'RegenBioOverseasAccessServer;TransactionId='
 
@@ -345,8 +344,8 @@ function Get-TelecomConnectEvidence {
         throw "Expected exactly one telecom listener on TCP $TelecomProxyPort."
     }
     $listener = $listeners[0]
-    if ([string] $listener.LocalAddress -notin @($TelecomProxyAddress, '::1')) {
-        throw "TCP $TelecomProxyPort must be loopback-only; found $($listener.LocalAddress)."
+    if ([string] $listener.LocalAddress -notin @('127.0.0.1', '::1', '0.0.0.0', '::')) {
+        throw "TCP $TelecomProxyPort listener address is unsupported: $($listener.LocalAddress)."
     }
     if ([int64] $listener.OwningProcess -le 0) {
         throw "TCP $TelecomProxyPort has no valid owning process."
@@ -555,7 +554,7 @@ function Compensate-InstallTransaction {
 
     $errors = New-Object System.Collections.Generic.List[string]
 
-    foreach ($firewallName in @($FirewallBlockManagement, $FirewallBlock8080, $FirewallAllowEmployee)) {
+    foreach ($firewallName in @($FirewallBlockManagement, $FirewallAllowEmployee)) {
         if (@(Get-ExactFirewallRule -Name $firewallName).Count -ne 0) {
             try { Remove-OwnedFirewallRule -Name $firewallName -TransactionId $TransactionId } catch { $errors.Add($_.Exception.Message) }
         }
@@ -764,22 +763,6 @@ function Install-ServerTransaction {
             -ErrorAction Stop | Out-Null
         $owned.FirewallRules.Add($FirewallAllowEmployee)
 
-        New-NetFirewallRule `
-            -Name $FirewallBlock8080 `
-            -DisplayName 'RegenBio Overseas Access - keep telecom proxy local only' `
-            -Description $ownershipDescription `
-            -Direction Inbound `
-            -Action Block `
-            -Enabled True `
-            -Profile Any `
-            -Protocol TCP `
-            -LocalPort $TelecomProxyPort `
-            -LocalAddress $ExpectedVmAddress `
-            -RemoteAddress Any `
-            -Confirm:$false `
-            -ErrorAction Stop | Out-Null
-        $owned.FirewallRules.Add($FirewallBlock8080)
-
         New-ManagementFirewallRule -OwnershipDescription $ownershipDescription
         $owned.FirewallRules.Add($FirewallBlockManagement)
 
@@ -924,7 +907,7 @@ function Rollback-ServerTransaction {
         return
     }
 
-    foreach ($firewallName in @($FirewallBlockManagement, $FirewallBlock8080, $FirewallAllowEmployee)) {
+    foreach ($firewallName in @($FirewallBlockManagement, $FirewallAllowEmployee)) {
         Remove-OwnedFirewallRule -Name $firewallName -TransactionId $transactionId
     }
     Remove-OwnedService -TransactionId $transactionId

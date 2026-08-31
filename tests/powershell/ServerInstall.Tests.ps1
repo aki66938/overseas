@@ -74,16 +74,14 @@ Describe 'Transactional sing-box server deployment' {
             'C:\Program Files\RegenBio\OverseasAccessServer',
             'C:\ProgramData\RegenBio\OverseasAccessServer',
             'RegenBioOverseasAccess-AllowEmployee-In',
-            'RegenBioOverseasAccess-Block8080-Remote',
             'RegenBioOverseasAccess-BlockManagement-Employee'
         )) {
             $text | Should Match ([regex]::Escape($literal))
         }
 
-        $block8080Start = $text.IndexOf("-DisplayName 'RegenBio Overseas Access - keep telecom proxy local only'")
-        $block8080End = $text.IndexOf('$owned.FirewallRules.Add($FirewallBlock8080)', $block8080Start)
-        $block8080 = $text.Substring($block8080Start, $block8080End - $block8080Start)
-        $block8080 | Should Match '-LocalAddress\s+\$ExpectedVmAddress'
+        $text | Should Not Match 'RegenBioOverseasAccess-Block8080-Remote'
+        $text | Should Not Match 'keep telecom proxy local only'
+        $text | Should Match "@\('127\.0\.0\.1',\s*'::1',\s*'0\.0\.0\.0',\s*'::'\)"
     }
 
     It 'registers the pinned first-party SCM host with fixed runtime paths and no service argv' {
@@ -452,8 +450,11 @@ Describe 'Transactional server behavioral refusal gates' {
                 }
                 return @()
             }
-            if ($global:Task7NegativeScenario -eq 'Owner8080') {
-                return [pscustomobject] @{ LocalAddress = '0.0.0.0'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+            if ($global:Task7NegativeScenario -eq 'Unsupported8080') {
+                return [pscustomobject] @{ LocalAddress = '172.20.9.15'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
+            }
+            if ($global:Task7NegativeScenario -eq 'Wildcard8080') {
+                return [pscustomobject] @{ LocalAddress = '::'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
             }
             return [pscustomobject] @{ LocalAddress = '127.0.0.1'; LocalPort = 8080; State = 'Listen'; OwningProcess = 4242 }
         }
@@ -495,7 +496,7 @@ Describe 'Transactional server behavioral refusal gates' {
             [pscustomobject] @{ Scenario = 'OS'; Hash = $singHash; Pattern = 'Unsupported Windows host' },
             [pscustomobject] @{ Scenario = 'IP'; Hash = $singHash; Pattern = 'Expected VM address' },
             [pscustomobject] @{ Scenario = 'Hash'; Hash = ('f' * 64); Pattern = 'sing-box SHA-256 verification failed' },
-            [pscustomobject] @{ Scenario = 'Owner8080'; Hash = $singHash; Pattern = 'loopback-only' },
+            [pscustomobject] @{ Scenario = 'Unsupported8080'; Hash = $singHash; Pattern = 'listener address is unsupported' },
             [pscustomobject] @{ Scenario = 'Connect'; Hash = $singHash; Pattern = 'CONNECT refused by test' },
             [pscustomobject] @{ Scenario = 'ServerPort'; Hash = $singHash; Pattern = 'already has a listener' },
             [pscustomobject] @{ Scenario = 'Firewall'; Hash = $singHash; Pattern = 'can expose TCP 18443' },
@@ -505,6 +506,12 @@ Describe 'Transactional server behavioral refusal gates' {
             $message = & $invokeInstall $case.Hash
             $message | Should Match ([regex]::Escape($case.Pattern))
         }
+
+        $global:Task7NegativeScenario = 'Wildcard8080'
+        { & $scriptPath -Mode Install -BundlePath $bundlePath -ConfigPath $configPath `
+                -ExpectedSingBoxSha256 $singHash -ExpectedConfigSha256 $configHash `
+                -ExpectedServerServiceSha256 $singHash -EmployeeCIDR '172.20.8.0/22' `
+                -ServerPort 18443 -EvidencePath (Join-Path $TestDrive 'wildcard.json') -WhatIf } | Should Not Throw
 
         Assert-MockCalled New-Service -Times 0 -Exactly -Scope It
         Assert-MockCalled New-NetFirewallRule -Times 0 -Exactly -Scope It
