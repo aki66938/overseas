@@ -13,6 +13,19 @@ import (
 	"time"
 )
 
+func TestAuthenticodeInspectionScriptLoadsFixedWindowsSecurityModule(t *testing.T) {
+	script := authenticodeInspectionScript()
+	for _, required := range []string{
+		`$ProgressPreference = 'SilentlyContinue'`,
+		`Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop`,
+		`Get-AuthenticodeSignature -LiteralPath $env:COREVERIFY_TARGET_PATH`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("Authenticode inspection script lacks %q", required)
+		}
+	}
+}
+
 func TestVerify(t *testing.T) {
 	executablePath, executableHash := writeTestPE(t)
 

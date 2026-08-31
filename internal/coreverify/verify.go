@@ -249,7 +249,13 @@ func inspectSecurityWithPowerShell(path string) (securityMetadata, error) {
 }
 
 func inspectAuthenticodeWithPowerShell(path string) (signatureMetadata, error) {
-	script := strings.Join([]string{
+	return runPowerShellJSON[signatureMetadata](path, authenticodeInspectionScript())
+}
+
+func authenticodeInspectionScript() string {
+	return strings.Join([]string{
+		"$ProgressPreference = 'SilentlyContinue'",
+		`Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop`,
 		"$signature = Get-AuthenticodeSignature -LiteralPath $env:COREVERIFY_TARGET_PATH",
 		"[pscustomobject]@{",
 		"  Status = [string]$signature.Status",
@@ -257,13 +263,12 @@ func inspectAuthenticodeWithPowerShell(path string) (signatureMetadata, error) {
 		"  Thumbprint = [string]$signature.SignerCertificate.Thumbprint",
 		"} | ConvertTo-Json -Compress -Depth 3",
 	}, " ")
-	return runPowerShellJSON[signatureMetadata](path, script)
 }
 
 func runPowerShellJSON[T any](path string, script string) (T, error) {
 	var output T
 
-	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-Command", script)
 	command.Env = append(os.Environ(), "COREVERIFY_TARGET_PATH="+path)
 	data, err := command.CombinedOutput()
 	if err != nil {
