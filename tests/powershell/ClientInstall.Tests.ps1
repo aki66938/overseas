@@ -463,14 +463,12 @@ Describe 'Transactional Windows client installer' {
         $product | Should Match 'CleanupOwnedRuntime'
     }
 
-    It 'passes deferred verification only through CustomActionData and sequences first-party firewall rollback' {
+    It 'passes only fixed payload paths to the embedded deferred verifier and sequences first-party firewall rollback' {
         $product = Get-Content -LiteralPath $productPath -Raw
         $files = Get-Content -LiteralPath $filesPath -Raw
-        $product | Should Match '<SetProperty[^>]*Id="VerifyInstalledPayload"'
-        $product | Should Match 'ExeCommand="\[CustomActionData\]"'
-        $product | Should Match '--program-files &quot;\[INSTALLFOLDER\]\.&quot; --program-data &quot;\[DATAFOLDER\]\.&quot;'
-        $product | Should Not Match '--program-files &quot;\[INSTALLFOLDER\]&quot;'
-        $product | Should Not Match '--program-data &quot;\[DATAFOLDER\]&quot;'
+        $product | Should Not Match '<SetProperty[^>]*Id="VerifyInstalledPayload"'
+        $product | Should Match 'ExeCommand="payload --program-files &quot;C:\\Program Files\\RegenBio\\OverseasAccess&quot; --program-data &quot;C:\\ProgramData\\RegenBio\\OverseasAccess&quot; --manifest &quot;C:\\ProgramData\\RegenBio\\OverseasAccess\\artifact-manifest\.json&quot; --signature &quot;C:\\ProgramData\\RegenBio\\OverseasAccess\\artifact-manifest\.json\.p7s&quot; --thumbprint &quot;\$\(var\.CorporateSigningThumbprint\)&quot;"'
+        $product | Should Not Match '\[CustomActionData\]'
         $product | Should Match 'RollbackClientFirewall'
         $product | Should Match 'InstallClientFirewall'
         $files | Should Not Match 'fire:FirewallException'
