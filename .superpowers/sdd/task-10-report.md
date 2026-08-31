@@ -127,3 +127,28 @@ minimal runbook changes then made the same focused PowerShell 5.1 and PowerShell
 Repository code readiness is PASS for the reviewed non-live scope. Task 10
 remains `DONE_WITH_CONCERNS` because the deliberately unexecuted live acceptance
 gate is still required.
+
+## 2026-08-31 direct telecom HTTP CONNECT PoC deployment
+
+- Approved client architecture changed to local sing-box TUN with one HTTP
+  CONNECT outbound at `172.20.9.15:8080`; VM101 was not modified.
+- Final installed MSI: `OverseasAccessSetup-POC-DIRECT-HTTP-v8-RELEASE_SIGNED.msi`.
+  SHA-256: `394E18B4E96B0E9EA6F7D56D40DCF6FA138BFCC33719B440A24FA153C30691C3`.
+  Source commit: `b058c2c79e866614ea9e3fa9258332142dd0e3d6`.
+  PoC signer: `6A9D8BC41086C6B764B8C7439E797671EF83C15E`.
+- Elevated quiet installation returned zero. The service is Manual/Stopped;
+  no TUN, product route, runtime DNS/firewall state, network-state journal, or
+  runtime sing-box configuration exists before user acceptance.
+- System proxy remains `127.0.0.1:7890`, WinHTTP remains Direct, and the three
+  observed FlClash process IDs and running helper service were unchanged.
+- Installed manifest hashes, detached CMS signer, and required Authenticode
+  signatures were independently checked. The MSI SYSTEM-phase installed
+  payload verifier passed; a post-install invocation from the interactive user
+  returned one despite the individual checks passing and remains an explicit
+  context-specific follow-up.
+- Recovery script SHA-256:
+  `02E4C21A98CF386D1DC09D955A1F7060C7255CF6B73CBCA45662E340E2E523D9`.
+- Fresh locked `go test -count=1 ./...`, `go vet ./...`, and focused client
+  Pester 42/42 under both Windows PowerShell 5.1 and PowerShell 7 passed.
+- Live TUN connection remains deliberately unexecuted; the user owns the
+  FlClash-off acceptance test.
