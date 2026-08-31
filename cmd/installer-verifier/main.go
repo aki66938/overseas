@@ -87,8 +87,29 @@ func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 		return 0
 	default:
 		_, _ = fmt.Fprintln(errorOutput, "installer trust verification failed")
-		return 2
+		return invalidInvocationExitCode(args)
 	}
+}
+
+func invalidInvocationExitCode(args []string) int {
+	if len(args) > 0 && args[0] == "payload" {
+		if len(args) != 11 {
+			if len(args) > 19 {
+				return 39
+			}
+			return 20 + len(args)
+		}
+		expected := map[int]string{1: "--program-files", 3: "--program-data", 5: "--manifest", 7: "--signature", 9: "--thumbprint"}
+		for _, index := range []int{1, 3, 5, 7, 9} {
+			if args[index] != expected[index] {
+				return 40 + index
+			}
+		}
+		if !sha1Thumbprint.MatchString(args[10]) {
+			return 70
+		}
+	}
+	return 2
 }
 
 func validBundleArguments(args []string) bool {

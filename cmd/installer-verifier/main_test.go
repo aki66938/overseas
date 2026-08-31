@@ -153,3 +153,13 @@ func TestRunVerifyBundleRequiresExactPinnedContract(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidInvocationExitCodeIdentifiesPayloadShapeWithoutValues(t *testing.T) {
+	if got := invalidInvocationExitCode([]string{"payload"}); got != 21 {
+		t.Fatalf("one-argument payload diagnostic = %d, want 21", got)
+	}
+	args := []string{"payload", "--wrong", "x", "--program-data", "x", "--manifest", "x", "--signature", "x", "--thumbprint", strings.Repeat("A", 40)}
+	if got := invalidInvocationExitCode(args); got != 41 {
+		t.Fatalf("first payload flag diagnostic = %d, want 41", got)
+	}
+}
