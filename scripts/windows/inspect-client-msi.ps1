@@ -111,9 +111,14 @@ $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } |
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')
 $packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackageTrust' -and $_[1] -eq '2' -and $_[2] -eq 'InstallerVerifierBinary' })
-$payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq '[CustomActionData]' })
 $payloadDataActions = @($customActions | Where-Object { $_[1] -eq '51' -and $_[2] -eq 'VerifyInstalledPayload' })
-if ($packageTrustActions.Count -ne 1 -or $payloadTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 1) { throw 'First-party trust custom actions are invalid.' }
+if ($packageTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 0) { throw 'First-party trust custom actions are invalid.' }
+$packageThumbprintMatch = [regex]::Match([string] $packageTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
+if (-not $packageThumbprintMatch.Success) { throw 'Embedded corporate trust anchor is absent.' }
+$embeddedCorporateThumbprint = $packageThumbprintMatch.Groups[1].Value.ToUpperInvariant()
+$expectedPayloadCommand = 'payload --program-files "C:\Program Files\RegenBio\OverseasAccess" --program-data "C:\ProgramData\RegenBio\OverseasAccess" --manifest "C:\ProgramData\RegenBio\OverseasAccess\artifact-manifest.json" --signature "C:\ProgramData\RegenBio\OverseasAccess\artifact-manifest.json.p7s" --thumbprint "' + $embeddedCorporateThumbprint + '"'
+$payloadTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyInstalledPayload' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -ceq $expectedPayloadCommand })
+if ($payloadTrustActions.Count -ne 1) { throw 'First-party payload trust custom action is invalid.' }
 $firewallCommands = @{
     RollbackClientFirewall = 'firewall-rollback'
     InstallClientFirewall = 'firewall-install'
@@ -123,11 +128,6 @@ foreach ($action in $firewallCommands.Keys) {
     $rows = @($customActions | Where-Object { $_[0] -eq $action -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq $firewallCommands[$action] })
     if ($rows.Count -ne 1) { throw "Raw firewall custom action '$action' is invalid." }
 }
-$packageThumbprintMatch = [regex]::Match([string] $packageTrustActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
-$payloadThumbprintMatch = [regex]::Match([string] $payloadDataActions[0][3], '--thumbprint\s+"([A-Fa-f0-9]{40})"')
-if (-not $packageThumbprintMatch.Success -or -not $payloadThumbprintMatch.Success) { throw 'Embedded corporate trust anchor is absent.' }
-$embeddedCorporateThumbprint = $packageThumbprintMatch.Groups[1].Value.ToUpperInvariant()
-if ($payloadThumbprintMatch.Groups[1].Value.ToUpperInvariant() -ne $embeddedCorporateThumbprint) { throw 'Package and payload trust anchors differ.' }
 if ($manifest.mode -eq 'release') {
     if ($trustMode[0] -ne 'RELEASE_SIGNED' -or $embeddedCorporateThumbprint -eq ('0' * 40)) { throw 'Release trust metadata is invalid.' }
     $msiSignature = Get-AuthenticodeSignature -LiteralPath $MsiPath

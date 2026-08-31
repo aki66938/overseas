@@ -478,6 +478,8 @@ Describe 'Transactional Windows client installer' {
     It 'enforces exact trust-root coverage locked tools and atomic release publication' {
         $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw
         $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw
+        $inspector | Should Match '\$expectedPayloadCommand'
+        $inspector | Should Match '\$payloadDataActions\.Count -ne 0'
         $builder | Should Match 'go\.version'
         $builder | Should Match 'wix\.sdk_sha256'
         $builder | Should Match '\[IO\.Directory\]::Move\('
