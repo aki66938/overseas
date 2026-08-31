@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,21 @@ func TestAuthenticodeInspectionScriptLoadsFixedWindowsSecurityModule(t *testing.
 		if !strings.Contains(script, required) {
 			t.Fatalf("Authenticode inspection script lacks %q", required)
 		}
+	}
+}
+
+func TestPowerShellInspectionScriptsParse(t *testing.T) {
+	for name, script := range map[string]string{
+		"security":     securityInspectionScript(),
+		"authenticode": authenticodeInspectionScript(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			command := exec.Command(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-Command", "$null=[ScriptBlock]::Create([Console]::In.ReadToEnd())")
+			command.Stdin = strings.NewReader(script)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("PowerShell script parse failed: %v: %s", err, output)
+			}
+		})
 	}
 }
 

@@ -222,7 +222,11 @@ func validateSignature(signature signatureMetadata, signerAllowlist []string) er
 }
 
 func inspectSecurityWithPowerShell(path string) (securityMetadata, error) {
-	script := strings.Join([]string{
+	return runPowerShellJSON[securityMetadata](path, securityInspectionScript())
+}
+
+func securityInspectionScript() string {
+	return strings.Join([]string{
 		"$acl = Get-Acl -LiteralPath $env:COREVERIFY_TARGET_PATH",
 		"$ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value",
 		"$targetSids = @('S-1-5-32-545','S-1-5-11','S-1-1-0')",
@@ -244,8 +248,7 @@ func inspectSecurityWithPowerShell(path string) (securityMetadata, error) {
 		"  UnsafeWriteSIDs = @($unsafeSids | Sort-Object -Unique)",
 		"  UnsafeWriteNames = @($unsafeNames | Sort-Object -Unique)",
 		"} | ConvertTo-Json -Compress -Depth 5",
-	}, " ")
-	return runPowerShellJSON[securityMetadata](path, script)
+	}, "\n")
 }
 
 func inspectAuthenticodeWithPowerShell(path string) (signatureMetadata, error) {
@@ -262,7 +265,7 @@ func authenticodeInspectionScript() string {
 		"  Subject = [string]$signature.SignerCertificate.Subject",
 		"  Thumbprint = [string]$signature.SignerCertificate.Thumbprint",
 		"} | ConvertTo-Json -Compress -Depth 3",
-	}, " ")
+	}, "\n")
 }
 
 func runPowerShellJSON[T any](path string, script string) (T, error) {
