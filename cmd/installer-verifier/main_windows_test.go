@@ -17,6 +17,13 @@ func TestRunPowerShellReceivesExactArguments(t *testing.T) {
 	}
 }
 
+func TestRunPowerShellLoadsNetSecurityModule(t *testing.T) {
+	err := runPowerShell(`$command=Get-Command Get-NetFirewallRule -ErrorAction Stop;if($command.Source-cne'NetSecurity'){exit 18}`)
+	if err != nil {
+		t.Fatalf("runPowerShell() NetSecurity error: %v", err)
+	}
+}
+
 func TestRunPowerShellVerifiesConfiguredMSI(t *testing.T) {
 	msi := os.Getenv("INSTALLER_VERIFIER_TEST_MSI")
 	thumbprint := os.Getenv("INSTALLER_VERIFIER_TEST_THUMBPRINT")

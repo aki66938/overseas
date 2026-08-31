@@ -19,7 +19,7 @@ type windowsTrustVerifier struct{}
 func main() { os.Exit(run(os.Args[1:], windowsTrustVerifier{}, os.Stderr)) }
 
 func runPowerShell(script string, args ...string) error {
-	preamble := `$payload=[Console]::In.ReadToEnd()|ConvertFrom-Json;$args=@($payload.arguments);Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop;`
+	preamble := `$payload=[Console]::In.ReadToEnd()|ConvertFrom-Json;$args=@($payload.arguments);Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1' -ErrorAction Stop;Import-Module 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NetSecurity\NetSecurity.psd1' -ErrorAction Stop;`
 	encoded := encodePowerShellCommand(preamble + script)
 	var stdin bytes.Buffer
 	if err := json.NewEncoder(&stdin).Encode(map[string][]string{"arguments": args}); err != nil {
