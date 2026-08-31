@@ -65,8 +65,8 @@ func TestConnectUsesFixedPipeDeadlineAndRequestShape(t *testing.T) {
 	if gotPath != agent.PipeName {
 		t.Fatalf("dial path = %q, want %q", gotPath, agent.PipeName)
 	}
-	if remaining := time.Until(gotDeadline); remaining < 4*time.Second || remaining > 6*time.Second {
-		t.Fatalf("dial deadline remaining = %s, want about 5s", remaining)
+	if remaining := time.Until(gotDeadline); remaining < 29*time.Second || remaining > 31*time.Second {
+		t.Fatalf("dial deadline remaining = %s, want about 30s", remaining)
 	}
 
 	payload := <-requestSeen

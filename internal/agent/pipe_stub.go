@@ -12,6 +12,7 @@ const (
 	PipeName               = `\\.\pipe\RegenBioOverseasAccess`
 	MaxPipeFrameBytes      = 64 * 1024
 	PipeOperationTimeout   = 5 * time.Second
+	PipeConnectTimeout     = 30 * time.Second
 	PipeSecurityDescriptor = "D:P(D;;GA;;;AN)(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
 
 	ActionConnect     = "connect"
@@ -22,6 +23,13 @@ const (
 	ErrorInvalidAction  = "invalid_action"
 	ErrorInvalidRequest = "invalid_request"
 )
+
+func PipeTimeoutForAction(action string) time.Duration {
+	if action == ActionConnect {
+		return PipeConnectTimeout
+	}
+	return PipeOperationTimeout
+}
 
 var ErrPipeUnsupported = errors.New("named-pipe service is unsupported on this platform")
 

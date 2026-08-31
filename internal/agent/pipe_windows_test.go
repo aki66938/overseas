@@ -144,7 +144,7 @@ func TestPipeConnectReceivesBoundedOperationContext(t *testing.T) {
 	if !ok {
 		t.Fatal("connect returned no response")
 	}
-	if controller.remaining <= 0 || controller.remaining > PipeOperationTimeout {
+	if controller.remaining <= 20*time.Second || controller.remaining > 30*time.Second {
 		t.Fatalf("connect context deadline remaining = %s", controller.remaining)
 	}
 }

@@ -134,7 +134,7 @@ func (c *Client) request(ctx context.Context, action string) (agent.Response, er
 	if err != nil {
 		return agent.Response{}, fmt.Errorf("%w: %v", ErrRequestID, err)
 	}
-	requestContext, cancel := context.WithTimeout(ctx, agent.PipeOperationTimeout)
+	requestContext, cancel := context.WithTimeout(ctx, agent.PipeTimeoutForAction(action))
 	defer cancel()
 
 	connection, err := c.dialPipe(requestContext, agent.PipeName)

@@ -23,6 +23,7 @@ const (
 	PipeName               = `\\.\pipe\RegenBioOverseasAccess`
 	MaxPipeFrameBytes      = 64 * 1024
 	PipeOperationTimeout   = 5 * time.Second
+	PipeConnectTimeout     = 30 * time.Second
 	PipeSecurityDescriptor = "D:P(D;;GA;;;AN)(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
 
 	ActionConnect     = "connect"
@@ -136,7 +137,11 @@ func (s *PipeServer) serveConnection(connection net.Conn) {
 	if err != nil {
 		return
 	}
-	operationContext, cancel := context.WithTimeout(context.Background(), PipeOperationTimeout)
+	operationTimeout := PipeTimeoutForAction(request.Action)
+	if err := connection.SetDeadline(time.Now().Add(operationTimeout)); err != nil {
+		return
+	}
+	operationContext, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	response := s.dispatch(operationContext, request)
 	cancel()
 	data, err := json.Marshal(response)
@@ -148,6 +153,13 @@ func (s *PipeServer) serveConnection(connection net.Conn) {
 	}
 	data = append(data, '\n')
 	_, _ = connection.Write(data)
+}
+
+func PipeTimeoutForAction(action string) time.Duration {
+	if action == ActionConnect {
+		return PipeConnectTimeout
+	}
+	return PipeOperationTimeout
 }
 
 func readPipeFrame(connection io.Reader) ([]byte, error) {
