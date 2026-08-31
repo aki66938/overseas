@@ -45,15 +45,50 @@ func TestValidateResponseBindsEveryRequestAndFixtureIdentity(t *testing.T) {
 		{name: "powershell artifact", edit: func(value *Response) { value.Binding.Artifacts.PowerShellSHA256 = strings.Repeat("a", 64) }, want: "powershell"},
 		{name: "installer artifact", edit: func(value *Response) { value.Binding.Artifacts.InstallerSHA256 = strings.Repeat("a", 64) }, want: "installer"},
 		{name: "capture artifact", edit: func(value *Response) { value.Binding.Artifacts.CaptureScriptSHA256 = strings.Repeat("a", 64) }, want: "capture-script"},
+		{name: "corporate cidr", edit: func(value *Response) { value.Binding.Network.CorporateCIDRs[0] = "10.0.0.0/8" }, want: "corporate network"},
+		{name: "corporate dns", edit: func(value *Response) { value.Binding.Network.CorporateDNS[0] = "10.0.0.53" }, want: "corporate network"},
+		{name: "internal suffix", edit: func(value *Response) { value.Binding.Network.InternalSuffixes[0] = "evil.test" }, want: "corporate network"},
+		{name: "payload file", edit: func(value *Response) { value.Binding.PayloadFiles[0].SHA256 = strings.Repeat("0", 64) }, want: "payload files"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			changed := response
+			changed := validResponse(request, expected)
 			test.edit(&changed)
 			if err := ValidateResponse(request, expected, changed); err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
 				t.Fatalf("ValidateResponse() = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestSnapshotRequiresCompletePayloadHashesNoUnexpectedFilesAndServerOwnership(t *testing.T) {
+	binding := validBinding()
+	snapshot := validSnapshot("nonce-1")
+	snapshot.InstalledFiles = []FileRecord{{Role: "payload", Name: binding.PayloadFiles[0].Name, Path: binding.PayloadFiles[0].Path, ExpectedSHA256: binding.PayloadFiles[0].SHA256, Present: true, SHA256: binding.PayloadFiles[0].SHA256}}
+	snapshot.UnexpectedFiles = []FileRecord{}
+	snapshot.OwnedRoots = []RootRecord{{Path: `C:\Program Files\RegenBio\OverseasAccess`, Present: true}, {Path: `C:\ProgramData\RegenBio\OverseasAccess`, Present: true}}
+	snapshot.Services = append(snapshot.Services, ServiceRecord{Role: "server-service", Name: "RegenBioOverseasAccessServer", Present: true, Status: "Running", StartMode: "Automatic", Path: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, PathSHA256: binding.Artifacts.ServerServiceSHA256, PID: 50})
+	snapshot.Processes = append(snapshot.Processes, ProcessRecord{Role: "server-service", Present: true, PID: 50, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, ImageSHA256: binding.Artifacts.ServerServiceSHA256}, ProcessRecord{Role: "server-core", Present: true, PID: 51, ParentPID: 50, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, ImageSHA256: binding.Artifacts.CoreSHA256})
+	snapshot.RuntimeFiles = append(snapshot.RuntimeFiles, FileRecord{Role: "server-config", Path: `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`, ExpectedSHA256: binding.ServerConfigSHA256, Present: true, SHA256: binding.ServerConfigSHA256})
+	snapshot.Listeners = append(snapshot.Listeners, ListenerRecord{Role: "server-core", Endpoint: "172.20.9.15:18443", Present: true, PID: 51, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, ImageSHA256: binding.Artifacts.CoreSHA256})
+	if err := snapshot.Validate("nonce-1", binding); err != nil {
+		t.Fatalf("Validate()=%v", err)
+	}
+
+	changed := snapshot.Clone()
+	changed.InstalledFiles = nil
+	if err := changed.Validate("nonce-1", binding); err == nil || !strings.Contains(err.Error(), "payload") {
+		t.Fatalf("missing payload Validate()=%v", err)
+	}
+	changed = snapshot.Clone()
+	changed.UnexpectedFiles = []FileRecord{{Role: "unexpected", Name: "foreign.dll", Path: `C:\Program Files\RegenBio\OverseasAccess\foreign.dll`, Present: true, SHA256: strings.Repeat("f", 64)}}
+	if err := changed.Validate("nonce-1", binding); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("unexpected file Validate()=%v", err)
+	}
+	changed = snapshot.Clone()
+	changed.Processes[len(changed.Processes)-1].ParentPID = 49
+	if err := changed.Validate("nonce-1", binding); err == nil || !strings.Contains(err.Error(), "server") {
+		t.Fatalf("wrong parent Validate()=%v", err)
 	}
 }
 
@@ -219,10 +254,14 @@ func validRequest() Request {
 }
 
 func validBinding() FixtureBinding {
-	return FixtureBinding{PayloadSHA256: strings.Repeat("2", 64), ConfigSHA256: strings.Repeat("3", 64), ServerConfigSHA256: strings.Repeat("4", 64), ActionConfigSHA256: strings.Repeat("5", 64), FakeUpstreamIdentity: "fake-upstream/1", PublicSentinelIdentity: "public/1", CorporateSentinelIdentity: "corporate/1", PublicSentinelEndpoint: "198.18.0.2:18080", PublicSentinelHealthEndpoint: "172.20.9.251:18080", CorporateSentinelEndpoint: "172.20.9.250:18081", FakeUpstreamControlEndpoint: "172.20.9.15:18082", FakeUpstreamDataEndpoint: "172.20.9.15:18083", Artifacts: ArtifactBinding{ManifestSHA256: strings.Repeat("5", 64), AgentSHA256: strings.Repeat("6", 64), CoreSHA256: strings.Repeat("7", 64), UISHA256: strings.Repeat("8", 64), ServerServiceSHA256: strings.Repeat("9", 64), DriverSHA256: strings.Repeat("a", 64), SentinelSHA256: strings.Repeat("b", 64), ActionHelperSHA256: strings.Repeat("c", 64), PowerShellSHA256: strings.Repeat("d", 64), InstallerSHA256: strings.Repeat("e", 64), CaptureScriptSHA256: strings.Repeat("f", 64)}}
+	return FixtureBinding{PayloadSHA256: strings.Repeat("2", 64), ConfigSHA256: strings.Repeat("3", 64), ServerConfigSHA256: strings.Repeat("4", 64), ActionConfigSHA256: strings.Repeat("5", 64), FakeUpstreamIdentity: "fake-upstream/1", PublicSentinelIdentity: "public/1", CorporateSentinelIdentity: "corporate/1", PublicSentinelEndpoint: "198.18.0.2:18080", PublicSentinelHealthEndpoint: "172.20.9.251:18080", CorporateSentinelEndpoint: "172.20.9.250:18081", FakeUpstreamControlEndpoint: "172.20.9.15:18082", FakeUpstreamDataEndpoint: "172.20.9.15:18083", ServerListenerEndpoint: "172.20.9.15:18443", Network: NetworkBinding{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}, PayloadFiles: []PayloadFileBinding{{Name: "overseas-agent.exe", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, SHA256: strings.Repeat("6", 64)}}, Artifacts: ArtifactBinding{ManifestSHA256: strings.Repeat("5", 64), AgentSHA256: strings.Repeat("6", 64), CoreSHA256: strings.Repeat("7", 64), UISHA256: strings.Repeat("8", 64), ServerServiceSHA256: strings.Repeat("9", 64), DriverSHA256: strings.Repeat("a", 64), SentinelSHA256: strings.Repeat("b", 64), ActionHelperSHA256: strings.Repeat("c", 64), PowerShellSHA256: strings.Repeat("d", 64), InstallerSHA256: strings.Repeat("e", 64), CaptureScriptSHA256: strings.Repeat("f", 64)}}
 }
 
 func validResponse(request Request, binding FixtureBinding) Response {
+	binding.Network.CorporateCIDRs = append([]string(nil), binding.Network.CorporateCIDRs...)
+	binding.Network.CorporateDNS = append([]string(nil), binding.Network.CorporateDNS...)
+	binding.Network.InternalSuffixes = append([]string(nil), binding.Network.InternalSuffixes...)
+	binding.PayloadFiles = append([]PayloadFileBinding(nil), binding.PayloadFiles...)
 	return Response{
 		ProtocolVersion: ProtocolVersion,
 		RequestNonce:    request.RequestNonce,
@@ -246,7 +285,9 @@ func validSnapshot(nonce string) Snapshot {
 		Processes:            []ProcessRecord{{Role: "agent", Present: false}, {Role: "core", Present: false}, {Role: "ui", Present: false}, {Role: "fake-upstream", Present: false}},
 		OwnedFirewallRules:   []FirewallRecord{{Name: "RegenBioOverseasAccess.Managed", Present: false, DefinitionSHA256: strings.Repeat("0", 64)}},
 		MSIRegistrations:     []MSIRecord{{ProductCode: "{D1234567-89AB-4CDE-8012-3456789ABCDE}", Present: false}},
-		InstalledFiles:       []FileRecord{{Role: "agent", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, Present: false}},
+		InstalledFiles:       []FileRecord{{Role: "payload", Name: "overseas-agent.exe", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, ExpectedSHA256: strings.Repeat("6", 64), Present: false}},
+		UnexpectedFiles:      []FileRecord{},
+		OwnedRoots:           []RootRecord{{Path: `C:\Program Files\RegenBio\OverseasAccess`, Present: false}, {Path: `C:\ProgramData\RegenBio\OverseasAccess`, Present: false}},
 		RuntimeFiles:         []FileRecord{{Role: "credential", Path: `C:\ProgramData\RegenBio\OverseasAccess\credential.bin`, Present: false}},
 		RegistryRecords:      []StateRecord{{Kind: "registry", Name: `HKLM\Software\RegenBio\OverseasAccess`, Present: false}},
 		OwnershipArtifacts:   []StateRecord{{Kind: "ownership", Name: "runtime-owned.json", Present: false}},

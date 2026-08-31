@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"regexp"
 	"time"
@@ -33,7 +35,6 @@ const (
 	serviceExitProcess   = 4
 	serviceExitCleanup   = 5
 
-	readyAddress = "127.0.0.1:18443"
 	readyTimeout = 15 * time.Second
 	stopTimeout  = 20 * time.Second
 )
@@ -163,6 +164,14 @@ func buildManagedProcess() (managedProcess, error) {
 	if err != nil {
 		return nil, err
 	}
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	readyAddress, err := serverListenAddress(configData)
+	if err != nil {
+		return nil, err
+	}
 	verify := func(path string) error {
 		if path != corePath {
 			return errors.New("refusing to verify an unexpected executable path")
@@ -172,7 +181,7 @@ func buildManagedProcess() (managedProcess, error) {
 	process := &supervisor.Process{
 		ReadyTimeout:     readyTimeout,
 		StopTimeout:      3 * time.Second,
-		ReadyProbe:       probeServerPort,
+		ReadyProbe:       probeServerPort(readyAddress),
 		LogWriter:        io.Discard,
 		MaxLogBytes:      64 * 1024,
 		VerifyExecutable: verify,
@@ -201,11 +210,39 @@ func loadRuntimeManifest(path string) (runtimeManifest, error) {
 	return manifest, nil
 }
 
-func probeServerPort(ctx context.Context) error {
-	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
-	connection, err := dialer.DialContext(ctx, "tcp", readyAddress)
-	if err != nil {
-		return err
+func serverListenAddress(data []byte) (string, error) {
+	var config struct {
+		Inbounds []struct {
+			Type       string `json:"type"`
+			Listen     string `json:"listen"`
+			ListenPort uint16 `json:"listen_port"`
+		} `json:"inbounds"`
 	}
-	return connection.Close()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&config); err != nil {
+		return "", err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return "", errors.New("server config has trailing data")
+	}
+	if len(config.Inbounds) != 1 || config.Inbounds[0].Type != "shadowsocks" || config.Inbounds[0].ListenPort == 0 {
+		return "", errors.New("server config has no unique shadowsocks listener")
+	}
+	address, err := netip.ParseAddr(config.Inbounds[0].Listen)
+	if err != nil || !address.Is4() || address.IsLoopback() || address.IsUnspecified() || address.IsMulticast() {
+		return "", errors.New("server listener address is unsafe")
+	}
+	return net.JoinHostPort(address.String(), fmt.Sprint(config.Inbounds[0].ListenPort)), nil
+}
+
+func probeServerPort(address string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+		connection, err := dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			return err
+		}
+		return connection.Close()
+	}
 }

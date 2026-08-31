@@ -4,11 +4,11 @@
 
 **Code prerequisites carried from Task 9 review:**
 
-- [ ] Bind the exact corporate CIDR list, corporate DNS addresses, and internal suffixes in the signed action/config contract. Validate every client direct route and direct DNS server against that allowlist; require suffix label boundaries.
-- [ ] Parse and lock the complete signed client payload manifest. During `case-setup`, invoke the installed manifest-pinned credential provisioner using pipe-only input derived from the locked fixture client config, then start the agent. Do not place credential plaintext in argv, evidence, logs, or temporary files.
-- [ ] Capture every payload-manifest installed file and its expected hash, plus unexpected files in both owned roots. Require exact setup hashes and complete uninstall absence before cleanup.
-- [ ] Bind the production `overseas-server-service.exe`, its locked server config, service identity, client-facing listener PID/image hash, and underlying core identity. Either run it locally under reviewed ownership or add a cryptographically bound remote attestation; a compatible unowned listener is insufficient.
-- [ ] Add integrated non-live backend tests proving the clean-baseline setup/credential/runtime-config sequence and server/payload false-pass refusals.
+- [x] Bind the exact corporate CIDR list, corporate DNS addresses, and internal suffixes in the signed action/config contract. Validate every client direct route and direct DNS server against that allowlist; require suffix label boundaries.
+- [x] Parse and lock the complete signed client payload manifest. During `case-setup`, invoke the installed manifest-pinned credential provisioner using pipe-only input derived from the locked fixture client config, then start the agent. Do not place credential plaintext in argv, evidence, logs, or temporary files.
+- [x] Capture every payload-manifest installed file and its expected hash, plus unexpected files in both owned roots. Require exact setup hashes and complete uninstall absence before cleanup.
+- [x] Bind the production `overseas-server-service.exe`, its locked server config, service identity, client-facing listener PID/image hash, and underlying core identity. Either run it locally under reviewed ownership or add a cryptographically bound remote attestation; a compatible unowned listener is insufficient.
+- [x] Add integrated non-live backend tests proving the clean-baseline setup/credential/runtime-config sequence and server/payload false-pass refusals.
 
 **Authorized-host acceptance after prerequisites:**
 

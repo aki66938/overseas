@@ -40,6 +40,45 @@ type lifecycleBackend interface {
 
 type runtimeConfig = fixtureconfig.ActionConfig
 
+type serverPlan struct {
+	ServiceName, ServiceSource, ServicePath, ServiceSHA256 string
+	CoreSource, CorePath, CoreSHA256                       string
+	ConfigSource, ConfigPath, ConfigSHA256                 string
+	ListenerEndpoint                                       string
+}
+
+func runCaseSetup(operation string, setupServer func() error, install func(string) error, provision, startAgent, cleanupServer func() error) error {
+	if setupServer == nil || install == nil || provision == nil || startAgent == nil || cleanupServer == nil {
+		return errors.New("case setup step is absent")
+	}
+	if err := setupServer(); err != nil {
+		return errors.Join(err, cleanupServer())
+	}
+	if err := install(operation); err != nil {
+		return errors.Join(err, cleanupServer())
+	}
+	if err := provision(); err != nil {
+		return errors.Join(err, cleanupServer())
+	}
+	if err := startAgent(); err != nil {
+		return errors.Join(err, cleanupServer())
+	}
+	return nil
+}
+
+func productionServerPlan(manifest fixtureconfig.Manifest, configPath, configSHA256, listenerEndpoint string) (serverPlan, error) {
+	service, serviceOK := manifest.Artifacts["server-service"]
+	core, coreOK := manifest.Artifacts["core"]
+	if !serviceOK || !coreOK || !filepath.IsAbs(service.Path) || !filepath.IsAbs(core.Path) || !filepath.IsAbs(configPath) || len(configSHA256) != 64 || strings.TrimSpace(listenerEndpoint) == "" {
+		return serverPlan{}, errors.New("production server ownership inputs are incomplete")
+	}
+	return serverPlan{
+		ServiceName: "RegenBioOverseasAccessServer", ServiceSource: service.Path, ServicePath: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, ServiceSHA256: service.SHA256,
+		CoreSource: core.Path, CorePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, CoreSHA256: core.SHA256,
+		ConfigSource: configPath, ConfigPath: `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`, ConfigSHA256: configSHA256, ListenerEndpoint: listenerEndpoint,
+	}, nil
+}
+
 func SupportedActions() []string { return append([]string(nil), supportedActions...) }
 
 func dispatch(ctx context.Context, request actionRequest, backend lifecycleBackend) (actionResult, error) {
@@ -63,7 +102,7 @@ func dispatch(ctx context.Context, request actionRequest, backend lifecycleBacke
 }
 
 func (r actionRequest) Validate() error {
-	if r.ProtocolVersion != 3 || strings.TrimSpace(r.RequestNonce) == "" || strings.TrimSpace(r.RunID) == "" || strings.TrimSpace(r.Scenario) == "" {
+	if r.ProtocolVersion != 4 || strings.TrimSpace(r.RequestNonce) == "" || strings.TrimSpace(r.RunID) == "" || strings.TrimSpace(r.Scenario) == "" {
 		return errors.New("action request binding is invalid")
 	}
 	found := false
@@ -137,6 +176,61 @@ func verifyInstalledArtifactsAbsent(manifest fixtureconfig.Manifest, roles []str
 		}
 		if exists(artifact.InstalledPath) {
 			return fmt.Errorf("installed artifact %s residue remains", role)
+		}
+	}
+	return nil
+}
+
+func provisionerPlan(clientConfig []byte, payload fixtureconfig.PayloadManifest, expiresAt string) (string, []string, []byte, error) {
+	installed, err := payload.InstalledFiles()
+	if err != nil {
+		return "", nil, nil, err
+	}
+	var executable string
+	for _, file := range installed {
+		if file.Name == "credential-provisioner.exe" {
+			executable = file.Path
+			break
+		}
+	}
+	if executable == "" {
+		return "", nil, nil, errors.New("credential provisioner is absent from the payload manifest")
+	}
+	document, err := fixtureconfig.CredentialDocument(clientConfig, expiresAt)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return executable, nil, document, nil
+}
+
+func verifyInstalledPayloadHashes(manifest fixtureconfig.PayloadManifest, hashFile func(string) (string, error)) error {
+	if hashFile == nil {
+		return errors.New("installed payload hasher is absent")
+	}
+	installed, err := manifest.InstalledFiles()
+	if err != nil {
+		return err
+	}
+	for _, file := range installed {
+		actual, hashErr := hashFile(file.Path)
+		if hashErr != nil || actual != file.SHA256 {
+			return fmt.Errorf("installed payload %s hash mismatch", file.Name)
+		}
+	}
+	return nil
+}
+
+func verifyInstalledPayloadAbsent(manifest fixtureconfig.PayloadManifest, exists func(string) bool) error {
+	if exists == nil {
+		return errors.New("installed payload existence check is absent")
+	}
+	installed, err := manifest.InstalledFiles()
+	if err != nil {
+		return err
+	}
+	for _, file := range installed {
+		if exists(file.Path) {
+			return fmt.Errorf("installed payload %s residue remains", file.Name)
 		}
 	}
 	return nil

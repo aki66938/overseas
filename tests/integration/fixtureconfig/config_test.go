@@ -30,9 +30,10 @@ func TestManifestRequiresExactReviewedRoleSet(t *testing.T) {
 }
 
 func TestValidateGeneratedConfigsRequiresOnlyFakeCONNECTUpstream(t *testing.T) {
-	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"final":"public-dns","reverse_mapping":true}}`)
+	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"domain_suffix":["intra.regen-bio.com"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"rules":[{"domain_suffix":["intra.regen-bio.com"],"action":"route","server":"corp-dns"}],"final":"public-dns","reverse_mapping":true}}`)
 	server := []byte(`{"inbounds":[{"type":"shadowsocks","tag":"server-in","listen":"172.20.9.15","listen_port":18443}],"outbounds":[{"type":"http","tag":"fake-connect","server":"172.20.9.15","server_port":18083}],"route":{"final":"fake-connect"}}`)
-	if err := ValidateGeneratedConfigs(client, server, "172.20.9.15:18083"); err != nil {
+	policy := NetworkPolicy{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}
+	if err := ValidateGeneratedConfigs(client, server, "172.20.9.15:18083", policy); err != nil {
 		t.Fatalf("ValidateGeneratedConfigs() = %v", err)
 	}
 	tests := []struct {
@@ -52,10 +53,114 @@ func TestValidateGeneratedConfigsRequiresOnlyFakeCONNECTUpstream(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := ValidateGeneratedConfigs(test.client, test.server, test.endpoint); err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
+			if err := ValidateGeneratedConfigs(test.client, test.server, test.endpoint, policy); err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
 				t.Fatalf("ValidateGeneratedConfigs() = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestGeneratedConfigUsesOnlyExactSignedCorporatePolicyWithLabelBoundaries(t *testing.T) {
+	policy := NetworkPolicy{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}
+	baseClient := `{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"secret"}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"rules":[{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","server":"corp-dns"}],"final":"public-dns","reverse_mapping":true}}`
+	server := []byte(`{"inbounds":[{"type":"shadowsocks","tag":"server-in","listen":"172.20.9.15","listen_port":18443}],"outbounds":[{"type":"http","tag":"fake-connect","server":"172.20.9.15","server_port":18083}],"route":{"final":"fake-connect"}}`)
+	if err := ValidateGeneratedConfigs([]byte(baseClient), server, "172.20.9.15:18083", policy); err != nil {
+		t.Fatalf("exact signed policy rejected: %v", err)
+	}
+	for _, test := range []struct{ name, from, to, want string }{
+		{name: "other private cidr", from: `172.20.8.0/22`, to: `10.0.0.0/8`, want: "corporate"},
+		{name: "other private dns", from: `"server":"172.20.9.1","detour":"direct"`, to: `"server":"10.0.0.53","detour":"direct"`, want: "resolver"},
+		{name: "suffix text collision", from: `ad.intra.regen-bio.com`, to: `evilintra.regen-bio.com`, want: "suffix"},
+		{name: "unbounded direct route", from: `{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"}`, to: `{"action":"route","outbound":"direct"}`, want: "direct"},
+		{name: "direct port escape", from: `{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"}`, to: `{"ip_cidr":["172.20.8.0/22"],"port":[443],"action":"route","outbound":"direct"}`, want: "direct"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := []byte(strings.ReplaceAll(baseClient, test.from, test.to))
+			if err := ValidateGeneratedConfigs(changed, server, "172.20.9.15:18083", policy); err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
+				t.Fatalf("ValidateGeneratedConfigs()=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPayloadManifestDrivesEveryInstalledClientFile(t *testing.T) {
+	manifest := validPayloadManifest()
+	bindings, err := manifest.InstalledFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != len(manifest.Files) {
+		t.Fatalf("installed bindings=%d, want %d", len(bindings), len(manifest.Files))
+	}
+	seen := map[string]bool{}
+	for _, binding := range bindings {
+		seen[binding.Name] = true
+		if binding.Path == "" || binding.SHA256 == "" {
+			t.Fatalf("incomplete binding %#v", binding)
+		}
+	}
+	for _, name := range requiredPayloadNames {
+		if !seen[name] {
+			t.Errorf("payload %s omitted", name)
+		}
+	}
+	if !seen["client-sbom.json"] || !seen["SHA256SUMS"] {
+		t.Fatal("signed metadata entries were omitted")
+	}
+	changed := manifest
+	changed.Files = append([]PayloadFile(nil), manifest.Files...)
+	changed.Files = changed.Files[1:]
+	if _, err := changed.InstalledFiles(); err == nil || !strings.Contains(err.Error(), "complete") {
+		t.Fatalf("InstalledFiles()=%v, want incomplete-manifest refusal", err)
+	}
+}
+
+func TestPayloadManifestAcceptsReleaseSchemaAndRefusesUnsafeDestinations(t *testing.T) {
+	manifest := validPayloadManifest()
+	manifest.SourceCommit = strings.Repeat("a", 40)
+	manifest.Mode = "release"
+	manifest.Files[0].AuthenticodeRequired = true
+	manifest.Files[0].AuthenticodeThumbprints = []string{strings.Repeat("a", 40)}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePayloadManifest(data); err != nil {
+		t.Fatalf("ParsePayloadManifest(release schema)=%v", err)
+	}
+	for _, edit := range []func(*PayloadManifest){
+		func(v *PayloadManifest) { v.Files[0].Name = `..\escape.exe` },
+		func(v *PayloadManifest) { v.Files[0].Destination = "other-root" },
+		func(v *PayloadManifest) { v.Files[0].AuthenticodeThumbprints = []string{"not-a-thumbprint"} },
+		func(v *PayloadManifest) {
+			v.Files = append(v.Files, PayloadFile{Name: "credential.bin", Destination: "program-data", SHA256: strings.Repeat("c", 64)})
+		},
+	} {
+		changed := validPayloadManifest()
+		edit(&changed)
+		if _, err := changed.InstalledFiles(); err == nil {
+			t.Fatal("InstalledFiles accepted an unsafe manifest entry")
+		}
+	}
+}
+
+func TestCredentialDocumentComesOnlyFromLockedClientTunnel(t *testing.T) {
+	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"pipe-only-secret"}],"route":{"final":"tunnel"}}`)
+	document, err := CredentialDocument(client, "2099-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(document), `"password":"pipe-only-secret"`) || !strings.Contains(string(document), `"method":"2022-blake3-aes-128-gcm"`) {
+		t.Fatalf("credential document=%s", document)
+	}
+	for _, changed := range [][]byte{
+		[]byte(strings.Replace(string(client), `"tag":"tunnel"`, `"tag":"other"`, 1)),
+		[]byte(strings.Replace(string(client), `"password":"pipe-only-secret"`, `"password":""`, 1)),
+		append(client, []byte(` {}`)...),
+	} {
+		if _, err := CredentialDocument(changed, "2099-01-01T00:00:00Z"); err == nil {
+			t.Fatal("CredentialDocument accepted ambiguous or invalid client config")
+		}
 	}
 }
 
@@ -79,7 +184,19 @@ func validManifest() Manifest {
 		}
 		artifacts[role] = artifact
 	}
-	return Manifest{SchemaVersion: 1, Artifacts: artifacts}
+	return Manifest{SchemaVersion: 1, CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1", "172.20.9.2"}, InternalSuffixes: []string{"intra.regen-bio.com"}, Artifacts: artifacts}
+}
+
+func validPayloadManifest() PayloadManifest {
+	files := make([]PayloadFile, 0, len(requiredPayloadNames))
+	for index, name := range requiredPayloadNames {
+		destination := "program-files"
+		if name == "agent.yaml" || name == "agent.yaml.p7s" || name == "client-sbom.json" || name == "SHA256SUMS" {
+			destination = "program-data"
+		}
+		files = append(files, PayloadFile{Name: name, Destination: destination, SHA256: strings.Repeat(string("0123456789abcdef"[index]), 64)})
+	}
+	return PayloadManifest{SchemaVersion: 1, ProductVersion: "0.1.0", SourceCommit: strings.Repeat("a", 40), Mode: "release", SignerThumbprints: []string{strings.Repeat("a", 40)}, Files: files}
 }
 
 func cloneArtifacts(input map[string]Artifact) map[string]Artifact {
@@ -100,7 +217,7 @@ func TestManifestStrictJSON(t *testing.T) {
 
 func TestActionConfigIsStrictAndBoundToManifestEndpoints(t *testing.T) {
 	manifest := validManifest()
-	config := ActionConfig{SchemaVersion: 1, PowerShellPath: manifest.Artifacts["powershell"].Path, InstallerScriptPath: manifest.Artifacts["installer"].Path, BundlePath: `C:\fixture`, PayloadManifestPath: `C:\fixture\payload-manifest.json`, FixtureManifestPath: `C:\fixture\fixture-manifest.json`, SentinelPath: manifest.Artifacts["sentinel"].Path, ActionHelperPath: manifest.Artifacts["action-helper"].Path, FakeDataEndpoint: "172.20.9.15:18083", FakeControlEndpoint: "172.20.9.15:18082", PublicDataEndpoint: "198.18.0.2:18080", FakeIdentity: "fake-upstream/1"}
+	config := ActionConfig{SchemaVersion: 1, PowerShellPath: manifest.Artifacts["powershell"].Path, InstallerScriptPath: manifest.Artifacts["installer"].Path, BundlePath: `C:\fixture`, PayloadManifestPath: `C:\fixture\payload-manifest.json`, GeneratedConfigPath: `C:\fixture\client.json`, ServerConfigPath: `C:\fixture\server.json`, ServerConfigSHA256: strings.Repeat("a", 64), ServerListenerEndpoint: "172.20.9.15:18443", FixtureManifestPath: `C:\fixture\fixture-manifest.json`, SentinelPath: manifest.Artifacts["sentinel"].Path, ActionHelperPath: manifest.Artifacts["action-helper"].Path, FakeDataEndpoint: "172.20.9.15:18083", FakeControlEndpoint: "172.20.9.15:18082", PublicDataEndpoint: "198.18.0.2:18080", FakeIdentity: "fake-upstream/1", CredentialExpiresAt: "2099-01-01T00:00:00Z"}
 	if err := config.Validate(manifest, "172.20.9.15:18083", "172.20.9.15:18082", "198.18.0.2:18080", "fake-upstream/1", config.PayloadManifestPath); err != nil {
 		t.Fatalf("Validate()=%v", err)
 	}

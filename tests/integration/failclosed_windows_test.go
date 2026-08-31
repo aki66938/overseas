@@ -337,7 +337,7 @@ func TestRepositoryIntegrationContractDocumentsExternalLiveGate(t *testing.T) {
 		envFakeUpstreamData,
 		"Task 10",
 		"Never run the live target on a developer workstation",
-		"version 3",
+		"version 4",
 		"fixture-action.exe",
 		"MSI registration",
 		"kill-on-close Windows Job Objects",
@@ -569,6 +569,26 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 	if !strings.EqualFold(filepath.Clean(manifest.Artifacts["driver"].Path), filepath.Clean(driver)) || artifactBinding.DriverSHA256 != driverHash {
 		return liveConfig{}, errors.New("driver is not the manifest-bound artifact")
 	}
+	payloadData, err := os.ReadFile(fixturePaths.PayloadPath)
+	if err != nil || digest(payloadData) != strings.TrimSpace(os.Getenv(envPayloadSHA256)) {
+		return liveConfig{}, errors.New("payload manifest hash mismatch")
+	}
+	payloadManifest, err := fixtureconfig.ParsePayloadManifest(payloadData)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	payloadFiles, err := fixtureconfig.PayloadBindings(payloadManifest)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	clientConfigData, err := os.ReadFile(fixturePaths.GeneratedConfigPath)
+	if err != nil {
+		return liveConfig{}, err
+	}
+	serverListener, err := fixtureconfig.ClientTunnelEndpoint(clientConfigData)
+	if err != nil {
+		return liveConfig{}, err
+	}
 	binding := fixtureproto.FixtureBinding{
 		PayloadSHA256:             strings.TrimSpace(os.Getenv(envPayloadSHA256)),
 		ConfigSHA256:              strings.TrimSpace(os.Getenv(envGeneratedConfigSHA256)),
@@ -578,7 +598,8 @@ func loadLiveConfig(preflight preflightResult) (liveConfig, error) {
 		PublicSentinelIdentity:    strings.TrimSpace(os.Getenv(envPublicSentinelIdentity)),
 		CorporateSentinelIdentity: strings.TrimSpace(os.Getenv(envCorporateSentinelIdentity)),
 		PublicSentinelEndpoint:    publicEndpoint, PublicSentinelHealthEndpoint: publicHealthEndpoint,
-		CorporateSentinelEndpoint: corporateEndpoint, FakeUpstreamControlEndpoint: fakeControlEndpoint, FakeUpstreamDataEndpoint: fakeDataEndpoint, Artifacts: artifactBinding,
+		CorporateSentinelEndpoint: corporateEndpoint, FakeUpstreamControlEndpoint: fakeControlEndpoint, FakeUpstreamDataEndpoint: fakeDataEndpoint,
+		ServerListenerEndpoint: serverListener, Network: manifest.NetworkPolicy().Binding(), PayloadFiles: payloadFiles, Artifacts: artifactBinding,
 	}
 	if !isSHA256(binding.PayloadSHA256) {
 		return liveConfig{}, fmt.Errorf("%s must be a lowercase SHA-256", envPayloadSHA256)
@@ -996,7 +1017,7 @@ func (h *liveHarness) lockConnectInputs() (closerGroup, error) {
 		_ = locks.Close()
 		return nil, err
 	}
-	if err := fixtureconfig.ValidateGeneratedConfigs(clientData, serverData, h.config.binding.FakeUpstreamDataEndpoint); err != nil {
+	if err := fixtureconfig.ValidateGeneratedConfigs(clientData, serverData, h.config.binding.FakeUpstreamDataEndpoint, h.config.fixtureManifest.NetworkPolicy()); err != nil {
 		_ = locks.Close()
 		return nil, err
 	}
@@ -1054,7 +1075,7 @@ func (h *liveHarness) pinRenderedRuntimeConfig(locks *closerGroup) error {
 	if err != nil {
 		return err
 	}
-	return fixtureconfig.ValidateGeneratedConfigs(runtimeData, serverData, h.config.binding.FakeUpstreamDataEndpoint)
+	return fixtureconfig.ValidateGeneratedConfigs(runtimeData, serverData, h.config.binding.FakeUpstreamDataEndpoint, h.config.fixtureManifest.NetworkPolicy())
 }
 
 func (h *liveHarness) waitForState(t *testing.T, want accessmodel.ConnectionState) {

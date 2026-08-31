@@ -67,6 +67,12 @@ Describe 'Transactional Windows client installer' {
         $text | Should Match 'CheckSignature\(\$true\)'
         $text | Should Match ([regex]::Escape("foreach (`$name in @('overseas-agent.exe', 'overseas-client.exe', 'credential-provisioner.exe', 'installer-verifier.exe', 'wintun.dll'))"))
         $text | Should Not Match '(?i)Invoke-WebRequest|Start-BitsTransfer|System\.Net\.WebClient|HttpClient'
+
+        $requiredStart = $text.IndexOf('$RequiredPayloads = @(')
+        $requiredEnd = $text.IndexOf('function Assert-Elevated')
+        $requiredBlock = $text.Substring($requiredStart, $requiredEnd - $requiredStart)
+        $requiredBlock | Should Match ([regex]::Escape("'client-sbom.json'"))
+        $requiredBlock | Should Match ([regex]::Escape("'SHA256SUMS'"))
     }
 
     It 'authenticates the payload manifest with a code-pinned signer before trusting its contents' {

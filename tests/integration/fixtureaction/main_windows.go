@@ -31,11 +31,13 @@ const (
 	actionRequestEnvironment = "OVERSEAS_FIXTURE_REQUEST_JSON"
 	agentServiceName         = "RegenBioOverseasAccessAgent"
 	actionTimeout            = 40 * time.Second
+	serverOwnerMarker        = ".fixture-owner.json"
 )
 
 type windowsBackend struct {
 	config   runtimeConfig
 	manifest fixtureconfig.Manifest
+	payload  fixtureconfig.PayloadManifest
 }
 
 func main() {
@@ -52,7 +54,7 @@ func main() {
 }
 
 func runAction() error {
-	config, manifest, err := loadRuntimeConfig()
+	config, manifest, payload, err := loadRuntimeConfig()
 	if err != nil {
 		return err
 	}
@@ -74,44 +76,52 @@ func runAction() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
-	result, err := dispatch(ctx, request, &windowsBackend{config: config, manifest: manifest})
+	result, err := dispatch(ctx, request, &windowsBackend{config: config, manifest: manifest, payload: payload})
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
-func loadRuntimeConfig() (runtimeConfig, fixtureconfig.Manifest, error) {
+func loadRuntimeConfig() (runtimeConfig, fixtureconfig.Manifest, fixtureconfig.PayloadManifest, error) {
 	path := os.Getenv(actionConfigEnvironment)
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return runtimeConfig{}, fixtureconfig.Manifest{}, errors.New("action config path is invalid")
+		return runtimeConfig{}, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, errors.New("action config path is invalid")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return runtimeConfig{}, fixtureconfig.Manifest{}, err
+		return runtimeConfig{}, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, err
 	}
 	config, err := fixtureconfig.ParseActionConfig(data)
 	if err != nil {
-		return config, fixtureconfig.Manifest{}, err
+		return config, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, err
 	}
 	manifestData, err := os.ReadFile(config.FixtureManifestPath)
 	if err != nil {
-		return config, fixtureconfig.Manifest{}, err
+		return config, fixtureconfig.Manifest{}, fixtureconfig.PayloadManifest{}, err
 	}
 	manifest, err := fixtureconfig.ParseManifest(manifestData)
 	if err != nil {
-		return config, manifest, err
+		return config, manifest, fixtureconfig.PayloadManifest{}, err
 	}
 	if err := config.Validate(manifest, config.FakeDataEndpoint, config.FakeControlEndpoint, config.PublicDataEndpoint, config.FakeIdentity, config.PayloadManifestPath); err != nil {
-		return config, manifest, err
+		return config, manifest, fixtureconfig.PayloadManifest{}, err
 	}
 	for role, artifact := range manifest.Artifacts {
 		actual, err := hashFile(artifact.Path)
 		if err != nil || actual != artifact.SHA256 {
-			return config, manifest, fmt.Errorf("artifact %s changed", role)
+			return config, manifest, fixtureconfig.PayloadManifest{}, fmt.Errorf("artifact %s changed", role)
 		}
 	}
-	return config, manifest, nil
+	payloadData, err := os.ReadFile(config.PayloadManifestPath)
+	if err != nil {
+		return config, manifest, fixtureconfig.PayloadManifest{}, err
+	}
+	payload, err := fixtureconfig.ParsePayloadManifest(payloadData)
+	if err != nil {
+		return config, manifest, payload, err
+	}
+	return config, manifest, payload, nil
 }
 
 func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (map[string]string, error) {
@@ -122,7 +132,13 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 		if serviceExists(agentServiceName) {
 			operation = "repair"
 		}
-		err = b.runInstaller(ctx, operation)
+		err = runCaseSetup(operation,
+			func() error { return b.setupProductionServer(ctx, request.RunID) },
+			func(operation string) error { return b.runInstaller(ctx, operation) },
+			func() error { return b.provisionCredential(ctx) },
+			func() error { return startExistingService(agentServiceName) },
+			func() error { return b.removeProductionServer(request.RunID) },
+		)
 	case "fake-upstream-start":
 		err = b.startFakeService(ctx, request.RunID)
 	case "fake-upstream-stop":
@@ -155,7 +171,7 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 			err = os.Remove(recoveryMarker(request))
 		}
 	case "uninstall":
-		err = b.runInstaller(ctx, "uninstall")
+		err = errors.Join(b.runInstaller(ctx, "uninstall"), b.removeProductionServer(request.RunID))
 		if err == nil {
 			err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
 		}
@@ -163,7 +179,7 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 		err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
 	case "restore":
 		if err = requireCleanBaseline(request.BaselinePath); err == nil {
-			err = b.runInstaller(ctx, "uninstall")
+			err = errors.Join(b.runInstaller(ctx, "uninstall"), b.removeProductionServer(request.RunID))
 		}
 		if err == nil {
 			err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
@@ -246,8 +262,16 @@ func (b *windowsBackend) verify(request actionRequest) error {
 		if !serviceRunning(agentServiceName) {
 			return errors.New("agent service post-state is not running")
 		}
-		if err := verifyInstalledArtifactHashes(b.manifest, []string{"agent", "core", "ui"}, hashFile); err != nil {
+		if err := verifyInstalledPayloadHashes(b.payload, hashFile); err != nil {
 			return err
+		}
+		if !fileExists(`C:\ProgramData\RegenBio\OverseasAccess\credential.bin`) {
+			return errors.New("credential provisioning post-state is absent")
+		}
+		if request.Action == "case-setup" {
+			if err := b.verifyProductionServer(request.RunID); err != nil {
+				return err
+			}
 		}
 	case "fake-upstream-start":
 		if !serviceRunning(fakeServiceName(request.RunID)) {
@@ -284,7 +308,7 @@ func (b *windowsBackend) verify(request actionRequest) error {
 		if serviceExists(agentServiceName) {
 			return errors.New("agent service residue remains")
 		}
-		if err := verifyInstalledArtifactsAbsent(b.manifest, []string{"agent", "core", "ui"}, fileExists); err != nil {
+		if err := verifyInstalledPayloadAbsent(b.payload, fileExists); err != nil {
 			return err
 		}
 		for _, path := range []string{`C:\ProgramData\RegenBio\OverseasAccess\credential.bin`, `C:\ProgramData\RegenBio\OverseasAccess\sing-box.json`, `C:\ProgramData\RegenBio\OverseasAccess\runtime-owned.json`} {
@@ -300,12 +324,274 @@ func (b *windowsBackend) verify(request actionRequest) error {
 				return fmt.Errorf("product process residue remains: %s", role)
 			}
 		}
+		if serviceExists("RegenBioOverseasAccessServer") || fileExists(`C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`) || fileExists(`C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`) || fileExists(`C:\ProgramData\RegenBio\OverseasAccessServer\config.json`) {
+			return errors.New("production server ownership residue remains")
+		}
 	case "case-cleanup":
 		if serviceExists(fakeServiceName(request.RunID)) || serviceExists(uiServiceName(request.RunID)) {
 			return errors.New("fixture service residue remains")
 		}
 	}
 	return nil
+}
+
+func (b *windowsBackend) provisionCredential(ctx context.Context) error {
+	clientData, err := os.ReadFile(b.config.GeneratedConfigPath)
+	if err != nil {
+		return errors.New("locked fixture client config is unavailable for credential provisioning")
+	}
+	executable, args, input, err := provisionerPlan(clientData, b.payload, b.config.CredentialExpiresAt)
+	if err != nil {
+		return err
+	}
+	defer zero(input)
+	expected := ""
+	for _, file := range mustInstalledFiles(b.payload) {
+		if file.Name == "credential-provisioner.exe" {
+			expected = file.SHA256
+		}
+	}
+	if actual, hashErr := hashFile(executable); hashErr != nil || actual != expected {
+		return errors.New("installed credential provisioner hash mismatch")
+	}
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, executable, args...)
+	command.Stdin, command.Stdout, command.Stderr = readPipe, io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		readPipe.Close()
+		writePipe.Close()
+		return err
+	}
+	_ = readPipe.Close()
+	writeErr := make(chan error, 1)
+	go func() {
+		_, copyErr := writePipe.Write(input)
+		closeErr := writePipe.Close()
+		writeErr <- errors.Join(copyErr, closeErr)
+	}()
+	werr := <-writeErr
+	return errors.Join(werr, command.Wait())
+}
+
+func (b *windowsBackend) setupProductionServer(ctx context.Context, runID string) (resultErr error) {
+	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
+	if err != nil {
+		return err
+	}
+	installRoot, dataRoot := filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)
+	if serviceExists(plan.ServiceName) || directoryExists(installRoot) || directoryExists(dataRoot) {
+		return errors.New("production server ownership collision")
+	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, b.removeProductionServer(runID))
+		}
+	}()
+	for _, root := range []string{installRoot, dataRoot} {
+		if err := os.MkdirAll(root, 0700); err != nil {
+			return err
+		}
+		if err := writeServerOwner(root, runID); err != nil {
+			return errors.Join(err, os.Remove(root))
+		}
+		if err := protectServerRoot(ctx, root); err != nil {
+			return err
+		}
+	}
+	for _, file := range []struct{ source, target, hash string }{{plan.ServiceSource, plan.ServicePath, plan.ServiceSHA256}, {plan.CoreSource, plan.CorePath, plan.CoreSHA256}, {plan.ConfigSource, plan.ConfigPath, plan.ConfigSHA256}} {
+		if err := copyPinnedFile(file.source, file.target, file.hash); err != nil {
+			return err
+		}
+	}
+	runtimeManifest := []byte(fmt.Sprintf("{\"schema_version\":1,\"kind\":\"RegenBioOverseasAccessServerRuntime\",\"sing_box_sha256\":%q,\"signer_allowlist\":[]}", plan.CoreSHA256))
+	if err := writeExclusiveFile(filepath.Join(dataRoot, "runtime-manifest.json"), runtimeManifest); err != nil {
+		return err
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, err := manager.CreateService(plan.ServiceName, plan.ServicePath, mgr.Config{DisplayName: "RegenBio Overseas Access Server", StartType: mgr.StartManual})
+	if err != nil {
+		return err
+	}
+	defer service.Close()
+	if err := service.Start(); err != nil {
+		_ = service.Delete()
+		return err
+	}
+	if err := waitService(service, svc.Running); err != nil {
+		return err
+	}
+	return b.verifyProductionServer(runID)
+}
+
+func protectServerRoot(ctx context.Context, root string) error {
+	icacls := filepath.Join(filepath.Clean(os.Getenv("SystemRoot")), "System32", "icacls.exe")
+	if !filepath.IsAbs(icacls) {
+		return errors.New("SystemRoot is unavailable")
+	}
+	command := exec.CommandContext(ctx, icacls, root, "/inheritance:r", "/setowner", "*S-1-5-32-544", "/grant:r", "*S-1-5-18:(OI)(CI)(F)", "*S-1-5-32-544:(OI)(CI)(F)")
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Run(); err != nil {
+		return errors.New("production server ACL publication failed")
+	}
+	return nil
+}
+
+func writeServerOwner(root, runID string) error {
+	data, err := json.Marshal(map[string]string{"kind": "RegenBioFixtureServerOwner", "run_id": runID})
+	if err != nil {
+		return err
+	}
+	return writeExclusiveFile(filepath.Join(root, serverOwnerMarker), data)
+}
+
+func readServerOwner(root, runID string) error {
+	data, err := os.ReadFile(filepath.Join(root, serverOwnerMarker))
+	if err != nil {
+		return err
+	}
+	var marker map[string]string
+	if json.Unmarshal(data, &marker) != nil || marker["kind"] != "RegenBioFixtureServerOwner" || marker["run_id"] != runID {
+		return errors.New("production server ownership marker mismatch")
+	}
+	return nil
+}
+
+func writeExclusiveFile(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return errors.Join(file.Sync(), file.Close())
+}
+
+func copyPinnedFile(source, target, expected string) error {
+	if actual, err := hashFile(source); err != nil || actual != expected {
+		return errors.New("production server source hash mismatch")
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	if actual, err := hashFile(target); err != nil || actual != expected {
+		return errors.New("installed production server hash mismatch")
+	}
+	return nil
+}
+
+func (b *windowsBackend) verifyProductionServer(runID string) error {
+	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
+	if err != nil {
+		return err
+	}
+	for _, root := range []string{filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)} {
+		if err := readServerOwner(root, runID); err != nil {
+			return err
+		}
+	}
+	for _, file := range []struct{ path, hash string }{{plan.ServicePath, plan.ServiceSHA256}, {plan.CorePath, plan.CoreSHA256}, {plan.ConfigPath, plan.ConfigSHA256}} {
+		if actual, hashErr := hashFile(file.path); hashErr != nil || actual != file.hash {
+			return errors.New("production server installed identity mismatch")
+		}
+	}
+	if !serviceRunning(plan.ServiceName) {
+		return errors.New("production server service is not running")
+	}
+	return nil
+}
+
+func (b *windowsBackend) removeProductionServer(runID string) error {
+	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
+	if err != nil {
+		return err
+	}
+	installRoot, dataRoot := filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)
+	if directoryExists(installRoot) {
+		if err := readServerOwner(installRoot, runID); err != nil {
+			return err
+		}
+	}
+	if directoryExists(dataRoot) {
+		if err := readServerOwner(dataRoot, runID); err != nil {
+			return err
+		}
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, openErr := manager.OpenService(plan.ServiceName)
+	if openErr == nil {
+		config, configErr := service.Config()
+		if configErr != nil {
+			service.Close()
+			return configErr
+		}
+		if !strings.EqualFold(filepath.Clean(config.BinaryPathName), filepath.Clean(plan.ServicePath)) {
+			service.Close()
+			return errors.New("production server service is not fixture-owned")
+		}
+		_, _ = service.Control(svc.Stop)
+		_ = waitService(service, svc.Stopped)
+		deleteErr := service.Delete()
+		service.Close()
+		if deleteErr != nil {
+			return deleteErr
+		}
+	} else if !errors.Is(openErr, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return openErr
+	}
+	for _, path := range []string{plan.ConfigPath, filepath.Join(dataRoot, "runtime-manifest.json"), plan.CorePath, plan.ServicePath} {
+		if removeErr := removeIfExists(path); removeErr != nil {
+			return removeErr
+		}
+	}
+	for _, root := range []string{dataRoot, installRoot} {
+		if !directoryExists(root) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(root, serverOwnerMarker)); removeErr != nil {
+			return removeErr
+		}
+		if removeErr := os.Remove(root); removeErr != nil {
+			return errors.New("production server owned root contains unexpected residue")
+		}
+	}
+	return nil
+}
+
+func directoryExists(path string) bool { info, err := os.Stat(path); return err == nil && info.IsDir() }
+
+func mustInstalledFiles(payload fixtureconfig.PayloadManifest) []fixtureconfig.InstalledPayload {
+	files, _ := payload.InstalledFiles()
+	return files
+}
+func zero(data []byte) {
+	for index := range data {
+		data[index] = 0
+	}
 }
 
 func installedArtifact(artifact fixtureconfig.Artifact) fixtureconfig.Artifact {

@@ -6,11 +6,32 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
 	"golang.org/x/sys/windows/svc"
 )
+
+func TestReadinessAddressComesFromLockedServerConfig(t *testing.T) {
+	config := []byte(`{"inbounds":[{"type":"shadowsocks","tag":"tunnel-in","listen":"172.20.9.15","listen_port":18443}],"outbounds":[{"type":"http"}]}`)
+	address, err := serverListenAddress(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address != "172.20.9.15:18443" {
+		t.Fatalf("address=%q", address)
+	}
+	for _, changed := range [][]byte{
+		[]byte(strings.Replace(string(config), `"listen":"172.20.9.15"`, `"listen":"127.0.0.1"`, 1)),
+		[]byte(strings.Replace(string(config), `]`, `,{"type":"shadowsocks","listen":"172.20.9.16","listen_port":18443}]`, 1)),
+		append(config, []byte(` {}`)...),
+	} {
+		if _, err := serverListenAddress(changed); err == nil {
+			t.Fatal("unsafe or ambiguous server config was accepted")
+		}
+	}
+}
 
 type fakeManagedProcess struct {
 	mu                sync.Mutex

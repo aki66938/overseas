@@ -372,6 +372,7 @@ func boundHarness(t *testing.T) *liveHarness {
 		PayloadSHA256: strings.Repeat("1", 64), ConfigSHA256: strings.Repeat("2", 64), ServerConfigSHA256: strings.Repeat("3", 64), ActionConfigSHA256: strings.Repeat("4", 64),
 		FakeUpstreamIdentity: "fake-upstream/1", PublicSentinelIdentity: "public/1", CorporateSentinelIdentity: "corporate/1",
 		PublicSentinelEndpoint: "198.18.0.2:18080", PublicSentinelHealthEndpoint: "172.20.9.251:18080", CorporateSentinelEndpoint: "172.20.9.250:18081", FakeUpstreamControlEndpoint: "172.20.9.15:18082", FakeUpstreamDataEndpoint: "172.20.9.15:18083",
+		ServerListenerEndpoint: "172.20.9.15:18443", Network: fixtureproto.NetworkBinding{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}, PayloadFiles: []fixtureproto.PayloadFileBinding{{Name: "overseas-agent.exe", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, SHA256: strings.Repeat("6", 64)}},
 		Artifacts: fixtureproto.ArtifactBinding{ManifestSHA256: strings.Repeat("5", 64), AgentSHA256: strings.Repeat("6", 64), CoreSHA256: strings.Repeat("7", 64), UISHA256: strings.Repeat("8", 64), ServerServiceSHA256: strings.Repeat("9", 64), DriverSHA256: strings.Repeat("a", 64), SentinelSHA256: strings.Repeat("b", 64), ActionHelperSHA256: strings.Repeat("c", 64), PowerShellSHA256: strings.Repeat("d", 64), InstallerSHA256: strings.Repeat("e", 64), CaptureScriptSHA256: strings.Repeat("f", 64)},
 	}
 	return &liveHarness{
@@ -396,6 +397,9 @@ func boundResponse(request fixtureproto.Request, binding fixtureproto.FixtureBin
 		facts["service_present"] = "true"
 		facts["agent_hash_verified"] = "true"
 		facts["installed_hashes_verified"] = "true"
+		facts["credential_provisioned"] = "true"
+		facts["server_identity_verified"] = "true"
+		facts["unexpected_files_absent"] = "true"
 	}
 	response := fixtureproto.Response{
 		ProtocolVersion: fixtureproto.ProtocolVersion, RequestNonce: request.RequestNonce, RunID: request.RunID,
@@ -410,7 +414,9 @@ func boundResponse(request fixtureproto.Request, binding fixtureproto.FixtureBin
 			Processes:            []fixtureproto.ProcessRecord{{Role: "agent", Present: false}, {Role: "core", Present: false}, {Role: "ui", Present: false}, {Role: "fake-upstream", Present: false}},
 			OwnedFirewallRules:   []fixtureproto.FirewallRecord{{Name: "owned", Present: false, DefinitionSHA256: strings.Repeat("0", 64)}},
 			MSIRegistrations:     []fixtureproto.MSIRecord{{ProductCode: "{D1234567-89AB-4CDE-8012-3456789ABCDE}", Present: false}},
-			InstalledFiles:       []fixtureproto.FileRecord{{Role: "agent", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, Present: false}},
+			InstalledFiles:       []fixtureproto.FileRecord{{Role: "payload", Name: "overseas-agent.exe", Path: `C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe`, ExpectedSHA256: strings.Repeat("6", 64), Present: false}},
+			UnexpectedFiles:      []fixtureproto.FileRecord{},
+			OwnedRoots:           []fixtureproto.RootRecord{{Path: `C:\Program Files\RegenBio\OverseasAccess`, Present: false}, {Path: `C:\ProgramData\RegenBio\OverseasAccess`, Present: false}},
 			RuntimeFiles:         []fixtureproto.FileRecord{{Role: "credential", Path: `C:\ProgramData\RegenBio\OverseasAccess\credential.bin`, Present: false}},
 			RegistryRecords:      []fixtureproto.StateRecord{{Kind: "registry", Name: "product", Present: false}},
 			OwnershipArtifacts:   []fixtureproto.StateRecord{{Kind: "ownership", Name: "ledger", Present: false}},

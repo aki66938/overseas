@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 type Request struct {
 	ProtocolVersion           int    `json:"protocol_version"`
@@ -24,19 +24,34 @@ type Request struct {
 }
 
 type FixtureBinding struct {
-	PayloadSHA256                string          `json:"payload_sha256"`
-	ConfigSHA256                 string          `json:"config_sha256"`
-	ServerConfigSHA256           string          `json:"server_config_sha256"`
-	ActionConfigSHA256           string          `json:"action_config_sha256"`
-	FakeUpstreamIdentity         string          `json:"fake_upstream_identity"`
-	PublicSentinelIdentity       string          `json:"public_sentinel_identity"`
-	CorporateSentinelIdentity    string          `json:"corporate_sentinel_identity"`
-	PublicSentinelEndpoint       string          `json:"public_sentinel_endpoint"`
-	PublicSentinelHealthEndpoint string          `json:"public_sentinel_health_endpoint"`
-	CorporateSentinelEndpoint    string          `json:"corporate_sentinel_endpoint"`
-	FakeUpstreamControlEndpoint  string          `json:"fake_upstream_control_endpoint"`
-	FakeUpstreamDataEndpoint     string          `json:"fake_upstream_data_endpoint"`
-	Artifacts                    ArtifactBinding `json:"artifacts"`
+	PayloadSHA256                string               `json:"payload_sha256"`
+	ConfigSHA256                 string               `json:"config_sha256"`
+	ServerConfigSHA256           string               `json:"server_config_sha256"`
+	ActionConfigSHA256           string               `json:"action_config_sha256"`
+	FakeUpstreamIdentity         string               `json:"fake_upstream_identity"`
+	PublicSentinelIdentity       string               `json:"public_sentinel_identity"`
+	CorporateSentinelIdentity    string               `json:"corporate_sentinel_identity"`
+	PublicSentinelEndpoint       string               `json:"public_sentinel_endpoint"`
+	PublicSentinelHealthEndpoint string               `json:"public_sentinel_health_endpoint"`
+	CorporateSentinelEndpoint    string               `json:"corporate_sentinel_endpoint"`
+	FakeUpstreamControlEndpoint  string               `json:"fake_upstream_control_endpoint"`
+	FakeUpstreamDataEndpoint     string               `json:"fake_upstream_data_endpoint"`
+	ServerListenerEndpoint       string               `json:"server_listener_endpoint"`
+	Network                      NetworkBinding       `json:"network"`
+	PayloadFiles                 []PayloadFileBinding `json:"payload_files"`
+	Artifacts                    ArtifactBinding      `json:"artifacts"`
+}
+
+type NetworkBinding struct {
+	CorporateCIDRs   []string `json:"corporate_cidrs"`
+	CorporateDNS     []string `json:"corporate_dns"`
+	InternalSuffixes []string `json:"internal_suffixes"`
+}
+
+type PayloadFileBinding struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 type ArtifactBinding struct {
@@ -82,6 +97,8 @@ type Snapshot struct {
 	OwnedFirewallRules   []FirewallRecord `json:"owned_firewall_rules"`
 	MSIRegistrations     []MSIRecord      `json:"msi_registrations"`
 	InstalledFiles       []FileRecord     `json:"installed_files"`
+	UnexpectedFiles      []FileRecord     `json:"unexpected_files"`
+	OwnedRoots           []RootRecord     `json:"owned_roots"`
 	RuntimeFiles         []FileRecord     `json:"runtime_files"`
 	RegistryRecords      []StateRecord    `json:"registry_records"`
 	OwnershipArtifacts   []StateRecord    `json:"ownership_artifacts"`
@@ -130,10 +147,17 @@ type MSIRecord struct {
 }
 
 type FileRecord struct {
-	Role    string `json:"role"`
+	Role           string `json:"role"`
+	Name           string `json:"name,omitempty"`
+	Path           string `json:"path"`
+	Present        bool   `json:"present"`
+	SHA256         string `json:"sha256,omitempty"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+}
+
+type RootRecord struct {
 	Path    string `json:"path"`
 	Present bool   `json:"present"`
-	SHA256  string `json:"sha256,omitempty"`
 }
 
 type StateRecord struct {
@@ -219,6 +243,15 @@ func ValidateResponse(request Request, expected FixtureBinding, response Respons
 	if response.Binding.FakeUpstreamDataEndpoint != expected.FakeUpstreamDataEndpoint || response.Binding.FakeUpstreamDataEndpoint == "" {
 		return errors.New("fake upstream data endpoint binding mismatch")
 	}
+	if response.Binding.ServerListenerEndpoint != expected.ServerListenerEndpoint || response.Binding.ServerListenerEndpoint == "" {
+		return errors.New("server listener endpoint binding mismatch")
+	}
+	if !equalNetworkBinding(response.Binding.Network, expected.Network) {
+		return errors.New("corporate network binding mismatch")
+	}
+	if !equalPayloadBindings(response.Binding.PayloadFiles, expected.PayloadFiles) {
+		return errors.New("payload files binding mismatch")
+	}
 	if err := response.Binding.Artifacts.validateEqual(expected.Artifacts); err != nil {
 		return err
 	}
@@ -276,7 +309,7 @@ func requiredFacts(action string) map[string]string {
 	case "capture":
 		return map[string]string{"snapshot_sha256": ""}
 	case "case-setup":
-		return map[string]string{"service_present": "true", "agent_hash_verified": "true", "installed_hashes_verified": "true"}
+		return map[string]string{"service_present": "true", "agent_hash_verified": "true", "installed_hashes_verified": "true", "credential_provisioned": "true", "server_identity_verified": "true", "unexpected_files_absent": "true"}
 	case "fake-upstream-start":
 		return map[string]string{"fake_upstream_present": "true", "fake_listener_hash_verified": "true"}
 	case "fake-upstream-stop":
@@ -296,7 +329,7 @@ func requiredFacts(action string) map[string]string {
 	case "machine-recover":
 		return map[string]string{"service_present": "true", "agent_hash_verified": "true", "core_absent": "true", "tun_absent": "true", "owned_firewall_absent": "true", "fixture_recovery_absent": "true"}
 	case "uninstall":
-		return map[string]string{"service_absent": "true", "agent_absent": "true", "core_absent": "true", "ui_absent": "true", "server_service_absent": "true", "tun_absent": "true", "owned_firewall_absent": "true", "msi_absent": "true", "installed_files_absent": "true", "runtime_files_absent": "true", "registry_absent": "true", "ownership_absent": "true", "recovery_absent": "true", "transactions_absent": "true", "fixture_product_residue_absent": "true"}
+		return map[string]string{"service_absent": "true", "agent_absent": "true", "core_absent": "true", "ui_absent": "true", "server_service_absent": "true", "server_identity_absent": "true", "tun_absent": "true", "owned_firewall_absent": "true", "msi_absent": "true", "installed_files_absent": "true", "unexpected_files_absent": "true", "owned_roots_absent": "true", "runtime_files_absent": "true", "registry_absent": "true", "ownership_absent": "true", "recovery_absent": "true", "transactions_absent": "true", "fixture_product_residue_absent": "true"}
 	case "case-cleanup":
 		return map[string]string{"core_absent": "true", "ui_absent": "true", "fake_upstream_absent": "true"}
 	case "restore":
@@ -332,13 +365,30 @@ func (s Snapshot) Validate(expectedNonce string, bindings ...FixtureBinding) err
 		name   string
 		length int
 	}{
-		{"msi", len(s.MSIRegistrations)}, {"installed files", len(s.InstalledFiles)}, {"runtime files", len(s.RuntimeFiles)},
+		{"msi", len(s.MSIRegistrations)}, {"payload installed files", len(s.InstalledFiles)}, {"runtime files", len(s.RuntimeFiles)},
 		{"registry", len(s.RegistryRecords)}, {"ownership", len(s.OwnershipArtifacts)}, {"recovery", len(s.RecoveryArtifacts)},
 		{"transaction", len(s.TransactionArtifacts)}, {"fixture residue", len(s.FixtureResidues)}, {"listener", len(s.Listeners)},
 	} {
 		if surface.length == 0 {
 			return fmt.Errorf("snapshot %s records are empty", surface.name)
 		}
+	}
+	if s.UnexpectedFiles == nil {
+		return errors.New("snapshot unexpected-file records are absent")
+	}
+	if len(s.UnexpectedFiles) != 0 {
+		return errors.New("snapshot contains unexpected files in owned roots")
+	}
+	if s.OwnedRoots == nil || len(s.OwnedRoots) != 2 {
+		return errors.New("snapshot owned-root records are incomplete")
+	}
+	wantedRoots := map[string]bool{strings.ToLower(`C:\Program Files\RegenBio\OverseasAccess`): false, strings.ToLower(`C:\ProgramData\RegenBio\OverseasAccess`): false}
+	for _, root := range s.OwnedRoots {
+		key := strings.ToLower(root.Path)
+		if _, ok := wantedRoots[key]; !ok || wantedRoots[key] {
+			return errors.New("snapshot owned-root record is invalid")
+		}
+		wantedRoots[key] = true
 	}
 	for _, value := range s.Adapters {
 		if value.InterfaceIndex <= 0 || value.InterfaceGUID == "" || value.InterfaceAlias == "" || value.Status == "" {
@@ -414,6 +464,11 @@ func (s Snapshot) Validate(expectedNonce string, bindings ...FixtureBinding) err
 			}
 		}
 	}
+	if len(bindings) > 0 && len(bindings[0].PayloadFiles) > 0 {
+		if err := validateInstalledPayloadFiles(s.InstalledFiles, bindings[0].PayloadFiles); err != nil {
+			return err
+		}
+	}
 	for _, records := range [][]StateRecord{s.RegistryRecords, s.OwnershipArtifacts, s.RecoveryArtifacts, s.TransactionArtifacts, s.FixtureResidues} {
 		for _, value := range records {
 			if value.Kind == "" || value.Name == "" || (value.Present && !validSHA256(value.DefinitionSHA256)) {
@@ -430,6 +485,111 @@ func (s Snapshot) Validate(expectedNonce string, bindings ...FixtureBinding) err
 				return fmt.Errorf("listener %s image hash mismatch", value.Role)
 			}
 		}
+	}
+	if len(bindings) > 0 {
+		if err := validateServerOwnership(s, bindings[0]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func equalNetworkBinding(left, right NetworkBinding) bool {
+	return equalStrings(left.CorporateCIDRs, right.CorporateCIDRs) && equalStrings(left.CorporateDNS, right.CorporateDNS) && equalStrings(left.InternalSuffixes, right.InternalSuffixes)
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalPayloadBindings(left, right []PayloadFileBinding) bool {
+	if len(left) != len(right) || len(left) == 0 {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] || !validSHA256(left[index].SHA256) || left[index].Name == "" || left[index].Path == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func validateInstalledPayloadFiles(records []FileRecord, expected []PayloadFileBinding) error {
+	if len(records) != len(expected) {
+		return errors.New("snapshot does not cover the complete payload file set")
+	}
+	byPath := make(map[string]FileRecord, len(records))
+	for _, record := range records {
+		key := strings.ToLower(record.Path)
+		if _, ok := byPath[key]; ok {
+			return errors.New("snapshot payload file path is duplicated")
+		}
+		byPath[key] = record
+	}
+	for _, want := range expected {
+		record, ok := byPath[strings.ToLower(want.Path)]
+		if !ok || record.Name != want.Name || record.ExpectedSHA256 != want.SHA256 {
+			return errors.New("snapshot payload file binding mismatch")
+		}
+		if record.Present && record.SHA256 != want.SHA256 {
+			return errors.New("snapshot payload file hash mismatch")
+		}
+	}
+	return nil
+}
+
+func validateServerOwnership(s Snapshot, binding FixtureBinding) error {
+	var service *ServiceRecord
+	for index := range s.Services {
+		if s.Services[index].Role == "server-service" && s.Services[index].Present {
+			if service != nil {
+				return errors.New("server service identity is ambiguous")
+			}
+			service = &s.Services[index]
+		}
+	}
+	var host, core *ProcessRecord
+	for index := range s.Processes {
+		switch s.Processes[index].Role {
+		case "server-service":
+			if s.Processes[index].Present {
+				host = &s.Processes[index]
+			}
+		case "server-core":
+			if s.Processes[index].Present {
+				core = &s.Processes[index]
+			}
+		}
+	}
+	var listener *ListenerRecord
+	for index := range s.Listeners {
+		if s.Listeners[index].Endpoint == binding.ServerListenerEndpoint && s.Listeners[index].Present {
+			listener = &s.Listeners[index]
+		}
+	}
+	present := service != nil || host != nil || core != nil || listener != nil
+	if !present {
+		return nil
+	}
+	if service == nil || host == nil || core == nil || listener == nil || service.PID != host.PID || core.ParentPID != host.PID || listener.PID != core.PID || service.PathSHA256 != binding.Artifacts.ServerServiceSHA256 || host.ImageSHA256 != binding.Artifacts.ServerServiceSHA256 || core.ImageSHA256 != binding.Artifacts.CoreSHA256 || listener.ImageSHA256 != binding.Artifacts.CoreSHA256 || listener.Role != "server-core" {
+		return errors.New("server service/listener/core ownership is not cryptographically bound")
+	}
+	configOK := false
+	for _, file := range s.RuntimeFiles {
+		if file.Role == "server-config" && file.Present && file.ExpectedSHA256 == binding.ServerConfigSHA256 && file.SHA256 == binding.ServerConfigSHA256 {
+			configOK = true
+		}
+	}
+	if !configOK {
+		return errors.New("server config identity is not cryptographically bound")
 	}
 	return nil
 }
@@ -508,6 +668,10 @@ func (s Snapshot) Clone() Snapshot {
 	result.OwnedFirewallRules = append([]FirewallRecord(nil), s.OwnedFirewallRules...)
 	result.MSIRegistrations = append([]MSIRecord(nil), s.MSIRegistrations...)
 	result.InstalledFiles = append([]FileRecord(nil), s.InstalledFiles...)
+	if s.UnexpectedFiles != nil {
+		result.UnexpectedFiles = append([]FileRecord{}, s.UnexpectedFiles...)
+	}
+	result.OwnedRoots = append([]RootRecord(nil), s.OwnedRoots...)
 	result.RuntimeFiles = append([]FileRecord(nil), s.RuntimeFiles...)
 	result.RegistryRecords = append([]StateRecord(nil), s.RegistryRecords...)
 	result.OwnershipArtifacts = append([]StateRecord(nil), s.OwnershipArtifacts...)

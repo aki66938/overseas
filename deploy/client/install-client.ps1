@@ -48,6 +48,8 @@ $RequiredPayloads = @(
     'wintun.dll',
     'agent.yaml',
     'agent.yaml.p7s',
+    'client-sbom.json',
+    'SHA256SUMS',
     'sing-box-LICENSE.txt',
     'wintun-LICENSE.txt'
 )

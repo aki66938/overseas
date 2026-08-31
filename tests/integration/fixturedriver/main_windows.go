@@ -100,6 +100,9 @@ func (c fixtureConfig) Validate() error {
 	if c.Binding.FakeUpstreamIdentity == "" || c.Binding.PublicSentinelIdentity == "" || c.Binding.CorporateSentinelIdentity == "" {
 		return errors.New("all fixture identities are required")
 	}
+	if c.Binding.ServerListenerEndpoint == "" || len(c.Binding.Network.CorporateCIDRs) == 0 || len(c.Binding.Network.CorporateDNS) == 0 || len(c.Binding.Network.InternalSuffixes) == 0 || len(c.Binding.PayloadFiles) == 0 {
+		return errors.New("server, signed corporate network, and complete payload bindings are required")
+	}
 	if len(c.FixtureManifestSigners) == 0 {
 		return errors.New("fixture manifest signer allowlist is required")
 	}
@@ -172,6 +175,14 @@ func run() error {
 		lockInput:        lockPinnedInput,
 		validateFixture:  validateFixtureAssets,
 		validateGenerated: func(config fixtureConfig) error {
+			manifestData, err := os.ReadFile(config.FixtureManifestPath)
+			if err != nil {
+				return err
+			}
+			manifest, err := fixtureconfig.ParseManifest(manifestData)
+			if err != nil {
+				return err
+			}
 			client, err := os.ReadFile(config.GeneratedConfigPath)
 			if err != nil {
 				return err
@@ -180,7 +191,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			if err := fixtureconfig.ValidateGeneratedConfigs(client, server, config.FakeUpstreamData); err != nil {
+			if err := fixtureconfig.ValidateGeneratedConfigs(client, server, config.FakeUpstreamData, manifest.NetworkPolicy()); err != nil {
 				return err
 			}
 			actionData, err := os.ReadFile(config.ActionConfigPath)
@@ -191,16 +202,8 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			manifestData, err := os.ReadFile(config.FixtureManifestPath)
-			if err != nil {
-				return err
-			}
-			manifest, err := fixtureconfig.ParseManifest(manifestData)
-			if err != nil {
-				return err
-			}
-			if actionConfig.FixtureManifestPath != config.FixtureManifestPath {
-				return errors.New("action config fixture manifest path mismatch")
+			if actionConfig.FixtureManifestPath != config.FixtureManifestPath || actionConfig.GeneratedConfigPath != config.GeneratedConfigPath || actionConfig.ServerConfigPath != config.ServerConfigPath || actionConfig.ServerConfigSHA256 != config.Binding.ServerConfigSHA256 || actionConfig.ServerListenerEndpoint != config.Binding.ServerListenerEndpoint {
+				return errors.New("action config fixture/config path mismatch")
 			}
 			return actionConfig.Validate(manifest, config.FakeUpstreamData, config.FakeUpstreamControl, config.PublicSentinel, config.Binding.FakeUpstreamIdentity, config.PayloadPath)
 		},
@@ -508,6 +511,12 @@ func validateFixtureAssets(ctx context.Context, config fixtureConfig) (io.Closer
 		return fail(fmt.Errorf("lock manifest signature: %w", err))
 	}
 	locks = append(locks, signatureLock)
+	payloadSignaturePath := config.PayloadPath + ".p7s"
+	payloadSignatureLock, err := lockUnhashedInput(payloadSignaturePath)
+	if err != nil {
+		return fail(fmt.Errorf("lock payload manifest signature: %w", err))
+	}
+	locks = append(locks, payloadSignatureLock)
 	manifestData, err := os.ReadFile(config.FixtureManifestPath)
 	if err != nil {
 		return fail(err)
@@ -522,6 +531,24 @@ func validateFixtureAssets(ctx context.Context, config fixtureConfig) (io.Closer
 	}
 	if derived != config.Binding.Artifacts {
 		return fail(errors.New("manifest-derived artifact binding mismatch"))
+	}
+	if !equalStringLists(manifest.CorporateCIDRs, config.Binding.Network.CorporateCIDRs) || !equalStringLists(manifest.CorporateDNS, config.Binding.Network.CorporateDNS) || !equalStringLists(manifest.InternalSuffixes, config.Binding.Network.InternalSuffixes) {
+		return fail(errors.New("manifest-derived corporate network binding mismatch"))
+	}
+	payloadData, err := os.ReadFile(config.PayloadPath)
+	if err != nil {
+		return fail(err)
+	}
+	payloadManifest, err := fixtureconfig.ParsePayloadManifest(payloadData)
+	if err != nil {
+		return fail(err)
+	}
+	payloadBindings, err := fixtureconfig.PayloadBindings(payloadManifest)
+	if err != nil {
+		return fail(err)
+	}
+	if !equalPayloadBindings(payloadBindings, config.Binding.PayloadFiles) {
+		return fail(errors.New("manifest-derived payload file binding mismatch"))
 	}
 	if manifest.Artifacts["powershell"].Path != config.PowerShellPath || !strings.EqualFold(filepath.Clean(manifest.Artifacts["action-helper"].Path), filepath.Clean(config.ActionHelperPath)) {
 		return fail(errors.New("manifest PowerShell/action-helper path mismatch"))
@@ -538,6 +565,9 @@ func validateFixtureAssets(ctx context.Context, config fixtureConfig) (io.Closer
 	}
 	if err := verifyDetachedManifest(ctx, config); err != nil {
 		return fail(err)
+	}
+	if err := verifyDetachedFile(ctx, config, config.PayloadPath, payloadSignaturePath); err != nil {
+		return fail(errors.New("detached payload manifest signature refused"))
 	}
 	for role, artifact := range manifest.Artifacts {
 		locked, lockErr := lockPinnedInput(artifact.Path, artifact.SHA256)
@@ -579,6 +609,10 @@ func lockUnhashedInput(path string) (io.Closer, error) {
 const verifyDetachedManifestScript = `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$m=[IO.File]::ReadAllBytes($args[0]);$c=New-Object Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$m);$s=New-Object Security.Cryptography.Pkcs.SignedCms -ArgumentList @($c,$true);$s.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[1]).Trim()));$s.CheckSignature($true);$allowed=@($args[2].Split(',')|ForEach-Object{$_.ToUpperInvariant()});if($s.SignerInfos.Count-ne 1-or $null-eq $s.SignerInfos[0].Certificate-or $allowed-notcontains $s.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant()){exit 17}`
 
 func verifyDetachedManifest(ctx context.Context, config fixtureConfig) error {
+	return verifyDetachedFile(ctx, config, config.FixtureManifestPath, config.FixtureManifestSignaturePath)
+}
+
+func verifyDetachedFile(ctx context.Context, config fixtureConfig, contentPath, signaturePath string) error {
 	if actual, err := hashFile(config.PowerShellPath); err != nil || actual != config.Binding.Artifacts.PowerShellSHA256 {
 		return errors.New("manifest verifier PowerShell hash changed")
 	}
@@ -590,11 +624,34 @@ func verifyDetachedManifest(ctx context.Context, config fixtureConfig) error {
 			return errors.New("manifest signer thumbprint is invalid")
 		}
 	}
-	_, err := winjob.Run(ctx, config.PowerShellPath, []string{"-NoProfile", "-NonInteractive", "-Command", verifyDetachedManifestScript, config.FixtureManifestPath, config.FixtureManifestSignaturePath, strings.Join(config.FixtureManifestSigners, ",")}, os.Environ(), nil)
+	_, err := winjob.Run(ctx, config.PowerShellPath, []string{"-NoProfile", "-NonInteractive", "-Command", verifyDetachedManifestScript, contentPath, signaturePath, strings.Join(config.FixtureManifestSigners, ",")}, os.Environ(), nil)
 	if err != nil {
 		return errors.New("detached fixture manifest signature refused")
 	}
 	return nil
+}
+
+func equalStringLists(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+func equalPayloadBindings(left, right []fixtureproto.PayloadFileBinding) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func lockPinnedInput(path, expected string) (io.Closer, error) {
@@ -704,30 +761,37 @@ func buildActionFacts(config fixtureConfig, request fixtureproto.Request, snapsh
 	} {
 		facts[name] = fmt.Sprintf("%t", value)
 	}
-	installedHashesVerified := true
-	requiredInstalled := map[string]bool{"agent": false, "core": false, "ui": false}
+	installedHashesVerified := len(snapshot.InstalledFiles) == len(config.Binding.PayloadFiles)
+	requiredInstalled := make(map[string]bool, len(config.Binding.PayloadFiles))
+	for _, expected := range config.Binding.PayloadFiles {
+		requiredInstalled[strings.ToLower(expected.Path)] = false
+	}
 	for _, file := range snapshot.InstalledFiles {
-		if !file.Present {
+		key := strings.ToLower(file.Path)
+		verified, required := requiredInstalled[key]
+		_ = verified
+		if !required || !file.Present || file.SHA256 != file.ExpectedSHA256 {
+			installedHashesVerified = false
 			continue
 		}
-		expected := map[string]string{"agent": config.Binding.Artifacts.AgentSHA256, "core": config.Binding.Artifacts.CoreSHA256, "ui": config.Binding.Artifacts.UISHA256, "server-service": config.Binding.Artifacts.ServerServiceSHA256}[file.Role]
-		if expected == "" || file.SHA256 != expected {
-			installedHashesVerified = false
-		}
-		if _, required := requiredInstalled[file.Role]; required {
-			requiredInstalled[file.Role] = file.SHA256 == expected
-		}
+		requiredInstalled[key] = true
 	}
 	for _, verified := range requiredInstalled {
 		installedHashesVerified = installedHashesVerified && verified
 	}
 	facts["installed_hashes_verified"] = fmt.Sprintf("%t", installedHashesVerified)
+	facts["unexpected_files_absent"] = fmt.Sprintf("%t", len(snapshot.UnexpectedFiles) == 0)
+	credentialProvisioned := false
 	runtimeConfigVerified := false
 	for _, file := range snapshot.RuntimeFiles {
 		if file.Role == "config" {
 			runtimeConfigVerified = file.Present && file.SHA256 == config.Binding.ConfigSHA256
 		}
+		if file.Role == "credential" {
+			credentialProvisioned = file.Present
+		}
 	}
+	facts["credential_provisioned"] = fmt.Sprintf("%t", credentialProvisioned)
 	facts["runtime_config_verified"] = fmt.Sprintf("%t", runtimeConfigVerified)
 	uiHashVerified := !processPresent["ui"]
 	fakeHashVerified := !processPresent["fake-upstream"]
@@ -772,6 +836,12 @@ func buildActionFacts(config fixtureConfig, request fixtureproto.Request, snapsh
 	}
 	facts["msi_absent"] = fmt.Sprintf("%t", allMSIAbsent)
 	facts["installed_files_absent"] = fmt.Sprintf("%t", allFilesAbsent(snapshot.InstalledFiles))
+	facts["unexpected_files_absent"] = fmt.Sprintf("%t", len(snapshot.UnexpectedFiles) == 0)
+	allRootsAbsent := true
+	for _, root := range snapshot.OwnedRoots {
+		allRootsAbsent = allRootsAbsent && !root.Present
+	}
+	facts["owned_roots_absent"] = fmt.Sprintf("%t", allRootsAbsent)
 	facts["runtime_files_absent"] = fmt.Sprintf("%t", allFilesAbsent(snapshot.RuntimeFiles))
 	facts["registry_absent"] = fmt.Sprintf("%t", allStateAbsent(snapshot.RegistryRecords, false))
 	facts["ownership_absent"] = fmt.Sprintf("%t", allStateAbsent(snapshot.OwnershipArtifacts, false))
@@ -786,6 +856,27 @@ func buildActionFacts(config fixtureConfig, request fixtureproto.Request, snapsh
 	facts["fixture_recovery_absent"] = fmt.Sprintf("%t", !recoveryStaged)
 	facts["transactions_absent"] = fmt.Sprintf("%t", allStateAbsent(snapshot.TransactionArtifacts, false))
 	facts["fixture_product_residue_absent"] = fmt.Sprintf("%t", allStateAbsent(snapshot.FixtureResidues, true))
+	serverPresent := processPresent["server-service"] || processPresent["server-core"]
+	serverListenerPresent := false
+	for _, listener := range snapshot.Listeners {
+		if listener.Endpoint == config.Binding.ServerListenerEndpoint && listener.Present {
+			serverListenerPresent = true
+		}
+	}
+	serverServicePresent := false
+	for _, service := range snapshot.Services {
+		if service.Role == "server-service" && service.Present {
+			serverServicePresent = true
+		}
+	}
+	serverConfigPresent := false
+	for _, file := range snapshot.RuntimeFiles {
+		if file.Role == "server-config" && file.Present && file.SHA256 == config.Binding.ServerConfigSHA256 {
+			serverConfigPresent = true
+		}
+	}
+	facts["server_identity_verified"] = fmt.Sprintf("%t", serverServicePresent && processPresent["server-service"] && processPresent["server-core"] && serverListenerPresent && serverConfigPresent)
+	facts["server_identity_absent"] = fmt.Sprintf("%t", !serverPresent && !serverListenerPresent && !serverServicePresent && !serverConfigPresent)
 	if request.Action == "restore" {
 		facts["restore_input_sha256"] = request.BaselineSHA256
 		facts["state_restored"] = fmt.Sprintf("%t", digestBytes(state) == request.BaselineSHA256)
@@ -862,16 +953,25 @@ $dns=@(Get-DnsClientServerAddress -ErrorAction Stop|Where-Object{@($_.ServerAddr
 $svc=Get-CimInstance Win32_Service -Filter "Name='RegenBioOverseasAccessAgent'" -ErrorAction SilentlyContinue
 $servicePath=if($null-eq $svc){''}else{Service-Executable ([string]$svc.PathName)}
 $services=@([ordered]@{role='agent';name='RegenBioOverseasAccessAgent';present=[bool]($null-ne $svc);status=$(if($null-eq $svc){'Absent'}else{[string]$svc.State});start_mode=$(if($null-eq $svc){'Absent'}else{[string]$svc.StartMode});path=$servicePath;path_sha256=$(Hash-File $servicePath);pid=$(if($null-eq $svc){0}else{[int]$svc.ProcessId})})
+$serverSvc=Get-CimInstance Win32_Service -Filter "Name='RegenBioOverseasAccessServer'" -ErrorAction SilentlyContinue
+$serverServicePath=if($null-eq $serverSvc){''}else{Service-Executable ([string]$serverSvc.PathName)}
+$services+=@([ordered]@{role='server-service';name='RegenBioOverseasAccessServer';present=[bool]($null-ne $serverSvc);status=$(if($null-eq $serverSvc){'Absent'}else{[string]$serverSvc.State});start_mode=$(if($null-eq $serverSvc){'Absent'}else{[string]$serverSvc.StartMode});path=$serverServicePath;path_sha256=$(Hash-File $serverServicePath);pid=$(if($null-eq $serverSvc){0}else{[int]$serverSvc.ProcessId})})
 $services+=@(Get-CimInstance Win32_Service -ErrorAction Stop|Where-Object{$_.Name -like 'RegenBioFixture-*'}|ForEach-Object{$path=Service-Executable ([string]$_.PathName);[ordered]@{role='action-helper';name=[string]$_.Name;present=$true;status=[string]$_.State;start_mode=[string]$_.StartMode;path=$path;path_sha256=$(Hash-File $path);pid=[int]$_.ProcessId}})
-$roles=[ordered]@{agent='overseas-agent';core='sing-box';ui='overseas-client';'server-service'='overseas-server-service';'fake-upstream'='fixture-sentinel'}
-$processes=@(foreach($entry in $roles.GetEnumerator()){if($entry.Key -eq 'fake-upstream'){$items=@(Get-CimInstance Win32_Process -Filter "Name='fixture-sentinel.exe'" -ErrorAction SilentlyContinue|Where-Object{$_.CommandLine -match '(?:^|\s)-mode(?:\s+|=)fake-upstream(?:\s|$)'}|Sort-Object ProcessId)}else{$items=@(Get-Process -Name $entry.Value -ErrorAction SilentlyContinue|Sort-Object Id)};if($items.Count -eq 0){[ordered]@{role=[string]$entry.Key;present=$false;pid=0;parent_pid=0;image_path='';image_sha256=''}}elseif($items.Count -eq 1){if($entry.Key -eq 'fake-upstream'){$path=[string]$items[0].ExecutablePath;$pidValue=[int]$items[0].ProcessId;$parentPID=[int]$items[0].ParentProcessId}else{$path=[string]$items[0].Path;$pidValue=[int]$items[0].Id;$parentPID=0};[ordered]@{role=[string]$entry.Key;present=$true;pid=$pidValue;parent_pid=$parentPID;image_path=$path;image_sha256=$(Hash-File $path)}}else{throw "ambiguous process role $($entry.Key)"}})
+$processRoles=@(@('agent',$env:FIXTURE_AGENT_PATH),@('core',$env:FIXTURE_CORE_PATH),@('ui',$env:FIXTURE_UI_PATH),@('server-service','C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe'),@('server-core','C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe'))
+$processes=@(foreach($entry in $processRoles){$items=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|Where-Object{[string]::Equals([string]$_.ExecutablePath,[string]$entry[1],[StringComparison]::OrdinalIgnoreCase)}|Sort-Object ProcessId);if($items.Count -eq 0){[ordered]@{role=$entry[0];present=$false;pid=0;parent_pid=0;image_path='';image_sha256=''}}elseif($items.Count -eq 1){[ordered]@{role=$entry[0];present=$true;pid=[int]$items[0].ProcessId;parent_pid=[int]$items[0].ParentProcessId;image_path=[string]$items[0].ExecutablePath;image_sha256=$(Hash-File ([string]$items[0].ExecutablePath))}}else{throw "ambiguous process role $($entry[0])"}})
+$fakeItems=@(Get-CimInstance Win32_Process -Filter "Name='fixture-sentinel.exe'" -ErrorAction SilentlyContinue|Where-Object{$_.CommandLine -match '(?:^|\s)-mode(?:\s+|=)fake-upstream(?:\s|$)'}|Sort-Object ProcessId)
+if($fakeItems.Count -eq 0){$processes+=@([ordered]@{role='fake-upstream';present=$false;pid=0;parent_pid=0;image_path='';image_sha256=''})}elseif($fakeItems.Count -eq 1){$processes+=@([ordered]@{role='fake-upstream';present=$true;pid=[int]$fakeItems[0].ProcessId;parent_pid=[int]$fakeItems[0].ParentProcessId;image_path=[string]$fakeItems[0].ExecutablePath;image_sha256=$(Hash-File ([string]$fakeItems[0].ExecutablePath))})}else{throw 'ambiguous process role fake-upstream'}
 $names=@('RegenBioOverseasAccess.BlockPublicTCP','RegenBioOverseasAccess.BlockQUIC','RegenBioOverseasAccess.BlockPublicUDP','RegenBioOverseasAccess.BlockUnapprovedDNSUDP','RegenBioOverseasAccess.BlockUnapprovedDNSTCP','RegenBioOverseasAccess.BlockPublicEmergency','RegenBioOverseasAccess-AllowAgent-Out','RegenBioOverseasAccess-AllowCoreTCP-Out','RegenBioOverseasAccess-AllowCoreUDP-Out')
 $firewall=@(foreach($name in $names){$rules=@(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue);if($rules.Count -eq 0){[ordered]@{name=$name;present=$false;definition_sha256=('0'*64)}}elseif($rules.Count -eq 1){$rule=$rules[0];$definition=[ordered]@{rule=$rule|Select-Object Name,DisplayName,Group,Direction,Action,Enabled,Profile,PolicyStoreSourceType;port=$rule|Get-NetFirewallPortFilter|Select-Object Protocol,LocalPort,RemotePort,IcmpType,DynamicTarget;address=$rule|Get-NetFirewallAddressFilter|Select-Object LocalAddress,RemoteAddress;application=$rule|Get-NetFirewallApplicationFilter|Select-Object Program,Package;service=$rule|Get-NetFirewallServiceFilter|Select-Object Service;interface=$rule|Get-NetFirewallInterfaceFilter|Select-Object InterfaceAlias;interface_type=$rule|Get-NetFirewallInterfaceTypeFilter|Select-Object InterfaceType;security=$rule|Get-NetFirewallSecurityFilter|Select-Object Authentication,Encryption,RemoteMachine,RemoteUser,LocalUser}|ConvertTo-Json -Compress -Depth 6;[ordered]@{name=$name;present=$true;definition_sha256=$(Hash-Text $definition)}}else{throw "ambiguous firewall rule $name"}})
 $uninstallRoots=@('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
 $products=@(foreach($root in $uninstallRoots){@(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue|Where-Object{(Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'RegenBio Overseas Access'}|ForEach-Object{$p=Get-ItemProperty -LiteralPath $_.PSPath;[ordered]@{product_code=[string]$_.PSChildName;present=$true;version=[string]$p.DisplayVersion;package_sha256=$(Hash-Text (($p|Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation,UninstallString|ConvertTo-Json -Compress)))}})})
 if($products.Count -eq 0){$products=@([ordered]@{product_code='{A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1}';present=$false;version='';package_sha256=''})}
-$installed=@(foreach($entry in @(@('agent',$env:FIXTURE_AGENT_PATH),@('ui',$env:FIXTURE_UI_PATH),@('core',$env:FIXTURE_CORE_PATH),@('server-service',$env:FIXTURE_SERVER_SERVICE_PATH))){$present=Test-Path -LiteralPath $entry[1] -PathType Leaf;[ordered]@{role=$entry[0];path=$entry[1];present=$present;sha256=$(if($present){Hash-File $entry[1]}else{''})}})
-$runtime=@(foreach($entry in @(@('credential','C:\ProgramData\RegenBio\OverseasAccess\credential.bin'),@('config','C:\ProgramData\RegenBio\OverseasAccess\sing-box.json'),@('runtime-ledger','C:\ProgramData\RegenBio\OverseasAccess\runtime-owned.json'))){$present=Test-Path -LiteralPath $entry[1] -PathType Leaf;[ordered]@{role=$entry[0];path=$entry[1];present=$present;sha256=$(if($present){Hash-File $entry[1]}else{''})}})
+$payloadFiles=@($env:FIXTURE_PAYLOAD_FILES_JSON|ConvertFrom-Json)
+$installed=@(foreach($entry in $payloadFiles){$present=Test-Path -LiteralPath ([string]$entry.path) -PathType Leaf;[ordered]@{role='payload';name=[string]$entry.name;path=[string]$entry.path;present=$present;sha256=$(if($present){Hash-File ([string]$entry.path)}else{''});expected_sha256=[string]$entry.sha256}})
+$allowed=@{};foreach($entry in $payloadFiles){$allowed[[string]$entry.path]=$true};foreach($path in @('C:\Program Files\RegenBio\OverseasAccess\.regenbio-overseas-access.owner.json','C:\ProgramData\RegenBio\OverseasAccess\.regenbio-overseas-access.owner.json','C:\ProgramData\RegenBio\OverseasAccess\credential.bin','C:\ProgramData\RegenBio\OverseasAccess\sing-box.json','C:\ProgramData\RegenBio\OverseasAccess\runtime-owned.json','C:\ProgramData\RegenBio\OverseasAccess\network-state.json')){$allowed[$path]=$true}
+$unexpected=@(foreach($root in @('C:\Program Files\RegenBio\OverseasAccess','C:\ProgramData\RegenBio\OverseasAccess')){@(Get-ChildItem -LiteralPath $root -File -Force -Recurse -ErrorAction SilentlyContinue|Where-Object{-not $allowed.ContainsKey([string]$_.FullName)}|ForEach-Object{[ordered]@{role='unexpected';name=[string]$_.Name;path=[string]$_.FullName;present=$true;sha256=$(Hash-File $_.FullName)}})})
+$ownedRoots=@(foreach($root in @('C:\Program Files\RegenBio\OverseasAccess','C:\ProgramData\RegenBio\OverseasAccess')){[ordered]@{path=$root;present=(Test-Path -LiteralPath $root -PathType Container)}})
+$runtime=@(foreach($entry in @(@('credential','C:\ProgramData\RegenBio\OverseasAccess\credential.bin',''),@('config','C:\ProgramData\RegenBio\OverseasAccess\sing-box.json',$env:FIXTURE_CLIENT_CONFIG_SHA256),@('runtime-ledger','C:\ProgramData\RegenBio\OverseasAccess\runtime-owned.json',''),@('network-state','C:\ProgramData\RegenBio\OverseasAccess\network-state.json',''),@('server-config','C:\ProgramData\RegenBio\OverseasAccessServer\config.json',$env:FIXTURE_SERVER_CONFIG_SHA256))){$present=Test-Path -LiteralPath $entry[1] -PathType Leaf;[ordered]@{role=$entry[0];path=$entry[1];present=$present;sha256=$(if($present){Hash-File $entry[1]}else{''});expected_sha256=$entry[2]}})
 function State-Path([string]$kind,[string]$name,[string]$path){$present=Test-Path -LiteralPath $path;[ordered]@{kind=$kind;name=$name;present=$present;definition_sha256=$(if($present){if(Test-Path -LiteralPath $path -PathType Leaf){Hash-File $path}else{Hash-Text ((Get-ChildItem -LiteralPath $path -Force -Recurse|Select-Object FullName,Length,LastWriteTimeUtc|ConvertTo-Json -Compress))}}else{''})}}
 $registry=@(State-Path 'registry' 'client-owner-registry' 'HKLM:\Software\RegenBio\OverseasAccess')
 $ownership=@((State-Path 'ownership' 'install-owner' 'C:\Program Files\RegenBio\OverseasAccess\.regenbio-overseas-access.owner.json'),(State-Path 'ownership' 'data-owner' 'C:\ProgramData\RegenBio\OverseasAccess\.regenbio-overseas-access.owner.json'),(State-Path 'ownership' 'runtime-ledger' 'C:\ProgramData\RegenBio\OverseasAccess\runtime-owned.json'))
@@ -881,8 +981,8 @@ if($scheduled.Count -eq 0){$scheduled=@([ordered]@{kind='recovery';name='RegenBi
 $transactions=@((State-Path 'transaction' 'installer-transactions' 'C:\ProgramData\RegenBio\InstallerTransactions'))
 $fixtureServices=@(Get-CimInstance Win32_Service -ErrorAction Stop|Where-Object{$_.Name -like 'RegenBioFixture-*'}|ForEach-Object{[ordered]@{kind='fixture-residue';name=[string]$_.Name;present=$true;definition_sha256=$(Hash-Text (($_|Select-Object Name,State,StartMode,PathName|ConvertTo-Json -Compress)))}})
 if($fixtureServices.Count -eq 0){$fixtureServices=@([ordered]@{kind='fixture-residue';name='RegenBioFixture';present=$false;definition_sha256=''})}
-$listeners=@(foreach($entry in @(@('fake-upstream',$env:FIXTURE_FAKE_DATA_ENDPOINT),@('fake-upstream',$env:FIXTURE_FAKE_CONTROL_ENDPOINT),@('sentinel',$env:FIXTURE_PUBLIC_ENDPOINT),@('sentinel',$env:FIXTURE_PUBLIC_HEALTH_ENDPOINT),@('sentinel',$env:FIXTURE_CORPORATE_ENDPOINT))){$parts=$entry[1].Split(':');$connections=@(Get-NetTCPConnection -State Listen -LocalAddress $parts[0] -LocalPort ([int]$parts[1]) -ErrorAction SilentlyContinue);if($connections.Count -gt 1){throw "ambiguous listener $($entry[1])"};if($connections.Count -eq 0){[ordered]@{role=$entry[0];endpoint=$entry[1];present=$false;pid=0;image_path='';image_sha256=''}}else{$owner=Get-Process -Id $connections[0].OwningProcess -ErrorAction Stop;[ordered]@{role=$entry[0];endpoint=$entry[1];present=$true;pid=[int]$owner.Id;image_path=[string]$owner.Path;image_sha256=$(Hash-File ([string]$owner.Path))}}})
-[ordered]@{observation_nonce=$env:FIXTURE_OBSERVATION_NONCE;adapters=$adapters;routes=$routes;dns=$dns;services=$services;processes=$processes;owned_firewall_rules=$firewall;msi_registrations=$products;installed_files=$installed;runtime_files=$runtime;registry_records=$registry;ownership_artifacts=$ownership;recovery_artifacts=$scheduled;transaction_artifacts=$transactions;fixture_residues=$fixtureServices;listeners=$listeners}|ConvertTo-Json -Compress -Depth 8`
+$listeners=@(foreach($entry in @(@('fake-upstream',$env:FIXTURE_FAKE_DATA_ENDPOINT),@('fake-upstream',$env:FIXTURE_FAKE_CONTROL_ENDPOINT),@('sentinel',$env:FIXTURE_PUBLIC_ENDPOINT),@('sentinel',$env:FIXTURE_PUBLIC_HEALTH_ENDPOINT),@('sentinel',$env:FIXTURE_CORPORATE_ENDPOINT),@('server-core',$env:FIXTURE_SERVER_LISTENER_ENDPOINT))){$parts=$entry[1].Split(':');$connections=@(Get-NetTCPConnection -State Listen -LocalAddress $parts[0] -LocalPort ([int]$parts[1]) -ErrorAction SilentlyContinue);if($connections.Count -gt 1){throw "ambiguous listener $($entry[1])"};if($connections.Count -eq 0){[ordered]@{role=$entry[0];endpoint=$entry[1];present=$false;pid=0;image_path='';image_sha256=''}}else{$owner=Get-Process -Id $connections[0].OwningProcess -ErrorAction Stop;[ordered]@{role=$entry[0];endpoint=$entry[1];present=$true;pid=[int]$owner.Id;image_path=[string]$owner.Path;image_sha256=$(Hash-File ([string]$owner.Path))}}})
+[ordered]@{observation_nonce=$env:FIXTURE_OBSERVATION_NONCE;adapters=$adapters;routes=$routes;dns=$dns;services=$services;processes=$processes;owned_firewall_rules=$firewall;msi_registrations=$products;installed_files=$installed;unexpected_files=$unexpected;owned_roots=$ownedRoots;runtime_files=$runtime;registry_records=$registry;ownership_artifacts=$ownership;recovery_artifacts=$scheduled;transaction_artifacts=$transactions;fixture_residues=$fixtureServices;listeners=$listeners}|ConvertTo-Json -Compress -Depth 8`
 
 func captureWindows(ctx context.Context, nonce string, config fixtureConfig) (fixtureproto.Snapshot, error) {
 	root := filepath.Clean(os.Getenv("SystemRoot"))
@@ -904,9 +1004,14 @@ func captureWindows(ctx context.Context, nonce string, config fixtureConfig) (fi
 	if err != nil {
 		return fixtureproto.Snapshot{}, fmt.Errorf("parse locked fixture manifest for capture: %w", err)
 	}
-	environment := withoutEnvironmentKeys(os.Environ(), "FIXTURE_OBSERVATION_NONCE", "FIXTURE_FAKE_DATA_ENDPOINT", "FIXTURE_FAKE_CONTROL_ENDPOINT", "FIXTURE_PUBLIC_ENDPOINT", "FIXTURE_PUBLIC_HEALTH_ENDPOINT", "FIXTURE_CORPORATE_ENDPOINT", "FIXTURE_AGENT_PATH", "FIXTURE_CORE_PATH", "FIXTURE_UI_PATH", "FIXTURE_SERVER_SERVICE_PATH")
+	payloadJSON, err := json.Marshal(config.Binding.PayloadFiles)
+	if err != nil {
+		return fixtureproto.Snapshot{}, err
+	}
+	environment := withoutEnvironmentKeys(os.Environ(), "FIXTURE_OBSERVATION_NONCE", "FIXTURE_FAKE_DATA_ENDPOINT", "FIXTURE_FAKE_CONTROL_ENDPOINT", "FIXTURE_PUBLIC_ENDPOINT", "FIXTURE_PUBLIC_HEALTH_ENDPOINT", "FIXTURE_CORPORATE_ENDPOINT", "FIXTURE_AGENT_PATH", "FIXTURE_CORE_PATH", "FIXTURE_UI_PATH", "FIXTURE_SERVER_SERVICE_PATH", "FIXTURE_PAYLOAD_FILES_JSON", "FIXTURE_CLIENT_CONFIG_SHA256", "FIXTURE_SERVER_CONFIG_SHA256", "FIXTURE_SERVER_LISTENER_ENDPOINT")
 	environment = append(environment, "FIXTURE_OBSERVATION_NONCE="+nonce, "FIXTURE_FAKE_DATA_ENDPOINT="+config.FakeUpstreamData, "FIXTURE_FAKE_CONTROL_ENDPOINT="+config.FakeUpstreamControl, "FIXTURE_PUBLIC_ENDPOINT="+config.PublicSentinel, "FIXTURE_PUBLIC_HEALTH_ENDPOINT="+config.PublicSentinelHealth, "FIXTURE_CORPORATE_ENDPOINT="+config.CorporateSentinel,
-		"FIXTURE_AGENT_PATH="+manifest.Artifacts["agent"].InstalledPath, "FIXTURE_CORE_PATH="+manifest.Artifacts["core"].InstalledPath, "FIXTURE_UI_PATH="+manifest.Artifacts["ui"].InstalledPath, "FIXTURE_SERVER_SERVICE_PATH="+manifest.Artifacts["server-service"].InstalledPath)
+		"FIXTURE_AGENT_PATH="+manifest.Artifacts["agent"].InstalledPath, "FIXTURE_CORE_PATH="+manifest.Artifacts["core"].InstalledPath, "FIXTURE_UI_PATH="+manifest.Artifacts["ui"].InstalledPath, "FIXTURE_SERVER_SERVICE_PATH="+manifest.Artifacts["server-service"].InstalledPath,
+		"FIXTURE_PAYLOAD_FILES_JSON="+string(payloadJSON), "FIXTURE_CLIENT_CONFIG_SHA256="+config.Binding.ConfigSHA256, "FIXTURE_SERVER_CONFIG_SHA256="+config.Binding.ServerConfigSHA256, "FIXTURE_SERVER_LISTENER_ENDPOINT="+config.Binding.ServerListenerEndpoint)
 	output, err := winjob.Run(ctx, config.PowerShellPath, []string{"-NoProfile", "-NonInteractive", "-Command", windowsCaptureScript}, environment, nil)
 	if err != nil {
 		return fixtureproto.Snapshot{}, fmt.Errorf("capture Windows state: %w", err)
