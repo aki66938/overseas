@@ -32,7 +32,7 @@ const (
 	actionRequestEnvironment = "OVERSEAS_FIXTURE_REQUEST_JSON"
 	agentServiceName         = "RegenBioOverseasAccessAgent"
 	actionTimeout            = 40 * time.Second
-	serverOwnerMarker        = ".fixture-owner.json"
+	credentialTimeout        = 15 * time.Minute
 )
 
 type windowsBackend struct {
@@ -43,6 +43,12 @@ type windowsBackend struct {
 
 func main() {
 	if len(os.Args) > 1 {
+		if len(os.Args) == 2 && os.Args[1] == "provision-credential" {
+			if err := runProvisionCredential(); err != nil {
+				os.Exit(1)
+			}
+			return
+		}
 		if len(os.Args) >= 6 && os.Args[1] == "supervise" {
 			runSupervisorService(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6:])
 			return
@@ -52,6 +58,17 @@ func main() {
 	if err := runAction(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runProvisionCredential() error {
+	config, manifest, payload, err := loadRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), credentialTimeout)
+	defer cancel()
+	backend := &windowsBackend{config: config, manifest: manifest, payload: payload}
+	return backend.provisionCredential(ctx)
 }
 
 func runAction() error {
@@ -334,12 +351,9 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 	if err != nil {
 		return errors.New("locked fixture client config is unavailable for credential provisioning")
 	}
-	executable, source, _, err := provisionerPlan(b.config, clientData, b.payload)
+	plan, err := provisionerPlan(b.config, clientData, b.payload, time.Now().UTC())
 	if err != nil {
 		return err
-	}
-	if _, err := time.Parse(time.RFC3339, b.config.CredentialExpiresAt); err != nil {
-		return errors.New("credential expiration is invalid")
 	}
 	provisionerHash := ""
 	for _, file := range mustInstalledFiles(b.payload) {
@@ -347,25 +361,29 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 			provisionerHash = file.SHA256
 		}
 	}
-	if actual, hashErr := hashFile(executable); hashErr != nil || actual != provisionerHash {
+	if actual, hashErr := hashFile(plan.ProvisionerPath); hashErr != nil || actual != provisionerHash {
 		return errors.New("installed credential provisioner hash mismatch")
 	}
-	if actual, hashErr := hashFile(source); hashErr != nil || actual != b.config.CredentialSourceSHA256 {
+	if actual, hashErr := hashFile(plan.SourcePath); hashErr != nil || actual != b.config.CredentialSourceSHA256 {
 		return errors.New("credential source hash mismatch")
 	}
 	readPipe, writePipe, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	provisioner := exec.CommandContext(ctx, executable)
-	provisioner.Stdin, provisioner.Stdout, provisioner.Stderr = readPipe, io.Discard, os.Stderr
+	provisioner := exec.CommandContext(ctx, plan.ProvisionerPath, plan.ProvisionerArgs...)
+	provisioner.Env = credentialChildEnvironment()
+	provisioner.Stdin = readPipe
+	provisioner.Stdout, provisioner.Stderr = io.Discard, io.Discard
 	if err := provisioner.Start(); err != nil {
 		readPipe.Close()
 		writePipe.Close()
 		return err
 	}
-	sourceCommand := exec.CommandContext(ctx, source)
-	sourceCommand.Stdin, sourceCommand.Stdout, sourceCommand.Stderr = os.Stdin, writePipe, os.Stderr
+	sourceCommand := exec.CommandContext(ctx, plan.SourcePath, plan.SourceArgs...)
+	sourceCommand.Env = credentialChildEnvironment()
+	sourceCommand.Stdout = writePipe
+	sourceCommand.Stderr = io.Discard
 	if err := sourceCommand.Start(); err != nil {
 		_ = readPipe.Close()
 		_ = writePipe.Close()
@@ -377,216 +395,21 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 	_ = writePipe.Close()
 	sourceErr := sourceCommand.Wait()
 	provisionerErr := provisioner.Wait()
-	return errors.Join(sourceErr, provisionerErr)
-}
-
-func (b *windowsBackend) setupProductionServer(ctx context.Context, runID string) (resultErr error) {
-	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
-	if err != nil {
-		return err
-	}
-	installRoot, dataRoot := filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)
-	if serviceExists(plan.ServiceName) || directoryExists(installRoot) || directoryExists(dataRoot) {
-		return errors.New("production server ownership collision")
-	}
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, b.removeProductionServer(runID))
-		}
-	}()
-	for _, root := range []string{installRoot, dataRoot} {
-		if err := os.MkdirAll(root, 0700); err != nil {
-			return err
-		}
-		if err := writeServerOwner(root, runID); err != nil {
-			return errors.Join(err, os.Remove(root))
-		}
-		if err := protectServerRoot(ctx, root); err != nil {
-			return err
-		}
-	}
-	for _, file := range []struct{ source, target, hash string }{{plan.ServiceSource, plan.ServicePath, plan.ServiceSHA256}, {plan.CoreSource, plan.CorePath, plan.CoreSHA256}, {plan.ConfigSource, plan.ConfigPath, plan.ConfigSHA256}} {
-		if err := copyPinnedFile(file.source, file.target, file.hash); err != nil {
-			return err
-		}
-	}
-	runtimeManifest := []byte(fmt.Sprintf("{\"schema_version\":1,\"kind\":\"RegenBioOverseasAccessServerRuntime\",\"sing_box_sha256\":%q,\"signer_allowlist\":[]}", plan.CoreSHA256))
-	if err := writeExclusiveFile(filepath.Join(dataRoot, "runtime-manifest.json"), runtimeManifest); err != nil {
-		return err
-	}
-	manager, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer manager.Disconnect()
-	service, err := manager.CreateService(plan.ServiceName, plan.ServicePath, mgr.Config{DisplayName: "RegenBio Overseas Access Server", StartType: mgr.StartManual})
-	if err != nil {
-		return err
-	}
-	defer service.Close()
-	if err := service.Start(); err != nil {
-		_ = service.Delete()
-		return err
-	}
-	if err := waitService(service, svc.Running); err != nil {
-		return err
-	}
-	return b.verifyProductionServer(runID)
-}
-
-func protectServerRoot(ctx context.Context, root string) error {
-	icacls := filepath.Join(filepath.Clean(os.Getenv("SystemRoot")), "System32", "icacls.exe")
-	if !filepath.IsAbs(icacls) {
-		return errors.New("SystemRoot is unavailable")
-	}
-	command := exec.CommandContext(ctx, icacls, root, "/inheritance:r", "/setowner", "*S-1-5-32-544", "/grant:r", "*S-1-5-18:(OI)(CI)(F)", "*S-1-5-32-544:(OI)(CI)(F)")
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	if err := command.Run(); err != nil {
-		return errors.New("production server ACL publication failed")
+	if sourceErr != nil || provisionerErr != nil {
+		return errors.New("credential pipeline failed")
 	}
 	return nil
 }
 
-func writeServerOwner(root, runID string) error {
-	data, err := json.Marshal(map[string]string{"kind": "RegenBioFixtureServerOwner", "run_id": runID})
-	if err != nil {
-		return err
+func credentialChildEnvironment() []string {
+	result := make([]string, 0, 2)
+	for _, name := range []string{"SystemRoot", "WINDIR"} {
+		if value := os.Getenv(name); value != "" {
+			result = append(result, name+"="+value)
+		}
 	}
-	return writeExclusiveFile(filepath.Join(root, serverOwnerMarker), data)
+	return result
 }
-
-func readServerOwner(root, runID string) error {
-	data, err := os.ReadFile(filepath.Join(root, serverOwnerMarker))
-	if err != nil {
-		return err
-	}
-	var marker map[string]string
-	if json.Unmarshal(data, &marker) != nil || marker["kind"] != "RegenBioFixtureServerOwner" || marker["run_id"] != runID {
-		return errors.New("production server ownership marker mismatch")
-	}
-	return nil
-}
-
-func writeExclusiveFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return errors.Join(file.Sync(), file.Close())
-}
-
-func copyPinnedFile(source, target, expected string) error {
-	if actual, err := hashFile(source); err != nil || actual != expected {
-		return errors.New("production server source hash mismatch")
-	}
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	syncErr := out.Sync()
-	closeErr := out.Close()
-	if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
-		return err
-	}
-	if actual, err := hashFile(target); err != nil || actual != expected {
-		return errors.New("installed production server hash mismatch")
-	}
-	return nil
-}
-
-func (b *windowsBackend) verifyProductionServer(runID string) error {
-	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
-	if err != nil {
-		return err
-	}
-	for _, root := range []string{filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)} {
-		if err := readServerOwner(root, runID); err != nil {
-			return err
-		}
-	}
-	for _, file := range []struct{ path, hash string }{{plan.ServicePath, plan.ServiceSHA256}, {plan.CorePath, plan.CoreSHA256}, {plan.ConfigPath, plan.ConfigSHA256}} {
-		if actual, hashErr := hashFile(file.path); hashErr != nil || actual != file.hash {
-			return errors.New("production server installed identity mismatch")
-		}
-	}
-	if !serviceRunning(plan.ServiceName) {
-		return errors.New("production server service is not running")
-	}
-	return nil
-}
-
-func (b *windowsBackend) removeProductionServer(runID string) error {
-	plan, err := productionServerPlan(b.manifest, b.config.ServerConfigPath, b.config.ServerConfigSHA256, b.config.ServerListenerEndpoint)
-	if err != nil {
-		return err
-	}
-	installRoot, dataRoot := filepath.Dir(plan.ServicePath), filepath.Dir(plan.ConfigPath)
-	if directoryExists(installRoot) {
-		if err := readServerOwner(installRoot, runID); err != nil {
-			return err
-		}
-	}
-	if directoryExists(dataRoot) {
-		if err := readServerOwner(dataRoot, runID); err != nil {
-			return err
-		}
-	}
-	manager, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer manager.Disconnect()
-	service, openErr := manager.OpenService(plan.ServiceName)
-	if openErr == nil {
-		config, configErr := service.Config()
-		if configErr != nil {
-			service.Close()
-			return configErr
-		}
-		if !strings.EqualFold(filepath.Clean(config.BinaryPathName), filepath.Clean(plan.ServicePath)) {
-			service.Close()
-			return errors.New("production server service is not fixture-owned")
-		}
-		_, _ = service.Control(svc.Stop)
-		_ = waitService(service, svc.Stopped)
-		deleteErr := service.Delete()
-		service.Close()
-		if deleteErr != nil {
-			return deleteErr
-		}
-	} else if !errors.Is(openErr, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return openErr
-	}
-	for _, path := range []string{plan.ConfigPath, filepath.Join(dataRoot, "runtime-manifest.json"), plan.CorePath, plan.ServicePath} {
-		if removeErr := removeIfExists(path); removeErr != nil {
-			return removeErr
-		}
-	}
-	for _, root := range []string{dataRoot, installRoot} {
-		if !directoryExists(root) {
-			continue
-		}
-		if removeErr := os.Remove(filepath.Join(root, serverOwnerMarker)); removeErr != nil {
-			return removeErr
-		}
-		if removeErr := os.Remove(root); removeErr != nil {
-			return errors.New("production server owned root contains unexpected residue")
-		}
-	}
-	return nil
-}
-
-func directoryExists(path string) bool { info, err := os.Stat(path); return err == nil && info.IsDir() }
 
 func mustInstalledFiles(payload fixtureconfig.PayloadManifest) []fixtureconfig.InstalledPayload {
 	files, _ := payload.InstalledFiles()

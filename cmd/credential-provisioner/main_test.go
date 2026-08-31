@@ -9,7 +9,11 @@ import (
 )
 
 func validCredential() []byte {
-	return []byte(`{"method":"2022-blake3-aes-128-gcm","password":"never-print-this","expires_at":"2099-01-01T00:00:00Z"}`)
+	return []byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.15:18443","password":"never-print-this","expires_at":"2099-01-01T00:00:00Z"}`)
+}
+
+func validContractArgs() []string {
+	return []string{"--expected-method", "2022-blake3-aes-128-gcm", "--expected-endpoint", "172.20.9.15:18443", "--expected-expires-at", "2099-01-01T00:00:00Z"}
 }
 
 func TestRunProvisionerUsesOnlyNonTerminalStdinAndFixedPath(t *testing.T) {
@@ -19,11 +23,16 @@ func TestRunProvisionerUsesOnlyNonTerminalStdinAndFixedPath(t *testing.T) {
 		terminal bool
 	}{
 		{name: "argument", args: []string{"--password", "forbidden"}},
+		{name: "missing contract", args: nil},
 		{name: "terminal", terminal: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
-			if got := runProvisioner(test.args, bytes.NewReader(validCredential()), test.terminal, &strings.Builder{}, &strings.Builder{}, func(string, []byte) error { called = true; return nil }); got == 0 || called {
+			args := test.args
+			if test.terminal {
+				args = validContractArgs()
+			}
+			if got := runProvisioner(args, bytes.NewReader(validCredential()), test.terminal, &strings.Builder{}, &strings.Builder{}, func(string, []byte) error { called = true; return nil }); got == 0 || called {
 				t.Fatalf("exit=%d storeCalled=%v", got, called)
 			}
 		})
@@ -32,7 +41,7 @@ func TestRunProvisionerUsesOnlyNonTerminalStdinAndFixedPath(t *testing.T) {
 	var storedPath string
 	var stored []byte
 	var stdout, stderr strings.Builder
-	got := runProvisioner(nil, bytes.NewReader(validCredential()), false, &stdout, &stderr, func(path string, plaintext []byte) error {
+	got := runProvisioner(validContractArgs(), bytes.NewReader(validCredential()), false, &stdout, &stderr, func(path string, plaintext []byte) error {
 		storedPath = path
 		stored = append([]byte(nil), plaintext...)
 		return nil
@@ -46,17 +55,21 @@ func TestRunProvisionerUsesOnlyNonTerminalStdinAndFixedPath(t *testing.T) {
 }
 
 func TestProvisionCredentialRejectsInvalidInputAndZeroesCallerBuffer(t *testing.T) {
+	contract := credentialContract{Method: "2022-blake3-aes-128-gcm", Endpoint: "172.20.9.15:18443", ExpiresAt: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)}
 	invalid := [][]byte{
 		{},
-		[]byte(`{"method":"x","password":"","expires_at":"2099-01-01T00:00:00Z"}`),
-		[]byte(`{"method":"x","password":"secret","expires_at":"2000-01-01T00:00:00Z"}`),
-		[]byte(`{"method":"x","password":"secret","expires_at":"2099-01-01T00:00:00Z","extra":true}`),
+		[]byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.15:18443","password":"","expires_at":"2099-01-01T00:00:00Z"}`),
+		[]byte(`{"method":"other","endpoint":"172.20.9.15:18443","password":"secret","expires_at":"2099-01-01T00:00:00Z"}`),
+		[]byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.16:18443","password":"secret","expires_at":"2099-01-01T00:00:00Z"}`),
+		[]byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.15:18443","password":"secret","expires_at":"2099-01-02T00:00:00Z"}`),
+		[]byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.15:18443","password":"secret","expires_at":"2000-01-01T00:00:00Z"}`),
+		[]byte(`{"method":"2022-blake3-aes-128-gcm","endpoint":"172.20.9.15:18443","password":"secret","expires_at":"2099-01-01T00:00:00Z","extra":true}`),
 		[]byte("{}\n{}"),
 	}
 	for _, input := range invalid {
 		original := append([]byte(nil), input...)
 		called := false
-		err := provisionCredential(input, time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC), func(string, []byte) error { called = true; return nil })
+		err := provisionCredential(input, time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC), contract, func(string, []byte) error { called = true; return nil })
 		if err == nil || called {
 			t.Fatalf("input %q err=%v called=%v", original, err, called)
 		}
@@ -72,7 +85,7 @@ func TestProvisionCredentialRejectsInvalidInputAndZeroesCallerBuffer(t *testing.
 func TestRunProvisionerBoundsInputAndRedactsStoreFailure(t *testing.T) {
 	oversize := bytes.Repeat([]byte{'x'}, maxCredentialBytes+1)
 	var stderr strings.Builder
-	if got := runProvisioner(nil, bytes.NewReader(oversize), false, &strings.Builder{}, &stderr, func(string, []byte) error { return nil }); got == 0 {
+	if got := runProvisioner(validContractArgs(), bytes.NewReader(oversize), false, &strings.Builder{}, &stderr, func(string, []byte) error { return nil }); got == 0 {
 		t.Fatal("oversize input succeeded")
 	}
 	if strings.Contains(stderr.String(), strings.Repeat("x", 20)) {
@@ -80,7 +93,7 @@ func TestRunProvisionerBoundsInputAndRedactsStoreFailure(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if got := runProvisioner(nil, bytes.NewReader(validCredential()), false, &strings.Builder{}, &stderr, func(string, []byte) error { return errors.New("backend included never-print-this") }); got == 0 {
+	if got := runProvisioner(validContractArgs(), bytes.NewReader(validCredential()), false, &strings.Builder{}, &stderr, func(string, []byte) error { return errors.New("backend included never-print-this") }); got == 0 {
 		t.Fatal("store failure succeeded")
 	}
 	if stderr.String() != "credential provisioning failed\n" {

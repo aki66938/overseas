@@ -7,6 +7,8 @@ import (
 )
 
 var sha1Thumbprint = regexp.MustCompile(`^[A-Fa-f0-9]{40}$`)
+var sha256Digest = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var sourceCommit = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 type payloadInput struct {
 	ProgramFiles string
@@ -16,7 +18,14 @@ type payloadInput struct {
 	Thumbprint   string
 }
 
+type bundleInput struct {
+	Bundle, MSI, FixtureManifest, FixtureSignature, ReleaseManifest, ReleaseSignature string
+	ExpectedCommit, ExpectedMSISHA256, ExpectedFixtureSHA256, ExpectedReleaseSHA256   string
+	FixtureSigner, ReleaseSigner, MSISigner, Evidence                                 string
+}
+
 type trustVerifier interface {
+	verifyBundle(bundleInput) error
 	verifyPackage(msi, thumbprint string) error
 	verifyPayload(payloadInput) error
 	installFirewall() error
@@ -27,6 +36,18 @@ type trustVerifier interface {
 
 func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 	switch {
+	case validBundleArguments(args):
+		input := bundleInput{
+			Bundle: args[2], MSI: args[4], FixtureManifest: args[6], FixtureSignature: args[8],
+			ReleaseManifest: args[10], ReleaseSignature: args[12], ExpectedCommit: args[14],
+			ExpectedMSISHA256: args[16], ExpectedFixtureSHA256: args[18], ExpectedReleaseSHA256: args[20],
+			FixtureSigner: args[22], ReleaseSigner: args[24], MSISigner: args[26], Evidence: args[28],
+		}
+		if err := verifier.verifyBundle(input); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "pre-install bundle verification failed")
+			return 1
+		}
+		return 0
 	case len(args) == 5 && args[0] == "package" && args[1] == "--msi" && args[3] == "--thumbprint" && sha1Thumbprint.MatchString(args[4]):
 		if err := verifier.verifyPackage(args[2], args[4]); err != nil {
 			_, _ = fmt.Fprintln(errorOutput, "installer trust verification failed")
@@ -68,4 +89,17 @@ func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 		_, _ = fmt.Fprintln(errorOutput, "installer trust verification failed")
 		return 2
 	}
+}
+
+func validBundleArguments(args []string) bool {
+	if len(args) != 29 || args[0] != "verify-bundle" {
+		return false
+	}
+	flags := []string{"--bundle", "--msi", "--fixture-manifest", "--fixture-signature", "--release-manifest", "--release-signature", "--expected-commit", "--expected-msi-sha256", "--expected-fixture-sha256", "--expected-release-sha256", "--fixture-signer", "--release-signer", "--msi-signer", "--evidence"}
+	for index, flag := range flags {
+		if args[1+index*2] != flag || args[2+index*2] == "" {
+			return false
+		}
+	}
+	return sourceCommit.MatchString(args[14]) && sha256Digest.MatchString(args[16]) && sha256Digest.MatchString(args[18]) && sha256Digest.MatchString(args[20]) && sha1Thumbprint.MatchString(args[22]) && sha1Thumbprint.MatchString(args[24]) && sha1Thumbprint.MatchString(args[26])
 }

@@ -2,6 +2,7 @@ package fixtureconfig
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -75,28 +76,29 @@ type InstalledPayload struct {
 }
 
 type ActionConfig struct {
-	SchemaVersion            int    `json:"schema_version"`
-	PowerShellPath           string `json:"powershell_path"`
-	InstallerScriptPath      string `json:"installer_script_path"`
-	BundlePath               string `json:"bundle_path"`
-	PayloadManifestPath      string `json:"payload_manifest_path"`
-	GeneratedConfigPath      string `json:"generated_config_path"`
-	ServerConfigPath         string `json:"server_config_path"`
-	ServerConfigSHA256       string `json:"server_config_sha256"`
-	ServerListenerEndpoint   string `json:"server_listener_endpoint"`
-	ServerAttestationPath    string `json:"server_attestation_path"`
-	ServerAttestationSHA256  string `json:"server_attestation_sha256"`
-	ServerHostKeyFingerprint string `json:"server_host_key_fingerprint"`
-	CredentialSourcePath     string `json:"credential_source_path"`
-	CredentialSourceSHA256   string `json:"credential_source_sha256"`
-	FixtureManifestPath      string `json:"fixture_manifest_path"`
-	SentinelPath             string `json:"sentinel_path"`
-	ActionHelperPath         string `json:"action_helper_path"`
-	FakeDataEndpoint         string `json:"fake_data_endpoint"`
-	FakeControlEndpoint      string `json:"fake_control_endpoint"`
-	PublicDataEndpoint       string `json:"public_data_endpoint"`
-	FakeIdentity             string `json:"fake_identity"`
-	CredentialExpiresAt      string `json:"credential_expires_at"`
+	SchemaVersion             int    `json:"schema_version"`
+	PowerShellPath            string `json:"powershell_path"`
+	InstallerScriptPath       string `json:"installer_script_path"`
+	BundlePath                string `json:"bundle_path"`
+	PayloadManifestPath       string `json:"payload_manifest_path"`
+	GeneratedConfigPath       string `json:"generated_config_path"`
+	ServerConfigPath          string `json:"server_config_path"`
+	ServerConfigSHA256        string `json:"server_config_sha256"`
+	ServerListenerEndpoint    string `json:"server_listener_endpoint"`
+	ServerAttestationPath     string `json:"server_attestation_path"`
+	ServerAttestationSHA256   string `json:"server_attestation_sha256"`
+	ServerHostKeyFingerprint  string `json:"server_host_key_fingerprint"`
+	ServerAttestationRunNonce string `json:"server_attestation_run_nonce"`
+	CredentialSourcePath      string `json:"credential_source_path"`
+	CredentialSourceSHA256    string `json:"credential_source_sha256"`
+	FixtureManifestPath       string `json:"fixture_manifest_path"`
+	SentinelPath              string `json:"sentinel_path"`
+	ActionHelperPath          string `json:"action_helper_path"`
+	FakeDataEndpoint          string `json:"fake_data_endpoint"`
+	FakeControlEndpoint       string `json:"fake_control_endpoint"`
+	PublicDataEndpoint        string `json:"public_data_endpoint"`
+	FakeIdentity              string `json:"fake_identity"`
+	CredentialExpiresAt       string `json:"credential_expires_at"`
 }
 
 func ParseActionConfig(data []byte) (ActionConfig, error) {
@@ -156,8 +158,11 @@ func (c ActionConfig) Validate(manifest Manifest, fakeData, fakeControl, publicD
 	if !validSHA256(c.CredentialSourceSHA256) {
 		return errors.New("action config credential source hash is invalid")
 	}
-	if !strings.HasPrefix(c.ServerHostKeyFingerprint, "SHA256:") || strings.TrimSpace(strings.TrimPrefix(c.ServerHostKeyFingerprint, "SHA256:")) == "" {
+	if !ValidServerHostKeyFingerprint(c.ServerHostKeyFingerprint) {
 		return errors.New("action config server host key fingerprint is invalid")
+	}
+	if !validRunNonce(c.ServerAttestationRunNonce) {
+		return errors.New("action config server attestation run nonce is invalid")
 	}
 	if _, _, err := parseSafeEndpoint(c.ServerListenerEndpoint); err != nil {
 		return errors.New("action config server listener endpoint is invalid")
@@ -716,6 +721,7 @@ type ServerAttestation struct {
 	SchemaVersion       int    `json:"schema_version"`
 	HostIdentity        string `json:"host_identity"`
 	HostKeyFingerprint  string `json:"host_key_fingerprint"`
+	RunNonce            string `json:"run_nonce"`
 	ObservedAt          string `json:"observed_at"`
 	ListenerEndpoint    string `json:"listener_endpoint"`
 	ServiceName         string `json:"service_name"`
@@ -733,6 +739,15 @@ type ServerAttestation struct {
 	ListenerImageSHA256 string `json:"listener_image_sha256"`
 }
 
+const (
+	serverHostIdentity = "DESKTOP-1BVR2H6"
+	serverServicePath  = `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`
+	serverCorePath     = `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`
+	serverConfigPath   = `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`
+	serverMaxAge       = 24 * time.Hour
+	serverFutureSkew   = 5 * time.Minute
+)
+
 func ParseServerAttestation(data []byte) (ServerAttestation, error) {
 	var value ServerAttestation
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -746,18 +761,32 @@ func ParseServerAttestation(data []byte) (ServerAttestation, error) {
 	return value, nil
 }
 
-func (a ServerAttestation) Validate(manifest Manifest, expectedEndpoint, expectedConfigSHA256, expectedHostKeyFingerprint string) error {
+func (a ServerAttestation) Validate(manifest Manifest, expectedEndpoint, expectedConfigSHA256, expectedHostKeyFingerprint, expectedRunNonce string) error {
+	return a.ValidateAt(manifest, expectedEndpoint, expectedConfigSHA256, expectedHostKeyFingerprint, expectedRunNonce, time.Now().UTC())
+}
+
+func (a ServerAttestation) ValidateAt(manifest Manifest, expectedEndpoint, expectedConfigSHA256, expectedHostKeyFingerprint, expectedRunNonce string, now time.Time) error {
 	if a.SchemaVersion != 1 {
 		return errors.New("server attestation schema mismatch")
 	}
-	if strings.TrimSpace(a.HostIdentity) == "" {
-		return errors.New("server attestation host identity is required")
+	if a.HostIdentity != serverHostIdentity {
+		return errors.New("server attestation host identity mismatch")
 	}
-	if a.HostKeyFingerprint != expectedHostKeyFingerprint {
+	if !ValidServerHostKeyFingerprint(expectedHostKeyFingerprint) || a.HostKeyFingerprint != expectedHostKeyFingerprint {
 		return errors.New("server attestation host key fingerprint mismatch")
 	}
-	if _, err := time.Parse(time.RFC3339, a.ObservedAt); err != nil {
+	if !validRunNonce(expectedRunNonce) || a.RunNonce != expectedRunNonce {
+		return errors.New("server attestation run nonce mismatch")
+	}
+	observed, err := time.Parse(time.RFC3339, a.ObservedAt)
+	if err != nil {
 		return errors.New("server attestation observation time is invalid")
+	}
+	if observed.After(now.Add(serverFutureSkew)) {
+		return errors.New("server attestation observation time is in the future")
+	}
+	if observed.Before(now.Add(-serverMaxAge)) {
+		return errors.New("server attestation observation is not fresh")
 	}
 	if a.ListenerEndpoint != expectedEndpoint {
 		return errors.New("server attestation listener endpoint mismatch")
@@ -765,12 +794,16 @@ func (a ServerAttestation) Validate(manifest Manifest, expectedEndpoint, expecte
 	if a.ServiceName != "RegenBioOverseasAccessServer" {
 		return errors.New("server attestation service name mismatch")
 	}
-	for name, path := range map[string]string{
-		"service": a.ServicePath, "core": a.CorePath, "config": a.ConfigPath, "listener image": a.ListenerImagePath,
+	for name, value := range map[string]struct{ got, want string }{
+		"service": {a.ServicePath, serverServicePath}, "core": {a.CorePath, serverCorePath},
+		"config": {a.ConfigPath, serverConfigPath}, "listener image": {a.ListenerImagePath, serverCorePath},
 	} {
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-			return fmt.Errorf("server attestation %s path is invalid", name)
+		if value.got != value.want || !filepath.IsAbs(value.got) || filepath.Clean(value.got) != value.got {
+			return fmt.Errorf("server attestation %s path mismatch", name)
 		}
+	}
+	if a.ListenerImagePath != a.CorePath {
+		return errors.New("server attestation listener image path differs from core path")
 	}
 	if !validSHA256(a.ServiceSHA256) || a.ServiceSHA256 != manifest.Artifacts["server-service"].SHA256 {
 		return errors.New("server attestation service hash mismatch")
@@ -794,6 +827,28 @@ func (a ServerAttestation) Validate(manifest Manifest, expectedEndpoint, expecte
 		return errors.New("server attestation listener pid mismatch")
 	}
 	return nil
+}
+
+func ValidServerHostKeyFingerprint(value string) bool {
+	const prefix = "SHA256:"
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
+	return err == nil && len(decoded) == 32
+}
+
+func validRunNonce(value string) bool {
+	if len(value) < 16 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func equalStrings(got, want []string) bool {

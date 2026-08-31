@@ -170,6 +170,16 @@ function Assert-GuardedNativeCommand {
 }
 
 Describe 'sing-box PoC deployment and acceptance runbook' {
+	It 'contains syntactically valid PowerShell blocks' {
+		$runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
+		$blocks = [regex]::Matches($runbook, '(?ms)^```powershell\r?\n(.*?)^```\s*$')
+		Assert-True -Condition ($blocks.Count -gt 0) -Message 'Runbook has no PowerShell blocks.'
+		foreach ($block in $blocks) {
+			try { [void] [scriptblock]::Create($block.Groups[1].Value) }
+			catch { throw "Runbook PowerShell block does not parse: $($_.Exception.Message)" }
+		}
+	}
+
     It 'exists and records fixed facts and external inputs without live opt-in' {
         Assert-True -Condition (Test-Path -LiteralPath $singBoxRunbookPath -PathType Leaf) -Message "Runbook is missing: $singBoxRunbookPath"
         $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
@@ -189,6 +199,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'source commit',
             'credential-source',
             'server-attestation.json',
+			'server_attestation_run_nonce',
             'The only allowed runtime sing-box client config is the product-owned ACL-protected runtime file'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required runbook input or fact.'
@@ -213,7 +224,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'STOP/GO — rollback',
             'deploy\server\install-server.ps1 -Mode Rollback',
             'msiexec.exe /x $CorporateSignedMsiPath /qn /norestart',
-            'Remove the standard sing-box configuration before the MSI gate'
+			'Confirm the standard sing-box process is gone'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required stop/go or rollback contract.'
         }
@@ -227,12 +238,12 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath' -Prefix 'VmFacts'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath' -Prefix 'VmBaseline'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath' -Prefix 'TelecomConnect'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath' -Prefix 'ServerWhatIf'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath' -Prefix 'ServerInstall'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath' -Prefix 'ServerStatus'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath' -Prefix 'ServerAttestation'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath' -Prefix 'ServerAttestation'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath' -Prefix 'ServerRollback'
 
         $runbook = $lines -join "`n"
@@ -244,17 +255,28 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             '-Mode Install', '-Mode Status', '-Mode Rollback', '-WhatIf',
             'Compare-CanonicalStateSnapshots',
             'zero changes after WhatIf',
-            'server-WhatIf filesystem registry scheduled tasks server-owned state'
+			'server-WhatIf filesystem registry scheduled tasks server-owned state',
+			'filesystem', 'registry', 'scheduled_tasks', 'server_service', 'server_firewall', 'server_owned_state',
+			'host_key_fingerprint', 'run_nonce', 'service_sha256', 'core_sha256', 'config_sha256',
+			'service_pid', 'core_pid', 'core_parent_pid', 'listener_image_path', 'listener_image_sha256',
+			'$PinnedKnownHostsFingerprint -cne $ActualHostKeyFingerprint',
+			'$ServerAttestationValue.host_identity -cne ''DESKTOP-1BVR2H6''',
+			'$ServerAttestationValue.run_nonce -cne $ServerAttestationRunNonce'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required VM evidence or server-operation contract.'
         }
+
+		$canonicalLine = @($lines | Where-Object { $_ -like '$VmCanonicalStateCommand =*' })
+		Assert-Equal -Actual $canonicalLine.Count -Expected 1 -Message 'Canonical WhatIf command must be declared exactly once.'
+		Assert-NotMatches -Text $canonicalLine[0] -Pattern 'Get-Process|Test-NetConnection|captured_utc|ObservedAt|ProcessId' -Message 'Canonical WhatIf snapshot contains volatile state.'
     }
 
     It 'gates the standard client, MSI verification, pipe-only provisioning, and lifecycle capture' {
         $lines = Get-SingBoxRunbookLines
         $runbook = $lines -join "`n"
 
-        Assert-GuardedNativeCommand -Lines $lines -Command '& $InstallerVerifierPath verify-bundle --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --payload-manifest $PayloadManifestPath --payload-signature $PayloadManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-signer $CorporateSignerThumbprint --evidence $VerifierEvidencePath' -Prefix 'InstallerVerifier'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& $StagedVerifierPath verify-bundle --bundle $ReleaseBundlePath --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --release-manifest $ReleaseArtifactManifestPath --release-signature $ReleaseArtifactManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-msi-sha256 $ExpectedMsiSha256 --expected-fixture-sha256 $ExpectedFixtureManifestSha256 --expected-release-sha256 $ExpectedReleaseManifestSha256 --fixture-signer $FixtureManifestSignerThumbprint --release-signer $ReleaseManifestSignerThumbprint --msi-signer $MsiSignerThumbprint --evidence $VerifierEvidencePath' -Prefix 'InstallerVerifier'
+		Assert-GuardedNativeCommand -Lines $lines -Command '& $ActionHelperPath provision-credential' -Prefix 'CredentialProvisioning'
         Assert-GuardedNativeCommand -Lines $lines -Command '& git.exe ls-remote $ApprovedGitProbeRepository > $GitProbePath' -Prefix 'GitProbe'
         Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $AgentCapture.pid /T /F' -Prefix 'AgentKill'
         Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $CoreCapture.pid /T /F' -Prefix 'CoreKill'
@@ -266,13 +288,19 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         foreach ($text in @(
             'standard-client gate PASS is required before custom MSI',
             'Get-AuthenticodeSignature', '$CorporateSignerThumbprint',
-            'Get-FileHash', '$StandardSingBoxSha256', '$StandardClientConfigSha256',
-            'Start-Process -FilePath $StandardSingBoxPath -ArgumentList @(''run'',''-c'',$StandardClientConfigPath) -WindowStyle Hidden -PassThru',
+			'Get-FileHash', '$StandardSingBoxSha256', '$StandardClientTemplateSha256',
+			'sing-box version 1.13.19', 'Test-SingBoxStdinConfigSupport',
+			'$StandardStartInfo.Arguments = ''run -c stdin''',
+			'$StandardStartInfo.RedirectStandardInput = $true',
+			'$StandardClientProcess.StandardInput.Write($StandardRuntimeJson)',
+			"`$StandardInbound = @(`$StandardTemplate.inbounds | Where-Object { `$_.type -eq 'tun' -and `$_.interface_name -ceq 'RegenBioStandardAcceptance' })",
+			'if ($StandardInbound.Count -ne 1)',
             '$StandardClientProcess.HasExited',
-            'Stop-Process -Id $StandardClientProcess.Id -Force',
-            'Invoke-PipeOnlyProvisioning -CredentialSourcePath $CredentialSourcePath -ProvisionerPath $ProvisionerPath',
-            'AnonymousPipeServerStream',
-            'Credential prompt: enter the one-time secret only at the console attached to the credential source',
+			'$StandardClientProcess.Kill()', '$StandardClientProcess.WaitForExit()', '$StandardClientProcess.Dispose()',
+			'$StandardTunnel[0].password = $null', '$StandardTemplate = $null',
+			'$env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG = $ActionConfigPath',
+			'finally { Remove-Item Env:OVERSEAS_ACCESS_FIXTURE_ACTION_CONFIG -ErrorAction SilentlyContinue }',
+			'provision-credential', 'source stdout is connected directly to provisioner stdin by the Go helper',
             'Install must leave the agent stopped before provisioning.',
             'credential.bin was not created',
             'Agent service did not reach Running after provisioning',
@@ -283,7 +311,9 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'nonce receipt', 'leak receipt', 'route/DNS/firewall snapshots',
             'redacted logs', 'one full workday',
             'Never accept preset PID variables',
-            'Capture-ManagedProcess'
+			'Capture-ManagedProcess',
+			"`$CoreCapture = Capture-ManagedProcess -ParentServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\Program Files\RegenBio\OverseasAccess\sing-box.exe'",
+			"`$UiCapture = Capture-ManagedProcess -ExpectedPath 'C:\Program Files\RegenBio\OverseasAccess\overseas-client.exe'"
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required client acceptance contract.'
         }
@@ -291,6 +321,8 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         Assert-NotMatches -Text $runbook -Pattern '\$AgentProcessId\b' -Message 'Runbook must not rely on preset agent PID variables.'
         Assert-NotMatches -Text $runbook -Pattern '\$CoreProcessId\b' -Message 'Runbook must not rely on preset core PID variables.'
         Assert-NotMatches -Text $runbook -Pattern '\$UiProcessId\b' -Message 'Runbook must not rely on preset UI PID variables.'
+		Assert-NotMatches -Text $runbook -Pattern 'AnonymousPipeServerStream|RedirectStandardInput\s+\$clientHandle|\$StandardClientConfigPath|run'',''-c'',\$StandardClient' -Message 'Runbook must not stage plaintext or fake a pipe handle.'
+		Assert-NotMatches -Text $runbook -Pattern "Capture-ManagedProcess -ServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\\Program Files\\RegenBio\\OverseasAccess\\(sing-box|overseas-client)\.exe'" -Message 'Core/UI capture must not reuse the agent SCM PID.'
     }
 
     It 'requires evidence collection, zero-drift comparison, and a fail verdict on mandatory failure' {
@@ -298,7 +330,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         foreach ($text in @(
             'Get-FileHash', 'Compress-Archive', 'baseline-vm.json', 'baseline-physical.json',
             'server-whatif.json', 'server-install.json', 'server-status.json',
-            'server-rollback.json', 'server-attestation.json', 'standard-client.json', 'custom-client.json',
+			'server-rollback.json', 'server-attestation.json', 'standard-client-evidence.json', 'custom-client.json',
             'lifecycle-20-cycles.json', 'installer-verifier.json', 'verdict.json',
             'FAIL', 'Never label a partial test PASS', 'zero changes after WhatIf',
             'Compare-CanonicalStateSnapshots', 'filesystem', 'registry', 'scheduled tasks', 'server-owned state'

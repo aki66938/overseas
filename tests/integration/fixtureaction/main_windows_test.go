@@ -6,11 +6,52 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"corp.example/overseas-access-gateway/tests/integration/fixtureproto"
 )
+
+func TestCredentialPipelineUsesConnectedAnonymousPipeAndNoParentSecretChannels(t *testing.T) {
+	_, current, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller path unavailable")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(current), "main_windows.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{"os.Pipe()", "provisioner.Stdin = readPipe", "sourceCommand.Stdout = writePipe", "plan.ProvisionerArgs...", "plan.SourceArgs...", `os.Args[1] == "provision-credential"`, "backend.provisionCredential(ctx)"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("credential pipeline lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{"sourceCommand.Stdin,", "sourceCommand.Stdin = os.Stdin", "sourceCommand.Stderr = os.Stderr", "provisioner.Stderr = os.Stderr"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("credential pipeline exposes parent channel %q", forbidden)
+		}
+	}
+}
+
+func TestPhysicalClientActionHelperContainsNoLocalServerLifecycle(t *testing.T) {
+	_, current, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller path unavailable")
+	}
+	for _, name := range []string{"action.go", "main_windows.go"} {
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(current), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"productionServerPlan", "setupProductionServer", "removeProductionServer", "verifyProductionServer", "serverOwnerMarker", "RegenBioFixtureServerOwner"} {
+			if strings.Contains(string(data), forbidden) {
+				t.Fatalf("%s retains dead local-server symbol %q", name, forbidden)
+			}
+		}
+	}
+}
 
 func TestRequireCleanBaselineRejectsAnyPreexistingClientState(t *testing.T) {
 	writeSnapshot := func(t *testing.T, snapshot fixtureproto.Snapshot) string {

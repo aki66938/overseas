@@ -29,6 +29,91 @@ func (windowsTrustVerifier) verifyPackage(msi, thumbprint string) error {
 	return runPowerShell(script, msi, thumbprint)
 }
 
+const verifyBundleScript = `$ErrorActionPreference='Stop'
+function Assert-OrdinaryFile([string]$Path) {
+  if(-not [IO.Path]::IsPathRooted($Path) -or -not(Test-Path -LiteralPath $Path -PathType Leaf)){throw 'required file is absent'}
+  $item=Get-Item -LiteralPath $Path -Force
+  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse file refused'}
+}
+function Assert-OrdinaryDirectory([string]$Path) {
+  if(-not [IO.Path]::IsPathRooted($Path) -or -not(Test-Path -LiteralPath $Path -PathType Container)){throw 'required directory is absent'}
+  $item=Get-Item -LiteralPath $Path -Force
+  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse directory refused'}
+}
+function Get-SHA256([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Assert-ExactProperties($Object,[string[]]$Names,[string]$Label) {
+  $actual=@($Object.PSObject.Properties.Name|Sort-Object)
+  $expected=@($Names|Sort-Object)
+  if($actual.Count-ne$expected.Count-or (Compare-Object -ReferenceObject $expected -DifferenceObject $actual)){throw "$Label schema mismatch"}
+}
+function Assert-Detached([byte[]]$Bytes,[string]$SignaturePath,[string]$Signer) {
+  Assert-OrdinaryFile $SignaturePath
+  Add-Type -AssemblyName System.Security
+  $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$Bytes)
+  $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true)
+  $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($SignaturePath).Trim()))
+  $cms.CheckSignature($true)
+  if($cms.SignerInfos.Count-ne 1-or$null-eq$cms.SignerInfos[0].Certificate-or$cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant()-cne$Signer.ToUpperInvariant()){throw 'detached signer mismatch'}
+}
+function Assert-Authenticode([string]$Path,[string[]]$Signers) {
+  $signature=Get-AuthenticodeSignature -LiteralPath $Path
+  if($signature.Status-ne'Valid'-or$null-eq$signature.SignerCertificate-or$Signers-notcontains$signature.SignerCertificate.Thumbprint.ToUpperInvariant()){throw 'Authenticode signer mismatch'}
+}
+$bundle=$args[0];$msi=$args[1];$fixturePath=$args[2];$fixtureSignature=$args[3];$releasePath=$args[4];$releaseSignature=$args[5]
+$expectedCommit=$args[6];$expectedMSI=$args[7];$expectedFixture=$args[8];$expectedRelease=$args[9]
+$fixtureSigner=$args[10].ToUpperInvariant();$releaseSigner=$args[11].ToUpperInvariant();$msiSigner=$args[12].ToUpperInvariant();$evidence=$args[13]
+Assert-OrdinaryDirectory $bundle
+foreach($path in @($msi,$fixturePath,$fixtureSignature,$releasePath,$releaseSignature)){Assert-OrdinaryFile $path}
+if((Get-SHA256 $msi)-cne$expectedMSI-or(Get-SHA256 $fixturePath)-cne$expectedFixture-or(Get-SHA256 $releasePath)-cne$expectedRelease){throw 'externally pinned hash mismatch'}
+Assert-Authenticode $msi @($msiSigner)
+$fixtureBytes=[IO.File]::ReadAllBytes($fixturePath);Assert-Detached $fixtureBytes $fixtureSignature $fixtureSigner
+$fixture=[Text.Encoding]::UTF8.GetString($fixtureBytes)|ConvertFrom-Json
+Assert-ExactProperties $fixture @('schema_version','corporate_cidrs','corporate_dns','internal_suffixes','artifacts') 'fixture-manifest'
+if($fixture.schema_version-ne 1-or@($fixture.corporate_cidrs).Count-eq 0-or@($fixture.corporate_dns).Count-eq 0-or@($fixture.internal_suffixes).Count-eq 0){throw 'fixture-manifest values invalid'}
+$artifactRoles=@('action-helper','agent','capture-script','core','driver','installer','powershell','sentinel','server-service','ui')
+Assert-ExactProperties $fixture.artifacts $artifactRoles 'fixture-manifest artifacts'
+foreach($role in $artifactRoles){
+  $artifact=$fixture.artifacts.$role;$allowed=@('path','sha256');if($role-in@('agent','core','server-service','ui')){$allowed+=,'installed_path'}
+  Assert-ExactProperties $artifact $allowed "fixture artifact $role"
+  if([string]$artifact.path-eq''-or[string]$artifact.sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'fixture artifact invalid'}
+  Assert-OrdinaryFile ([string]$artifact.path)
+  if((Get-SHA256 ([string]$artifact.path))-cne[string]$artifact.sha256){throw 'fixture artifact hash mismatch'}
+}
+$releaseBytes=[IO.File]::ReadAllBytes($releasePath);Assert-Detached $releaseBytes $releaseSignature $releaseSigner
+$release=[Text.Encoding]::UTF8.GetString($releaseBytes)|ConvertFrom-Json
+Assert-ExactProperties $release @('schema_version','product_version','source_commit','mode','signer_thumbprints','files') 'release manifest'
+if($release.schema_version-ne 1-or[string]$release.product_version-cne'0.1.0'-or[string]$release.source_commit-cne$expectedCommit-or[string]$release.mode-cne'release'){throw 'release expected commit/schema mismatch'}
+$manifestSigners=@($release.signer_thumbprints|ForEach-Object{([string]$_).ToUpperInvariant()})
+if($manifestSigners.Count-eq 0-or@($manifestSigners|Sort-Object -Unique).Count-ne$manifestSigners.Count-or$manifestSigners-notcontains$releaseSigner-or@($manifestSigners|Where-Object{$_-cnotmatch'^[A-F0-9]{40}$'}).Count-ne 0){throw 'release signer_thumbprints invalid'}
+$expectedPayloadNames=@('PROVISIONING.md','SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','credential-provisioner.exe','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll')
+$names=@($release.files|ForEach-Object{[string]$_.name})
+if($names.Count-ne$expectedPayloadNames.Count-or@($names|Sort-Object -Unique).Count-ne$expectedPayloadNames.Count-or(Compare-Object -ReferenceObject ($expectedPayloadNames|Sort-Object) -DifferenceObject ($names|Sort-Object))){throw 'release manifest exact payload allowlist mismatch'}
+$programDataNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json')
+$authenticodeNames=@('credential-provisioner.exe','installer-verifier.exe','overseas-agent.exe','overseas-client.exe','wintun.dll')
+foreach($entry in @($release.files)){
+  Assert-ExactProperties $entry @('name','destination','sha256','authenticode_required','authenticode_thumbprints') 'release payload entry'
+  $name=[string]$entry.name;if($name-cnotmatch'^[A-Za-z0-9][A-Za-z0-9._-]*$'-or$name.Contains('..')-or[string]$entry.sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'release payload entry invalid'}
+  $expectedDestination=if($programDataNames-contains$name){'program-data'}else{'program-files'}
+  if([string]$entry.destination-cne$expectedDestination-or[bool]$entry.authenticode_required-ne($authenticodeNames-contains$name)){throw 'release payload policy mismatch'}
+  $path=Join-Path $bundle $name;Assert-OrdinaryFile $path
+  if((Get-SHA256 $path)-cne[string]$entry.sha256){throw 'release payload hash mismatch'}
+  $allowed=@($entry.authenticode_thumbprints|ForEach-Object{([string]$_).ToUpperInvariant()})
+  if([bool]$entry.authenticode_required){if($allowed.Count-eq 0-or@($allowed|Where-Object{$manifestSigners-notcontains$_}).Count-ne 0){throw 'payload signer allowlist mismatch'};Assert-Authenticode $path $allowed}elseif($allowed.Count-ne 0){throw 'unsigned payload declares signers'}
+}
+$bundleNames=@(Get-ChildItem -LiteralPath $bundle -File -Force|ForEach-Object{$_.Name})
+$expectedBundleNames=@($expectedPayloadNames)+@('artifact-manifest.json','artifact-manifest.json.p7s')
+if($bundleNames.Count-ne$expectedBundleNames.Count-or(Compare-Object -ReferenceObject ($expectedBundleNames|Sort-Object) -DifferenceObject ($bundleNames|Sort-Object))){throw 'bundle contains unmanifested files'}
+if([IO.Path]::GetFullPath($releasePath)-cne[IO.Path]::GetFullPath((Join-Path $bundle 'artifact-manifest.json'))-or[IO.Path]::GetFullPath($releaseSignature)-cne[IO.Path]::GetFullPath((Join-Path $bundle 'artifact-manifest.json.p7s'))){throw 'release trust roots are outside bundle'}
+$evidenceDirectory=Split-Path -Parent $evidence;Assert-OrdinaryDirectory $evidenceDirectory
+$record=[ordered]@{schema_version=1;kind='installer-verifier.json';verified=$true;source_commit=$expectedCommit;msi_sha256=$expectedMSI;fixture_manifest_sha256=$expectedFixture;release_manifest_sha256=$expectedRelease;fixture_signer=$fixtureSigner;release_signer=$releaseSigner;msi_signer=$msiSigner;verified_utc=[datetime]::UtcNow.ToString('o')}
+$stream=[IO.File]::Open($evidence,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+try{$writer=New-Object IO.StreamWriter($stream,(New-Object Text.UTF8Encoding($false)));$writer.Write(($record|ConvertTo-Json -Compress));$writer.Flush()}finally{if($null-ne$writer){$writer.Dispose()}else{$stream.Dispose()}}
+`
+
+func (windowsTrustVerifier) verifyBundle(input bundleInput) error {
+	return runPowerShell(verifyBundleScript, input.Bundle, input.MSI, input.FixtureManifest, input.FixtureSignature, input.ReleaseManifest, input.ReleaseSignature, input.ExpectedCommit, input.ExpectedMSISHA256, input.ExpectedFixtureSHA256, input.ExpectedReleaseSHA256, input.FixtureSigner, input.ReleaseSigner, input.MSISigner, input.Evidence)
+}
+
 func (windowsTrustVerifier) verifyPayload(input payloadInput) error {
 	const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $manifestBytes=[IO.File]::ReadAllBytes($args[2]); $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$manifestBytes); $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true); $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[3]).Trim())); $cms.CheckSignature($true); if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $args[4].ToUpperInvariant()) { exit 20 }; $manifest=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json; if ($manifest.schema_version -ne 1 -or @($manifest.files).Count -eq 0) { exit 21 }; foreach($entry in @($manifest.files)){ $name=[string]$entry.name; if($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $name.Contains('..')){exit 22}; $root=switch([string]$entry.destination){'program-files'{$args[0]}'program-data'{$args[1]}default{exit 23}}; $path=Join-Path $root $name; if(-not(Test-Path -LiteralPath $path -PathType Leaf)){exit 24}; if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$entry.sha256).ToUpperInvariant()){exit 25}; if($entry.authenticode_required -eq $true){$signature=Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or @($entry.authenticode_thumbprints|ForEach-Object{$_.ToUpperInvariant()}) -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){exit 26}} }`
 	return runPowerShell(script, input.ProgramFiles, input.ProgramData, input.Manifest, input.Signature, input.Thumbprint)

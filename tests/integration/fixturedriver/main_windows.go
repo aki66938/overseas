@@ -52,6 +52,7 @@ type fixtureConfig struct {
 	ServerAttestationPath        string                      `json:"server_attestation_path"`
 	ServerAttestationSHA256      string                      `json:"server_attestation_sha256"`
 	ServerHostKeyFingerprint     string                      `json:"server_host_key_fingerprint"`
+	ServerAttestationRunNonce    string                      `json:"server_attestation_run_nonce"`
 	ActionConfigPath             string                      `json:"action_config_path"`
 	FixtureManifestPath          string                      `json:"fixture_manifest_path"`
 	FixtureManifestSignaturePath string                      `json:"fixture_manifest_signature_path"`
@@ -103,8 +104,11 @@ func (c fixtureConfig) Validate() error {
 			return fmt.Errorf("%s is invalid", name)
 		}
 	}
-	if !strings.HasPrefix(c.ServerHostKeyFingerprint, "SHA256:") || strings.TrimSpace(strings.TrimPrefix(c.ServerHostKeyFingerprint, "SHA256:")) == "" {
+	if !fixtureconfig.ValidServerHostKeyFingerprint(c.ServerHostKeyFingerprint) {
 		return errors.New("server host key fingerprint is invalid")
+	}
+	if len(c.ServerAttestationRunNonce) < 16 {
+		return errors.New("server attestation run nonce is invalid")
 	}
 	if c.Binding.FakeUpstreamIdentity == "" || c.Binding.PublicSentinelIdentity == "" || c.Binding.CorporateSentinelIdentity == "" {
 		return errors.New("all fixture identities are required")
@@ -211,7 +215,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			if actionConfig.FixtureManifestPath != config.FixtureManifestPath || actionConfig.GeneratedConfigPath != config.GeneratedConfigPath || actionConfig.ServerConfigPath != config.ServerConfigPath || actionConfig.ServerConfigSHA256 != config.Binding.ServerConfigSHA256 || actionConfig.ServerListenerEndpoint != config.Binding.ServerListenerEndpoint || actionConfig.CredentialSourcePath != config.CredentialSourcePath || actionConfig.CredentialSourceSHA256 != config.CredentialSourceSHA256 || actionConfig.ServerAttestationPath != config.ServerAttestationPath || actionConfig.ServerAttestationSHA256 != config.ServerAttestationSHA256 || actionConfig.ServerHostKeyFingerprint != config.ServerHostKeyFingerprint {
+			if actionConfig.FixtureManifestPath != config.FixtureManifestPath || actionConfig.GeneratedConfigPath != config.GeneratedConfigPath || actionConfig.ServerConfigPath != config.ServerConfigPath || actionConfig.ServerConfigSHA256 != config.Binding.ServerConfigSHA256 || actionConfig.ServerListenerEndpoint != config.Binding.ServerListenerEndpoint || actionConfig.CredentialSourcePath != config.CredentialSourcePath || actionConfig.CredentialSourceSHA256 != config.CredentialSourceSHA256 || actionConfig.ServerAttestationPath != config.ServerAttestationPath || actionConfig.ServerAttestationSHA256 != config.ServerAttestationSHA256 || actionConfig.ServerHostKeyFingerprint != config.ServerHostKeyFingerprint || actionConfig.ServerAttestationRunNonce != config.ServerAttestationRunNonce {
 				return errors.New("action config fixture/config path mismatch")
 			}
 			if err := validateRemoteServerAttestation(config, manifest); err != nil {
@@ -618,7 +622,7 @@ func validateRemoteServerAttestation(config fixtureConfig, manifest fixtureconfi
 	if err != nil {
 		return err
 	}
-	return attestation.Validate(manifest, config.Binding.ServerListenerEndpoint, config.Binding.ServerConfigSHA256, config.ServerHostKeyFingerprint)
+	return attestation.Validate(manifest, config.Binding.ServerListenerEndpoint, config.Binding.ServerConfigSHA256, config.ServerHostKeyFingerprint, config.ServerAttestationRunNonce)
 }
 
 func lockUnhashedInput(path string) (io.Closer, error) {

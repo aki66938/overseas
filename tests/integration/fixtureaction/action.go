@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"corp.example/overseas-access-gateway/tests/integration/fixtureconfig"
 )
@@ -40,11 +41,11 @@ type lifecycleBackend interface {
 
 type runtimeConfig = fixtureconfig.ActionConfig
 
-type serverPlan struct {
-	ServiceName, ServiceSource, ServicePath, ServiceSHA256 string
-	CoreSource, CorePath, CoreSHA256                       string
-	ConfigSource, ConfigPath, ConfigSHA256                 string
-	ListenerEndpoint                                       string
+type credentialPlan struct {
+	ProvisionerPath string
+	ProvisionerArgs []string
+	SourcePath      string
+	SourceArgs      []string
 }
 
 func runCaseSetup(operation string, requireClean, install func(string) error, provision, startAgent func() error) error {
@@ -64,19 +65,6 @@ func runCaseSetup(operation string, requireClean, install func(string) error, pr
 		return err
 	}
 	return nil
-}
-
-func productionServerPlan(manifest fixtureconfig.Manifest, configPath, configSHA256, listenerEndpoint string) (serverPlan, error) {
-	service, serviceOK := manifest.Artifacts["server-service"]
-	core, coreOK := manifest.Artifacts["core"]
-	if !serviceOK || !coreOK || !filepath.IsAbs(service.Path) || !filepath.IsAbs(core.Path) || !filepath.IsAbs(configPath) || len(configSHA256) != 64 || strings.TrimSpace(listenerEndpoint) == "" {
-		return serverPlan{}, errors.New("production server ownership inputs are incomplete")
-	}
-	return serverPlan{
-		ServiceName: "RegenBioOverseasAccessServer", ServiceSource: service.Path, ServicePath: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, ServiceSHA256: service.SHA256,
-		CoreSource: core.Path, CorePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, CoreSHA256: core.SHA256,
-		ConfigSource: configPath, ConfigPath: `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`, ConfigSHA256: configSHA256, ListenerEndpoint: listenerEndpoint,
-	}, nil
 }
 
 func SupportedActions() []string { return append([]string(nil), supportedActions...) }
@@ -181,10 +169,10 @@ func verifyInstalledArtifactsAbsent(manifest fixtureconfig.Manifest, roles []str
 	return nil
 }
 
-func provisionerPlan(config runtimeConfig, clientConfig []byte, payload fixtureconfig.PayloadManifest) (string, string, fixtureconfig.ProvisioningDetails, error) {
+func provisionerPlan(config runtimeConfig, clientConfig []byte, payload fixtureconfig.PayloadManifest, now time.Time) (credentialPlan, error) {
 	installed, err := payload.InstalledFiles()
 	if err != nil {
-		return "", "", fixtureconfig.ProvisioningDetails{}, err
+		return credentialPlan{}, err
 	}
 	var executable string
 	for _, file := range installed {
@@ -194,16 +182,21 @@ func provisionerPlan(config runtimeConfig, clientConfig []byte, payload fixturec
 		}
 	}
 	if executable == "" {
-		return "", "", fixtureconfig.ProvisioningDetails{}, errors.New("credential provisioner is absent from the payload manifest")
+		return credentialPlan{}, errors.New("credential provisioner is absent from the payload manifest")
 	}
 	metadata, err := fixtureconfig.ProvisioningMetadata(clientConfig)
 	if err != nil {
-		return "", "", fixtureconfig.ProvisioningDetails{}, err
+		return credentialPlan{}, err
 	}
 	if !filepath.IsAbs(config.CredentialSourcePath) || filepath.Clean(config.CredentialSourcePath) != config.CredentialSourcePath {
-		return "", "", fixtureconfig.ProvisioningDetails{}, errors.New("credential source path is invalid")
+		return credentialPlan{}, errors.New("credential source path is invalid")
 	}
-	return executable, config.CredentialSourcePath, metadata, nil
+	expires, err := time.Parse(time.RFC3339, config.CredentialExpiresAt)
+	if err != nil || !expires.After(now) || expires.Format(time.RFC3339) != config.CredentialExpiresAt {
+		return credentialPlan{}, errors.New("credential expiration is invalid")
+	}
+	args := []string{"--expected-method", metadata.Method, "--expected-endpoint", metadata.Endpoint, "--expected-expires-at", config.CredentialExpiresAt}
+	return credentialPlan{ProvisionerPath: executable, ProvisionerArgs: append([]string(nil), args...), SourcePath: config.CredentialSourcePath, SourceArgs: append([]string(nil), args...)}, nil
 }
 
 func verifyInstalledPayloadHashes(manifest fixtureconfig.PayloadManifest, hashFile func(string) (string, error)) error {

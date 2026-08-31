@@ -38,6 +38,11 @@ func TestFixtureConfigRequiresSingleReviewedActionHelper(t *testing.T) {
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "server attestation hash") {
 		t.Fatalf("Validate() = %v, want bad attestation hash", err)
 	}
+	config = validFixtureConfig()
+	config.ServerAttestationRunNonce = ""
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "run nonce") {
+		t.Fatalf("Validate() = %v, want missing attestation run nonce", err)
+	}
 }
 
 func TestCaptureScriptDistinguishesFakeUpstreamFromSentinelProcesses(t *testing.T) {
@@ -297,7 +302,8 @@ func validFixtureConfig() fixtureConfig {
 		ServerConfigPath:             `C:\fixture\server.json`,
 		ServerAttestationPath:        `C:\fixture\server-attestation.json`,
 		ServerAttestationSHA256:      strings.Repeat("4", 64),
-		ServerHostKeyFingerprint:     "SHA256:vm101",
+		ServerHostKeyFingerprint:     "SHA256:" + strings.Repeat("A", 43),
+		ServerAttestationRunNonce:    "20260831T090000Z-4d41c0de",
 		ActionConfigPath:             `C:\fixture\action.json`,
 		FixtureManifestPath:          `C:\fixture\fixture-manifest.json`,
 		FixtureManifestSignaturePath: `C:\fixture\fixture-manifest.json.p7s`,
