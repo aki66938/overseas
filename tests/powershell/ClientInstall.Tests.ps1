@@ -739,11 +739,17 @@ Describe 'Transactional Windows client installer' {
 
     It 'waits for exclusive MSI access before atomic publication and bounds temporary cleanup retries' {
         $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw
+        $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw
         $publisher | Should Match 'function Wait-ExclusiveFileAccess'
         $publisher | Should Match '\[IO\.File\]::Open\([^\r\n]*FileShare\]::None'
         $publisher | Should Match 'Wait-ExclusiveFileAccess\s+-Path\s+\$temporaryMsi\s+-TimeoutSeconds\s+15'
         $publisher | Should Match 'function Remove-TemporaryReleaseRoot'
         $publisher | Should Match 'Remove-TemporaryReleaseRoot\s+-Path\s+\$temporaryRoot\s+-TimeoutSeconds\s+15'
+        $publisher | Should Match '\$publicationError\s*=\s*\$_'
+        $publisher | Should Match 'if\s*\(\$null\s+-ne\s+\$publicationError\)\s*\{\s*throw\s+\$publicationError'
+        $inspector | Should Match '\$database\.Dispose\(\)'
+        $inspector | Should Match '\[GC\]::Collect\(\)'
+        $inspector | Should Match '\[GC\]::WaitForPendingFinalizers\(\)'
     }
 
     It 'uses only the Wintun Prebuilt Binaries License attribution' {

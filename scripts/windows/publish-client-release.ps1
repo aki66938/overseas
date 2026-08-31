@@ -101,6 +101,8 @@ function Remove-TemporaryReleaseRoot {
 }
 Assert-SafeReleaseParent -Path $final | Out-Null
 Assert-SafeReleaseParent -Path $temporaryMsi | Out-Null
+$publicationError = $null
+$cleanupError = $null
 try {
     $firstParty = Join-Path $temporaryRoot 'first-party'
     [void] [IO.Directory]::CreateDirectory($firstParty)
@@ -127,6 +129,14 @@ try {
     Wait-ExclusiveFileAccess -Path $temporaryMsi -TimeoutSeconds 15
     [IO.File]::Move($temporaryMsi, $final)
 }
-finally {
-    if (Test-Path -LiteralPath $temporaryRoot) { Remove-TemporaryReleaseRoot -Path $temporaryRoot -TimeoutSeconds 15 }
+catch {
+    $publicationError = $_
 }
+finally {
+    if (Test-Path -LiteralPath $temporaryRoot) {
+        try { Remove-TemporaryReleaseRoot -Path $temporaryRoot -TimeoutSeconds 15 }
+        catch { $cleanupError = $_ }
+    }
+}
+if ($null -ne $publicationError) { throw $publicationError }
+if ($null -ne $cleanupError) { throw $cleanupError }

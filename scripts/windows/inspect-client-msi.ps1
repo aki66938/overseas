@@ -144,4 +144,8 @@ elseif ($trustMode[0] -ne 'INSPECT_ONLY_REFUSES_INSTALL' -or $embeddedCorporateT
 }
 foreach ($table in @('ServiceInstall','ServiceControl','Registry','RemoveFile','Upgrade')) { [void] @(Get-MsiTableRows $table) }
 $database.Dispose()
+$database = $null
+$msiSignature = $null
+[GC]::Collect()
+[GC]::WaitForPendingFinalizers()
 [ordered] @{ msi_sha256 = (Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash; payload_count = $map.Count; mode = $manifest.mode; source_commit = $manifest.source_commit } | ConvertTo-Json -Compress
