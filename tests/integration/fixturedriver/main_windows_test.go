@@ -28,6 +28,16 @@ func TestFixtureConfigRequiresSingleReviewedActionHelper(t *testing.T) {
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "action-helper") {
 		t.Fatalf("Validate() = %v, want missing action-helper signer", err)
 	}
+	config = validFixtureConfig()
+	config.CredentialSourcePath = ""
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "credential source path") {
+		t.Fatalf("Validate() = %v, want missing credential source path", err)
+	}
+	config = validFixtureConfig()
+	config.ServerAttestationSHA256 = "bad"
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "server attestation hash") {
+		t.Fatalf("Validate() = %v, want bad attestation hash", err)
+	}
 }
 
 func TestCaptureScriptDistinguishesFakeUpstreamFromSentinelProcesses(t *testing.T) {
@@ -281,8 +291,13 @@ func validFixtureConfig() fixtureConfig {
 		HostIdentity:                 "host-1",
 		EvidenceRoot:                 `C:\evidence`,
 		PayloadPath:                  `C:\fixture\payload.msi`,
+		CredentialSourcePath:         `C:\fixture\credential-source.exe`,
+		CredentialSourceSHA256:       strings.Repeat("1", 64),
 		GeneratedConfigPath:          `C:\fixture\agent.yaml`,
 		ServerConfigPath:             `C:\fixture\server.json`,
+		ServerAttestationPath:        `C:\fixture\server-attestation.json`,
+		ServerAttestationSHA256:      strings.Repeat("4", 64),
+		ServerHostKeyFingerprint:     "SHA256:vm101",
 		ActionConfigPath:             `C:\fixture\action.json`,
 		FixtureManifestPath:          `C:\fixture\fixture-manifest.json`,
 		FixtureManifestSignaturePath: `C:\fixture\fixture-manifest.json.p7s`,

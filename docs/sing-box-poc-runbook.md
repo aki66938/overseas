@@ -37,13 +37,20 @@ gateway. TCP 8080 must never be reachable from the physical client.
   fixture and release payload manifests; and pinned server bundle/config hashes.
 - Signed fixture contract values for every corporate CIDR, corporate DNS
   resolver, and internal suffix; signed release payload entries for every file,
-  destination, SHA-256, and Authenticode requirement; and exact generated
-  client, server, and action-config hashes.
+  destination, SHA-256, source commit, and Authenticode signer requirement; and
+  exact generated client, server, action-config, credential-source, and remote
+  attestation hashes.
 - Exact public-data/public-health/corporate/fake-control/fake-data endpoints and
   distinct identities, plus the production server listener endpoint and a
   future RFC3339 credential expiration bound by the action config.
+- Remote attestation captured from VM101 over pinned SSH host-key
+  custody. It must bind the exact server-service path/hash, sing-box path/hash,
+  config path/hash, listener PID/path/hash, parent-child PID chain, and
+  `172.20.9.15:18443` listener ownership. Do not install the server locally on
+  the physical client.
 - Credential supplied pipe-only to the manifest-pinned provisioner. Do not place
-  it in argv, a file, logs, evidence, source control, or an MSI property.
+  it in argv, a file, logs, evidence, source control, an MSI property, or an
+  environment variable. The only allowed runtime sing-box client config is the product-owned ACL-protected runtime file required by sing-box, and uninstall must remove it.
 - Physical disposable host identity/token and authorization to use it. It must
   be a new host, not a developer workstation or previously accepted host.
 - A new empty baseline directory on ACL-protected evidence storage.
@@ -90,8 +97,65 @@ function Save-PhysicalInventory {
         dns = Get-DnsClientServerAddress -ErrorAction Stop
         listeners = Get-NetTCPConnection -State Listen -ErrorAction Stop
         services = Get-Service -ErrorAction Stop
+        processes = Get-Process -ErrorAction Stop
         firewall = Get-NetFirewallRule -ErrorAction Stop
+        registry = Get-Item 'HKLM:\Software' -ErrorAction Stop | Select-Object Name
+        scheduled_tasks = Get-ScheduledTask -ErrorAction Stop | Select-Object TaskName,TaskPath,State
+        server_owned_state = Get-ChildItem -LiteralPath 'C:\ProgramData\RegenBio' -Force -ErrorAction SilentlyContinue | Select-Object FullName,Name,Length,LastWriteTimeUtc
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+}
+
+function Compare-CanonicalStateSnapshots {
+    param(
+        [Parameter(Mandatory = $true)][string] $BeforePath,
+        [Parameter(Mandatory = $true)][string] $AfterPath,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    $before = Get-Content -LiteralPath $BeforePath -Raw -ErrorAction Stop | ConvertFrom-Json -Depth 8
+    $after = Get-Content -LiteralPath $AfterPath -Raw -ErrorAction Stop | ConvertFrom-Json -Depth 8
+    $beforeCanonical = ($before | ConvertTo-Json -Compress -Depth 8)
+    $afterCanonical = ($after | ConvertTo-Json -Compress -Depth 8)
+    if ($beforeCanonical -cne $afterCanonical) { throw "$Label drift detected." }
+}
+
+function Invoke-PipeOnlyProvisioning {
+    param(
+        [Parameter(Mandatory = $true)][string] $CredentialSourcePath,
+        [Parameter(Mandatory = $true)][string] $ProvisionerPath
+    )
+    Read-Host 'Credential prompt: enter the one-time secret only at the console attached to the credential source'
+    $pipeServer = New-Object System.IO.Pipes.AnonymousPipeServerStream([System.IO.Pipes.PipeDirection]::Out, [System.IO.HandleInheritability]::Inheritable)
+    try {
+        $clientHandle = $pipeServer.GetClientHandleAsString()
+        $provisioner = Start-Process -FilePath $ProvisionerPath -ArgumentList @() -NoNewWindow -PassThru -RedirectStandardInput $clientHandle
+        $source = Start-Process -FilePath $CredentialSourcePath -ArgumentList @() -NoNewWindow -PassThru
+        $source.WaitForExit()
+        $pipeServer.DisposeLocalCopyOfClientHandle()
+        $provisioner.WaitForExit()
+        if ($source.ExitCode -ne 0 -or $provisioner.ExitCode -ne 0) { throw 'Pipe-only credential provisioning failed.' }
+    }
+    finally {
+        $pipeServer.Dispose()
+    }
+}
+
+function Capture-ManagedProcess {
+    param(
+        [Parameter(Mandatory = $true)][string] $ServiceName,
+        [Parameter(Mandatory = $true)][string] $ExpectedPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedSha256
+    )
+    $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+    $process = Get-Process -Id $service.ProcessId -ErrorAction Stop
+    $hash = (Get-FileHash -LiteralPath $process.Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    if ($process.Path -cne $ExpectedPath -or $hash -cne $ExpectedSha256) { throw "$ServiceName identity mismatch." }
+    [ordered]@{
+        captured_utc = [datetime]::UtcNow.ToString('o')
+        service = $service.Name
+        pid = [int]$process.Id
+        image_path = $process.Path
+        image_sha256 = $hash
+    }
 }
 ```
 
@@ -158,18 +222,31 @@ one-time secret through the reviewed release process; no credential appears in
 this runbook or local history. Supply the real signed values only on the VM.
 
 ```powershell
+$VmWhatIfBeforePath = Join-Path $ArtifactsPath 'server-whatif-before.json'
 $ServerWhatIfPath = Join-Path $ArtifactsPath 'server-whatif.json'
+$VmWhatIfAfterPath = Join-Path $ArtifactsPath 'server-whatif-after.json'
 $ServerInstallPath = Join-Path $ArtifactsPath 'server-install.json'
 $ServerStatusPath = Join-Path $ArtifactsPath 'server-status.json'
 $ServerRollbackPath = Join-Path $ArtifactsPath 'server-rollback.json'
+$ServerAttestationPath = Join-Path $ArtifactsPath 'server-attestation.json'
 $ServerWhatIfCommand = "powershell.exe -NoProfile -File 'C:\Staging\OverseasAccessServer\install-server.ps1' -Mode Install -BundlePath 'C:\Staging\OverseasAccessServer\bundle' -ConfigPath 'C:\Staging\OverseasAccessServer\server.json' -ExpectedSingBoxSha256 '<SIGNED-SHA256>' -ExpectedConfigSha256 '<SIGNED-SHA256>' -ExpectedServerServiceSha256 '<SIGNED-SHA256>' -EmployeeCIDR '172.20.8.0/22' -ServerPort 18443 -EvidencePath 'C:\Staging\OverseasAccessServer\evidence.json' -WhatIf"
 $ServerInstallCommand = "powershell.exe -NoProfile -File 'C:\Staging\OverseasAccessServer\install-server.ps1' -Mode Install -BundlePath 'C:\Staging\OverseasAccessServer\bundle' -ConfigPath 'C:\Staging\OverseasAccessServer\server.json' -ExpectedSingBoxSha256 '<SIGNED-SHA256>' -ExpectedConfigSha256 '<SIGNED-SHA256>' -ExpectedServerServiceSha256 '<SIGNED-SHA256>' -EmployeeCIDR '172.20.8.0/22' -ServerPort 18443 -EvidencePath 'C:\Staging\OverseasAccessServer\evidence.json'"
 $ServerStatusCommand = "powershell.exe -NoProfile -File 'C:\Staging\OverseasAccessServer\install-server.ps1' -Mode Status -EvidencePath 'C:\Staging\OverseasAccessServer\evidence.json'"
 $ServerRollbackCommand = "powershell.exe -NoProfile -File 'C:\Staging\OverseasAccessServer\install-server.ps1' -Mode Rollback -EvidencePath 'C:\Staging\OverseasAccessServer\evidence.json'"
+$ServerAttestationCommand = 'powershell.exe -NoProfile -Command "[ordered]@{ schema_version=1; host_identity=(hostname); host_key_fingerprint=''approved-by-known-hosts''; observed_at=[datetime]::UtcNow.ToString(''o''); service_name=''RegenBioOverseasAccessServer''; listener_endpoint=''172.20.9.15:18443''; service_path=''C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe''; core_path=''C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe''; config_path=''C:\ProgramData\RegenBio\OverseasAccessServer\config.json''; listener_pid=(Get-NetTCPConnection -State Listen -LocalAddress 172.20.9.15 -LocalPort 18443 | Select-Object -First 1 -ExpandProperty OwningProcess); service=(Get-CimInstance Win32_Service -Filter ""Name=''RegenBioOverseasAccessServer''""); core=(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq ''C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe'' } | Select-Object -First 1) } | ConvertTo-Json -Depth 6"'
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfBeforePath
+$VmWhatIfBeforeSucceeded = $?
+$VmWhatIfBeforeExitCode = $LASTEXITCODE
+if (-not $VmWhatIfBeforeSucceeded -or $VmWhatIfBeforeExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfBeforePath failed to launch or exited with code $VmWhatIfBeforeExitCode.' }
 & ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath
 $ServerWhatIfSucceeded = $?
 $ServerWhatIfExitCode = $LASTEXITCODE
 if (-not $ServerWhatIfSucceeded -or $ServerWhatIfExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath failed to launch or exited with code $ServerWhatIfExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfAfterPath
+$VmWhatIfAfterSucceeded = $?
+$VmWhatIfAfterExitCode = $LASTEXITCODE
+if (-not $VmWhatIfAfterSucceeded -or $VmWhatIfAfterExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfAfterPath failed to launch or exited with code $VmWhatIfAfterExitCode.' }
+Compare-CanonicalStateSnapshots -BeforePath $VmWhatIfBeforePath -AfterPath $VmWhatIfAfterPath -Label 'server-WhatIf filesystem registry scheduled tasks server-owned state'
 ```
 
 Capture the same VM inventory again, compare it to `baseline-vm.json`, and
@@ -196,6 +273,10 @@ if (-not $ServerInstallSucceeded -or $ServerInstallExitCode -ne 0) { throw '& ss
 $ServerStatusSucceeded = $?
 $ServerStatusExitCode = $LASTEXITCODE
 if (-not $ServerStatusSucceeded -or $ServerStatusExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath failed to launch or exited with code $ServerStatusExitCode.' }
+& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath
+$ServerAttestationSucceeded = $?
+$ServerAttestationExitCode = $LASTEXITCODE
+if (-not $ServerAttestationSucceeded -or $ServerAttestationExitCode -ne 0) { throw '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath failed to launch or exited with code $ServerAttestationExitCode.' }
 ```
 
 Exact server rollback command: `deploy\server\install-server.ps1 -Mode Rollback`
@@ -215,10 +296,20 @@ $PhysicalBaselinePath = Join-Path $BaselineDirectory 'baseline-physical.json'
 Save-PhysicalInventory -Path $PhysicalBaselinePath
 $StandardClientConfigPath = 'C:\Staging\standard-client.json'
 $StandardSingBoxPath = 'C:\Staging\sing-box.exe'
-& $StandardSingBoxPath run -c $StandardClientConfigPath
-$StandardClientSucceeded = $?
-$StandardClientExitCode = $LASTEXITCODE
-if (-not $StandardClientSucceeded -or $StandardClientExitCode -ne 0) { throw '& $StandardSingBoxPath run -c $StandardClientConfigPath failed to launch or exited with code $StandardClientExitCode.' }
+$StandardSingBoxSha256 = '<SIGNED-SHA256>'
+$StandardClientConfigSha256 = '<SIGNED-SHA256>'
+$StandardSignerThumbprint = '<CORPORATE-SIGNER-THUMBPRINT-SUPPLIED-OUT-OF-BAND>'
+if ((Get-FileHash -LiteralPath $StandardSingBoxPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne $StandardSingBoxSha256) { throw 'standard sing-box hash mismatch.' }
+if ((Get-FileHash -LiteralPath $StandardClientConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne $StandardClientConfigSha256) { throw 'standard client config hash mismatch.' }
+$StandardSignature = Get-AuthenticodeSignature -FilePath $StandardSingBoxPath -ErrorAction Stop
+if ($StandardSignature.Status -ne 'Valid' -or $StandardSignature.SignerCertificate.Thumbprint -cne $StandardSignerThumbprint) { throw 'standard sing-box signer mismatch.' }
+$StandardClientProcess = Start-Process -FilePath $StandardSingBoxPath -ArgumentList @('run','-c',$StandardClientConfigPath) -WindowStyle Hidden -PassThru
+if ($null -eq $StandardClientProcess) { throw 'standard client failed to start.' }
+$StandardClientProcess.Refresh()
+if ($StandardClientProcess.HasExited) { throw 'standard client exited before readiness.' }
+Start-Sleep -Seconds 2
+$StandardClientProcess.Refresh()
+if ($StandardClientProcess.HasExited) { throw 'standard client exited before probes.' }
 ```
 
 The operator must prove an approved HTTPS target succeeds, corporate access
@@ -227,37 +318,63 @@ service and then the telecom process under the approved VM recovery procedure;
 each must produce service stop leak failure and telecom-process stop leak failure
 (no ordinary Internet receipt), followed by recovery after restart. Capture
 `standard-client.json`, timestamps, config/binary hashes, nonce receipt, and
-leak receipt. If any check fails, run the rollback section immediately.
+leak receipt. When probes finish, stop the hidden process intentionally and
+confirm exit before proceeding:
+
+```powershell
+Stop-Process -Id $StandardClientProcess.Id -Force -ErrorAction Stop
+$StandardClientProcess.WaitForExit()
+if (-not $StandardClientProcess.HasExited) { throw 'standard client cleanup failed.' }
+```
+
+If any check fails, run the rollback section immediately.
 
 ## 5. STOP/GO — custom-MSI install
 
 Remove the standard sing-box configuration before the MSI gate. Confirm it
 is absent and inventory the physical host again. Verify the MSI and every
-detached manifest with `Get-AuthenticodeSignature` and exact hashes, and require
-the signer thumbprint to equal `$CorporateSignerThumbprint`; the MSI must be
+detached manifest with `Get-AuthenticodeSignature`, detached CMS verification,
+exact source commit, and exact hashes before `msiexec`. The MSI must be
 externally corporate-signed, not merely locally trusted.
 
 ```powershell
 $MsiPreInstallInventoryPath = Join-Path $ArtifactsPath 'msi-preinstall-inventory.json'
 Save-PhysicalInventory -Path $MsiPreInstallInventoryPath
 $CorporateSignedMsiPath = 'C:\Staging\OverseasAccessSetup.msi'
+$FixtureManifestPath = 'C:\Staging\fixture-manifest.json'
+$FixtureManifestSignaturePath = 'C:\Staging\fixture-manifest.json.p7s'
+$PayloadManifestPath = 'C:\Staging\sing-box.manifest.json'
+$PayloadManifestSignaturePath = 'C:\Staging\sing-box.manifest.json.p7s'
+$CredentialSourcePath = 'C:\Staging\credential-source.exe'
+$ProvisionerPath = 'C:\Program Files\RegenBio\OverseasAccess\credential-provisioner.exe'
+$InstallerVerifierPath = 'C:\Program Files\RegenBio\OverseasAccess\installer-verifier.exe'
+$VerifierEvidencePath = Join-Path $ArtifactsPath 'installer-verifier.json'
 $CorporateSignerThumbprint = '<CORPORATE-SIGNER-THUMBPRINT-SUPPLIED-OUT-OF-BAND>'
+$ExpectedSourceCommit = '<SIGNED-SOURCE-COMMIT>'
 $MsiSignature = Get-AuthenticodeSignature -FilePath $CorporateSignedMsiPath -ErrorAction Stop
 if ($MsiSignature.Status -ne 'Valid' -or $MsiSignature.SignerCertificate.Thumbprint -cne $CorporateSignerThumbprint) { throw 'MSI signature or corporate signer thumbprint is invalid.' }
+& $InstallerVerifierPath verify-bundle --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --payload-manifest $PayloadManifestPath --payload-signature $PayloadManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-signer $CorporateSignerThumbprint --evidence $VerifierEvidencePath
+$InstallerVerifierSucceeded = $?
+$InstallerVerifierExitCode = $LASTEXITCODE
+if (-not $InstallerVerifierSucceeded -or $InstallerVerifierExitCode -ne 0) { throw '& $InstallerVerifierPath verify-bundle --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --payload-manifest $PayloadManifestPath --payload-signature $PayloadManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-signer $CorporateSignerThumbprint --evidence $VerifierEvidencePath failed to launch or exited with code $InstallerVerifierExitCode.' }
 $MsiInstallLogPath = Join-Path $ArtifactsPath 'msi-install.log'
 & msiexec.exe /i $CorporateSignedMsiPath /qn /norestart /l*v $MsiInstallLogPath
 $MsiInstallSucceeded = $?
 $MsiInstallExitCode = $LASTEXITCODE
 if (-not $MsiInstallSucceeded -or $MsiInstallExitCode -ne 0) { throw '& msiexec.exe /i $CorporateSignedMsiPath /qn /norestart /l*v $MsiInstallLogPath failed to launch or exited with code $MsiInstallExitCode.' }
+if ((Get-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction Stop).Status -ne 'Stopped') { throw 'Install must leave the agent stopped before provisioning.' }
+Invoke-PipeOnlyProvisioning -CredentialSourcePath $CredentialSourcePath -ProvisionerPath $ProvisionerPath
+if (-not (Test-Path -LiteralPath 'C:\ProgramData\RegenBio\OverseasAccess\credential.bin' -PathType Leaf)) { throw 'credential.bin was not created.' }
+Start-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction Stop
+if ((Get-Service -Name 'RegenBioOverseasAccessAgent' -ErrorAction Stop).Status -ne 'Running') { throw 'Agent service did not reach Running after provisioning.' }
 ```
 
-The credential is supplied pipe-only by the reviewed manifest-pinned provisioner;
-this contract must be present before installation. Never use a command line,
-response file, temporary file, registry entry, evidence field, or log for it.
-Click the shipped UI's enable/disable toggle only after a clean baseline and
-inventory are recorded. Verify enable/disable for browser, Git, HTTPS, corporate
-DNS, AD, and EC; retain exact probe targets, route/DNS/firewall snapshots, and
-redacted logs. A required Git probe example follows the same native guard.
+Never use a command line, response file, temporary file, registry entry,
+evidence field, or log for the credential. Click the shipped UI's enable/disable
+toggle only after a clean baseline and inventory are recorded. Verify
+enable/disable for browser, Git, HTTPS, corporate DNS, AD, and EC; retain exact
+probe targets, route/DNS/firewall snapshots, and redacted logs. A required Git
+probe example follows the same native guard.
 
 ```powershell
 $ApprovedGitProbeRepository = 'https://<OPERATOR-APPROVED-REDACTED-GIT-ENDPOINT>/'
@@ -271,27 +388,77 @@ if (-not $GitProbeSucceeded -or $GitProbeExitCode -ne 0) { throw '& git.exe ls-r
 ## 6. STOP/GO — lifecycle and uninstall
 
 Before each injected failure, capture inventory and approve the specific action.
-Test service/core/UI termination, node loss, telecom loss, reboot, user disable,
-and 20 clean enable/disable cycles. A successful check requires a fail-closed
-result while unavailable, recovery only after the dependency returns, and no
-ordinary-exit fallback. Use the operator-recorded PIDs only after confirming the
-image path and hash match the signed manifest.
+Never accept preset PID variables. Before each individual fault, run a fresh
+`Capture-ManagedProcess`, bind the PID to the exact path/hash/service, record the
+evidence, perform only that one mutation, probe, and restore before the next
+fault. A successful check requires a fail-closed result while unavailable,
+recovery only after the dependency returns, and no ordinary-exit fallback.
+
+### STOP/GO — agent fault
 
 ```powershell
-$LifecycleInventoryPath = Join-Path $ArtifactsPath 'lifecycle-precheck-inventory.json'
-Save-PhysicalInventory -Path $LifecycleInventoryPath
-& taskkill.exe /PID $AgentProcessId /T /F
+$AgentFaultInventoryPath = Join-Path $ArtifactsPath 'agent-fault-inventory.json'
+Save-PhysicalInventory -Path $AgentFaultInventoryPath
+$AgentCapture = Capture-ManagedProcess -ServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\Program Files\RegenBio\OverseasAccess\overseas-agent.exe' -ExpectedSha256 '<SIGNED-SHA256>'
+$AgentCapture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactsPath 'agent-capture.json') -Encoding UTF8 -ErrorAction Stop
+& taskkill.exe /PID $AgentCapture.pid /T /F
 $AgentKillSucceeded = $?
 $AgentKillExitCode = $LASTEXITCODE
-if (-not $AgentKillSucceeded -or $AgentKillExitCode -ne 0) { throw '& taskkill.exe /PID $AgentProcessId /T /F failed to launch or exited with code $AgentKillExitCode.' }
-& taskkill.exe /PID $CoreProcessId /T /F
+if (-not $AgentKillSucceeded -or $AgentKillExitCode -ne 0) { throw '& taskkill.exe /PID $AgentCapture.pid /T /F failed to launch or exited with code $AgentKillExitCode.' }
+```
+
+Probe, confirm fail-closed, then restore the service and re-run the probe matrix
+before moving to the next fault.
+
+### STOP/GO — core fault
+
+```powershell
+$CoreFaultInventoryPath = Join-Path $ArtifactsPath 'core-fault-inventory.json'
+Save-PhysicalInventory -Path $CoreFaultInventoryPath
+$CoreCapture = Capture-ManagedProcess -ServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\Program Files\RegenBio\OverseasAccess\sing-box.exe' -ExpectedSha256 '<SIGNED-SHA256>'
+$CoreCapture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactsPath 'core-capture.json') -Encoding UTF8 -ErrorAction Stop
+& taskkill.exe /PID $CoreCapture.pid /T /F
 $CoreKillSucceeded = $?
 $CoreKillExitCode = $LASTEXITCODE
-if (-not $CoreKillSucceeded -or $CoreKillExitCode -ne 0) { throw '& taskkill.exe /PID $CoreProcessId /T /F failed to launch or exited with code $CoreKillExitCode.' }
-& taskkill.exe /PID $UiProcessId /T /F
+if (-not $CoreKillSucceeded -or $CoreKillExitCode -ne 0) { throw '& taskkill.exe /PID $CoreCapture.pid /T /F failed to launch or exited with code $CoreKillExitCode.' }
+```
+
+Probe, confirm fail-closed, then restore the service and re-run the probe matrix
+before moving to the next fault.
+
+### STOP/GO — UI fault
+
+```powershell
+$UiFaultInventoryPath = Join-Path $ArtifactsPath 'ui-fault-inventory.json'
+Save-PhysicalInventory -Path $UiFaultInventoryPath
+$UiCapture = Capture-ManagedProcess -ServiceName 'RegenBioOverseasAccessAgent' -ExpectedPath 'C:\Program Files\RegenBio\OverseasAccess\overseas-client.exe' -ExpectedSha256 '<SIGNED-SHA256>'
+$UiCapture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactsPath 'ui-capture.json') -Encoding UTF8 -ErrorAction Stop
+& taskkill.exe /PID $UiCapture.pid /T /F
 $UiKillSucceeded = $?
 $UiKillExitCode = $LASTEXITCODE
-if (-not $UiKillSucceeded -or $UiKillExitCode -ne 0) { throw '& taskkill.exe /PID $UiProcessId /T /F failed to launch or exited with code $UiKillExitCode.' }
+if (-not $UiKillSucceeded -or $UiKillExitCode -ne 0) { throw '& taskkill.exe /PID $UiCapture.pid /T /F failed to launch or exited with code $UiKillExitCode.' }
+```
+
+Probe, confirm fail-closed, then restore the service and re-run the probe matrix
+before moving to the next fault.
+
+### STOP/GO — node loss and telecom loss
+
+Use the approved VM stop/start and telecom stop/start procedures one at a time.
+Capture inventory immediately before and after each mutation. Required outcomes:
+node loss, telecom loss, service stop leak failure, telecom-process stop leak
+failure, no direct access to VM:8080 failure bypass, and recovery only after the
+dependency returns.
+
+### STOP/GO — forced reboot
+
+Forced reboot is its own approved section. Capture inventory first, perform only
+the reboot, then obtain a new stop/go approval before any subsequent fault or
+probe.
+
+```powershell
+$RebootInventoryPath = Join-Path $ArtifactsPath 'forced-reboot-inventory.json'
+Save-PhysicalInventory -Path $RebootInventoryPath
 & shutdown.exe /r /t 0 /f
 $RebootSucceeded = $?
 $RebootExitCode = $LASTEXITCODE
@@ -299,10 +466,11 @@ if (-not $RebootSucceeded -or $RebootExitCode -ne 0) { throw '& shutdown.exe /r 
 ```
 
 After return from reboot, continue only after a new stop/go approval and
-inventory. For cycles 1 through 20, use the UI toggle, prove the complete
-probe matrix in both states, wait for the action-local snapshots, and record
-the per-cycle nonce/leak receipts in `lifecycle-20-cycles.json`. Any missing
-receipt, timeout, drift, fallback, or failed restore is FAIL.
+inventory. Run 20 clean enable/disable cycles. For cycles 1 through 20, use
+the UI toggle, prove the complete probe matrix in both states, wait for the
+action-local snapshots, and record the per-cycle nonce/leak receipts in
+`lifecycle-20-cycles.json`. Any missing receipt, timeout, drift, fallback, or
+failed restore is FAIL.
 
 Before uninstall, save `custom-client.json`, invoke a controlled disable, and
 record the final managed resources. The exact custom-client rollback/uninstall
@@ -341,13 +509,14 @@ the VM-console recovery owner; do not attempt manual cleanup.
 Before signing a verdict, place these sanitized files in `$ArtifactsPath`:
 `baseline-vm.json`, `baseline-physical.json`, `server-whatif.json`,
 `server-install.json`, `server-status.json`, `server-rollback.json`,
-`standard-client.json`, `custom-client.json`, `lifecycle-20-cycles.json`, and
-`verdict.json`. Hash every signed artifact and emitted evidence file with
-`Get-FileHash`; use `Compress-Archive` only after a redaction review and store
-the archive outside Git. Runtime artifacts belong under the already ignored
+`server-attestation.json`, `standard-client.json`, `custom-client.json`,
+`lifecycle-20-cycles.json`, `installer-verifier.json`, and `verdict.json`.
+Hash every signed artifact and emitted evidence file with `Get-FileHash`; use
+`Compress-Archive` only after a redaction review and store the archive outside
+Git. Runtime artifacts belong under the already ignored
 `artifacts/sing-box-poc/<UTC-run-id>/` path.
 
 PASS requires one full workday, all required probes, all fail-closed cases, 20
-clean cycles, no direct 8080 access, no ordinary-exit fallback, and exact final-
-state restoration. Any mandatory failure is FAIL and triggers the rollback above.
-Never label a partial test PASS.
+clean cycles, no direct 8080 access, no ordinary-exit fallback, exact final-
+state restoration, and zero changes after WhatIf. Any mandatory failure is FAIL
+and triggers the rollback above. Never label a partial test PASS.

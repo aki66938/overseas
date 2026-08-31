@@ -62,7 +62,7 @@ func TestValidateGeneratedConfigsRequiresOnlyFakeCONNECTUpstream(t *testing.T) {
 
 func TestGeneratedConfigUsesOnlyExactSignedCorporatePolicyWithLabelBoundaries(t *testing.T) {
 	policy := NetworkPolicy{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}
-	baseClient := `{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"secret"}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"rules":[{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","server":"corp-dns"}],"final":"public-dns","reverse_mapping":true}}`
+	baseClient := `{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm"}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"rules":[{"domain_suffix":["ad.intra.regen-bio.com"],"action":"route","server":"corp-dns"}],"final":"public-dns","reverse_mapping":true}}`
 	server := []byte(`{"inbounds":[{"type":"shadowsocks","tag":"server-in","listen":"172.20.9.15","listen_port":18443}],"outbounds":[{"type":"http","tag":"fake-connect","server":"172.20.9.15","server_port":18083}],"route":{"final":"fake-connect"}}`)
 	if err := ValidateGeneratedConfigs([]byte(baseClient), server, "172.20.9.15:18083", policy); err != nil {
 		t.Fatalf("exact signed policy rejected: %v", err)
@@ -144,23 +144,79 @@ func TestPayloadManifestAcceptsReleaseSchemaAndRefusesUnsafeDestinations(t *test
 	}
 }
 
-func TestCredentialDocumentComesOnlyFromLockedClientTunnel(t *testing.T) {
-	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"pipe-only-secret"}],"route":{"final":"tunnel"}}`)
-	document, err := CredentialDocument(client, "2099-01-01T00:00:00Z")
+func TestValidateGeneratedConfigsRejectsPlaintextTunnelCredential(t *testing.T) {
+	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"plaintext-secret"}],"route":{"rules":[{"ip_cidr":["172.20.9.15/32"],"action":"route","outbound":"direct"},{"ip_cidr":["172.20.8.0/22"],"action":"route","outbound":"direct"},{"domain_suffix":["intra.regen-bio.com"],"action":"route","outbound":"direct"},{"port":[53],"action":"hijack-dns"},{"network":["udp"],"action":"reject"},{"network":["tcp"],"action":"route","outbound":"tunnel"}],"final":"tunnel"},"dns":{"servers":[{"type":"udp","tag":"corp-dns","server":"172.20.9.1","detour":"direct"},{"type":"https","tag":"public-dns","server":"1.1.1.1","detour":"tunnel"}],"rules":[{"domain_suffix":["intra.regen-bio.com"],"action":"route","server":"corp-dns"}],"final":"public-dns","reverse_mapping":true}}`)
+	server := []byte(`{"inbounds":[{"type":"shadowsocks","tag":"server-in","listen":"172.20.9.15","listen_port":18443}],"outbounds":[{"type":"http","tag":"fake-connect","server":"172.20.9.15","server_port":18083}],"route":{"final":"fake-connect"}}`)
+	policy := NetworkPolicy{CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"intra.regen-bio.com"}}
+	if err := ValidateGeneratedConfigs(client, server, "172.20.9.15:18083", policy); err == nil || !strings.Contains(strings.ToLower(err.Error()), "plaintext") {
+		t.Fatalf("ValidateGeneratedConfigs()=%v, want plaintext-credential refusal", err)
+	}
+}
+
+func TestProvisioningMetadataRequiresCredentiallessLockedClientConfig(t *testing.T) {
+	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm"}],"route":{"final":"tunnel"}}`)
+	metadata, err := ProvisioningMetadata(client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(document), `"password":"pipe-only-secret"`) || !strings.Contains(string(document), `"method":"2022-blake3-aes-128-gcm"`) {
-		t.Fatalf("credential document=%s", document)
+	if metadata.Method != "2022-blake3-aes-128-gcm" || metadata.Endpoint != "172.20.9.15:18443" {
+		t.Fatalf("metadata=%#v", metadata)
 	}
 	for _, changed := range [][]byte{
 		[]byte(strings.Replace(string(client), `"tag":"tunnel"`, `"tag":"other"`, 1)),
-		[]byte(strings.Replace(string(client), `"password":"pipe-only-secret"`, `"password":""`, 1)),
+		[]byte(strings.Replace(string(client), `"method":"2022-blake3-aes-128-gcm"`, `"method":""`, 1)),
+		[]byte(strings.Replace(string(client), `"method":"2022-blake3-aes-128-gcm"`, `"method":"2022-blake3-aes-128-gcm","password":"plaintext"`, 1)),
 		append(client, []byte(` {}`)...),
 	} {
-		if _, err := CredentialDocument(changed, "2099-01-01T00:00:00Z"); err == nil {
-			t.Fatal("CredentialDocument accepted ambiguous or invalid client config")
+		if _, err := ProvisioningMetadata(changed); err == nil {
+			t.Fatal("ProvisioningMetadata accepted an invalid or secret-bearing client config")
 		}
+	}
+}
+
+func TestServerAttestationBindsRemoteServiceCoreConfigAndListener(t *testing.T) {
+	manifest := validManifest()
+	attestation := ServerAttestation{
+		SchemaVersion:       1,
+		HostIdentity:        "DESKTOP-1BVR2H6",
+		HostKeyFingerprint:  "SHA256:vm101",
+		ObservedAt:          "2026-08-31T09:00:00Z",
+		ListenerEndpoint:    "172.20.9.15:18443",
+		ServiceName:         "RegenBioOverseasAccessServer",
+		ServicePath:         `C:\Program Files\RegenBio\server-service.exe`,
+		ServiceSHA256:       manifest.Artifacts["server-service"].SHA256,
+		ServicePID:          51,
+		CorePath:            `C:\Program Files\RegenBio\core.exe`,
+		CoreSHA256:          manifest.Artifacts["core"].SHA256,
+		CorePID:             52,
+		CoreParentPID:       51,
+		ConfigPath:          `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`,
+		ConfigSHA256:        strings.Repeat("a", 64),
+		ListenerPID:         52,
+		ListenerImagePath:   `C:\Program Files\RegenBio\core.exe`,
+		ListenerImageSHA256: manifest.Artifacts["core"].SHA256,
+	}
+	if err := attestation.Validate(manifest, "172.20.9.15:18443", strings.Repeat("a", 64), "SHA256:vm101"); err != nil {
+		t.Fatalf("Validate()=%v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*ServerAttestation)
+		want string
+	}{
+		{name: "listener", edit: func(v *ServerAttestation) { v.ListenerEndpoint = "172.20.9.15:9443" }, want: "listener"},
+		{name: "host key", edit: func(v *ServerAttestation) { v.HostKeyFingerprint = "SHA256:other" }, want: "host key"},
+		{name: "core parent", edit: func(v *ServerAttestation) { v.CoreParentPID = 99 }, want: "parent"},
+		{name: "config hash", edit: func(v *ServerAttestation) { v.ConfigSHA256 = strings.Repeat("b", 64) }, want: "config"},
+		{name: "listener hash", edit: func(v *ServerAttestation) { v.ListenerImageSHA256 = strings.Repeat("c", 64) }, want: "listener"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := attestation
+			test.edit(&changed)
+			if err := changed.Validate(manifest, "172.20.9.15:18443", strings.Repeat("a", 64), "SHA256:vm101"); err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
+				t.Fatalf("Validate()=%v want %s", err, test.want)
+			}
+		})
 	}
 }
 
@@ -217,7 +273,7 @@ func TestManifestStrictJSON(t *testing.T) {
 
 func TestActionConfigIsStrictAndBoundToManifestEndpoints(t *testing.T) {
 	manifest := validManifest()
-	config := ActionConfig{SchemaVersion: 1, PowerShellPath: manifest.Artifacts["powershell"].Path, InstallerScriptPath: manifest.Artifacts["installer"].Path, BundlePath: `C:\fixture`, PayloadManifestPath: `C:\fixture\payload-manifest.json`, GeneratedConfigPath: `C:\fixture\client.json`, ServerConfigPath: `C:\fixture\server.json`, ServerConfigSHA256: strings.Repeat("a", 64), ServerListenerEndpoint: "172.20.9.15:18443", FixtureManifestPath: `C:\fixture\fixture-manifest.json`, SentinelPath: manifest.Artifacts["sentinel"].Path, ActionHelperPath: manifest.Artifacts["action-helper"].Path, FakeDataEndpoint: "172.20.9.15:18083", FakeControlEndpoint: "172.20.9.15:18082", PublicDataEndpoint: "198.18.0.2:18080", FakeIdentity: "fake-upstream/1", CredentialExpiresAt: "2099-01-01T00:00:00Z"}
+	config := ActionConfig{SchemaVersion: 1, PowerShellPath: manifest.Artifacts["powershell"].Path, InstallerScriptPath: manifest.Artifacts["installer"].Path, BundlePath: `C:\fixture`, PayloadManifestPath: `C:\fixture\payload-manifest.json`, GeneratedConfigPath: `C:\fixture\client.json`, ServerConfigPath: `C:\fixture\server.json`, ServerConfigSHA256: strings.Repeat("a", 64), ServerListenerEndpoint: "172.20.9.15:18443", ServerAttestationPath: `C:\fixture\server-attestation.json`, ServerAttestationSHA256: strings.Repeat("b", 64), ServerHostKeyFingerprint: "SHA256:vm101", CredentialSourcePath: `C:\fixture\credential-source.exe`, CredentialSourceSHA256: strings.Repeat("c", 64), FixtureManifestPath: `C:\fixture\fixture-manifest.json`, SentinelPath: manifest.Artifacts["sentinel"].Path, ActionHelperPath: manifest.Artifacts["action-helper"].Path, FakeDataEndpoint: "172.20.9.15:18083", FakeControlEndpoint: "172.20.9.15:18082", PublicDataEndpoint: "198.18.0.2:18080", FakeIdentity: "fake-upstream/1", CredentialExpiresAt: "2099-01-01T00:00:00Z"}
 	if err := config.Validate(manifest, "172.20.9.15:18083", "172.20.9.15:18082", "198.18.0.2:18080", "fake-upstream/1", config.PayloadManifestPath); err != nil {
 		t.Fatalf("Validate()=%v", err)
 	}
@@ -232,6 +288,8 @@ func TestActionConfigIsStrictAndBoundToManifestEndpoints(t *testing.T) {
 		{name: "identity", edit: func(v *ActionConfig) { v.FakeIdentity = "other" }, want: "identity"},
 		{name: "payload manifest", edit: func(v *ActionConfig) { v.PayloadManifestPath = `C:\fixture\other.json` }, want: "payload manifest"},
 		{name: "bundle", edit: func(v *ActionConfig) { v.BundlePath = `C:\other` }, want: "bundle"},
+		{name: "credential source", edit: func(v *ActionConfig) { v.CredentialSourcePath = `credential-source.exe` }, want: "credential source"},
+		{name: "server attestation", edit: func(v *ActionConfig) { v.ServerAttestationSHA256 = "bad" }, want: "attestation"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

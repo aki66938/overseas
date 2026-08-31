@@ -81,16 +81,17 @@ func TestAbsentArtifactVerificationUsesManifestInstalledPaths(t *testing.T) {
 
 func TestProvisionerPlanUsesInstalledManifestPinnedExecutableAndPipeOnlyInput(t *testing.T) {
 	payload := testPayloadManifest()
-	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm","password":"pipe-only-secret"}],"route":{"final":"tunnel"}}`)
-	executable, args, input, err := provisionerPlan(client, payload, "2099-01-01T00:00:00Z")
+	config := runtimeConfig{CredentialSourcePath: `C:\fixture\credential-source.exe`, CredentialSourceSHA256: strings.Repeat("f", 64)}
+	client := []byte(`{"inbounds":[{"type":"tun","tag":"tun-in"}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"tunnel","server":"172.20.9.15","server_port":18443,"method":"2022-blake3-aes-128-gcm"}],"route":{"final":"tunnel"}}`)
+	executable, source, metadata, err := provisionerPlan(config, client, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executable != `C:\Program Files\RegenBio\OverseasAccess\credential-provisioner.exe` || len(args) != 0 {
-		t.Fatalf("plan executable=%q args=%v", executable, args)
+	if executable != `C:\Program Files\RegenBio\OverseasAccess\credential-provisioner.exe` || source != config.CredentialSourcePath {
+		t.Fatalf("plan executable=%q source=%q", executable, source)
 	}
-	if !strings.Contains(string(input), `"password":"pipe-only-secret"`) || strings.Contains(strings.Join(args, " "), "pipe-only-secret") {
-		t.Fatal("credential was not confined to pipe input")
+	if metadata.Method != "2022-blake3-aes-128-gcm" || metadata.Endpoint != "172.20.9.15:18443" {
+		t.Fatalf("metadata=%#v", metadata)
 	}
 }
 
@@ -124,39 +125,22 @@ func TestCompletePayloadVerificationRejectsAnyMissingWrongOrResidualFile(t *test
 	}
 }
 
-func TestProductionServerPlanBindsServiceConfigListenerAndCoreIdentity(t *testing.T) {
-	manifest := fixtureconfig.Manifest{Artifacts: map[string]fixtureconfig.Artifact{
-		"core":           {Path: `C:\fixture\sing-box.exe`, SHA256: strings.Repeat("a", 64)},
-		"server-service": {Path: `C:\fixture\overseas-server-service.exe`, SHA256: strings.Repeat("b", 64)},
-	}}
-	plan, err := productionServerPlan(manifest, `C:\fixture\server.json`, strings.Repeat("c", 64), "172.20.9.15:18443")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.ServiceName != "RegenBioOverseasAccessServer" || plan.ServicePath != `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe` || plan.CorePath != `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe` || plan.ConfigPath != `C:\ProgramData\RegenBio\OverseasAccessServer\config.json` || plan.ListenerEndpoint != "172.20.9.15:18443" {
-		t.Fatalf("plan=%#v", plan)
-	}
-	if plan.ServiceSHA256 != strings.Repeat("b", 64) || plan.CoreSHA256 != strings.Repeat("a", 64) || plan.ConfigSHA256 != strings.Repeat("c", 64) {
-		t.Fatalf("hash plan=%#v", plan)
-	}
-}
-
-func TestCleanHostSetupSequenceProvisionsBeforeAgentStartAndRollsBackServerOnFailure(t *testing.T) {
+func TestCleanHostSetupSequenceRequiresCleanBaselineThenProvisionsBeforeAgentStart(t *testing.T) {
 	var events []string
 	step := func(name string, err error) func() error {
 		return func() error { events = append(events, name); return err }
 	}
-	if err := runCaseSetup("install", step("server", nil), func(operation string) error { events = append(events, operation); return nil }, step("provision", nil), step("agent-start", nil), step("server-cleanup", nil)); err != nil {
+	if err := runCaseSetup("install", func(operation string) error { events = append(events, "clean:"+operation); return nil }, func(operation string) error { events = append(events, operation); return nil }, step("provision", nil), step("agent-start", nil)); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(events, ","); got != "server,install,provision,agent-start" {
+	if got := strings.Join(events, ","); got != "clean:install,install,provision,agent-start" {
 		t.Fatalf("sequence=%s", got)
 	}
 	events = nil
-	if err := runCaseSetup("install", step("server", nil), func(operation string) error { events = append(events, operation); return nil }, step("provision", errors.New("refused")), step("agent-start", nil), step("server-cleanup", nil)); err == nil {
+	if err := runCaseSetup("install", func(operation string) error { events = append(events, "clean:"+operation); return nil }, func(operation string) error { events = append(events, operation); return nil }, step("provision", errors.New("refused")), step("agent-start", nil)); err == nil {
 		t.Fatal("provisioning failure was accepted")
 	}
-	if got := strings.Join(events, ","); got != "server,install,provision,server-cleanup" {
+	if got := strings.Join(events, ","); got != "clean:install,install,provision" {
 		t.Fatalf("failure sequence=%s", got)
 	}
 }

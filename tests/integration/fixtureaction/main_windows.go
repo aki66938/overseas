@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"corp.example/overseas-access-gateway/tests/integration/fixtureconfig"
+	"corp.example/overseas-access-gateway/tests/integration/fixtureproto"
 	"corp.example/overseas-access-gateway/tests/integration/winjob"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -128,16 +129,11 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 	var err error
 	switch request.Action {
 	case "case-setup":
-		operation := "install"
-		if serviceExists(agentServiceName) {
-			operation = "repair"
-		}
-		err = runCaseSetup(operation,
-			func() error { return b.setupProductionServer(ctx, request.RunID) },
+		err = runCaseSetup("install",
+			func(operation string) error { return requireCleanBaseline(request.BaselinePath) },
 			func(operation string) error { return b.runInstaller(ctx, operation) },
 			func() error { return b.provisionCredential(ctx) },
 			func() error { return startExistingService(agentServiceName) },
-			func() error { return b.removeProductionServer(request.RunID) },
 		)
 	case "fake-upstream-start":
 		err = b.startFakeService(ctx, request.RunID)
@@ -171,7 +167,7 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 			err = os.Remove(recoveryMarker(request))
 		}
 	case "uninstall":
-		err = errors.Join(b.runInstaller(ctx, "uninstall"), b.removeProductionServer(request.RunID))
+		err = b.runInstaller(ctx, "uninstall")
 		if err == nil {
 			err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
 		}
@@ -179,7 +175,7 @@ func (b *windowsBackend) Execute(ctx context.Context, request actionRequest) (ma
 		err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
 	case "restore":
 		if err = requireCleanBaseline(request.BaselinePath); err == nil {
-			err = errors.Join(b.runInstaller(ctx, "uninstall"), b.removeProductionServer(request.RunID))
+			err = b.runInstaller(ctx, "uninstall")
 		}
 		if err == nil {
 			err = errors.Join(deleteOwnedService(fakeServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), deleteOwnedService(uiServiceName(request.RunID), b.manifest.Artifacts["action-helper"].Path), removeIfExists(recoveryMarker(request)))
@@ -268,10 +264,8 @@ func (b *windowsBackend) verify(request actionRequest) error {
 		if !fileExists(`C:\ProgramData\RegenBio\OverseasAccess\credential.bin`) {
 			return errors.New("credential provisioning post-state is absent")
 		}
-		if request.Action == "case-setup" {
-			if err := b.verifyProductionServer(request.RunID); err != nil {
-				return err
-			}
+		if err := verifyLocalServerResidueAbsent(); err != nil {
+			return err
 		}
 	case "fake-upstream-start":
 		if !serviceRunning(fakeServiceName(request.RunID)) {
@@ -340,40 +334,50 @@ func (b *windowsBackend) provisionCredential(ctx context.Context) error {
 	if err != nil {
 		return errors.New("locked fixture client config is unavailable for credential provisioning")
 	}
-	executable, args, input, err := provisionerPlan(clientData, b.payload, b.config.CredentialExpiresAt)
+	executable, source, _, err := provisionerPlan(b.config, clientData, b.payload)
 	if err != nil {
 		return err
 	}
-	defer zero(input)
-	expected := ""
+	if _, err := time.Parse(time.RFC3339, b.config.CredentialExpiresAt); err != nil {
+		return errors.New("credential expiration is invalid")
+	}
+	provisionerHash := ""
 	for _, file := range mustInstalledFiles(b.payload) {
 		if file.Name == "credential-provisioner.exe" {
-			expected = file.SHA256
+			provisionerHash = file.SHA256
 		}
 	}
-	if actual, hashErr := hashFile(executable); hashErr != nil || actual != expected {
+	if actual, hashErr := hashFile(executable); hashErr != nil || actual != provisionerHash {
 		return errors.New("installed credential provisioner hash mismatch")
+	}
+	if actual, hashErr := hashFile(source); hashErr != nil || actual != b.config.CredentialSourceSHA256 {
+		return errors.New("credential source hash mismatch")
 	}
 	readPipe, writePipe, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, executable, args...)
-	command.Stdin, command.Stdout, command.Stderr = readPipe, io.Discard, io.Discard
-	if err := command.Start(); err != nil {
+	provisioner := exec.CommandContext(ctx, executable)
+	provisioner.Stdin, provisioner.Stdout, provisioner.Stderr = readPipe, io.Discard, os.Stderr
+	if err := provisioner.Start(); err != nil {
 		readPipe.Close()
 		writePipe.Close()
 		return err
 	}
+	sourceCommand := exec.CommandContext(ctx, source)
+	sourceCommand.Stdin, sourceCommand.Stdout, sourceCommand.Stderr = os.Stdin, writePipe, os.Stderr
+	if err := sourceCommand.Start(); err != nil {
+		_ = readPipe.Close()
+		_ = writePipe.Close()
+		_ = provisioner.Process.Kill()
+		_ = provisioner.Wait()
+		return err
+	}
 	_ = readPipe.Close()
-	writeErr := make(chan error, 1)
-	go func() {
-		_, copyErr := writePipe.Write(input)
-		closeErr := writePipe.Close()
-		writeErr <- errors.Join(copyErr, closeErr)
-	}()
-	werr := <-writeErr
-	return errors.Join(werr, command.Wait())
+	_ = writePipe.Close()
+	sourceErr := sourceCommand.Wait()
+	provisionerErr := provisioner.Wait()
+	return errors.Join(sourceErr, provisionerErr)
 }
 
 func (b *windowsBackend) setupProductionServer(ctx context.Context, runID string) (resultErr error) {
@@ -815,23 +819,74 @@ func requireCleanBaseline(path string) error {
 	if err != nil {
 		return err
 	}
-	var snapshot struct {
-		MSI     []struct{ Present bool } `json:"msi_registrations"`
-		Files   []struct{ Present bool } `json:"installed_files"`
-		Runtime []struct{ Present bool } `json:"runtime_files"`
-	}
+	var snapshot fixtureproto.Snapshot
 	if err = json.Unmarshal(data, &snapshot); err != nil {
 		return err
 	}
-	for _, v := range snapshot.MSI {
-		if v.Present {
-			return errors.New("restore requires a clean disposable baseline")
+	anyPresent := func(values []bool) bool {
+		for _, value := range values {
+			if value {
+				return true
+			}
+		}
+		return false
+	}
+	if anyPresent(func() []bool {
+		values := make([]bool, 0, len(snapshot.MSIRegistrations)+len(snapshot.InstalledFiles)+len(snapshot.RuntimeFiles)+len(snapshot.OwnedRoots))
+		for _, record := range snapshot.MSIRegistrations {
+			values = append(values, record.Present)
+		}
+		for _, record := range snapshot.InstalledFiles {
+			values = append(values, record.Present)
+		}
+		for _, record := range snapshot.RuntimeFiles {
+			values = append(values, record.Present)
+		}
+		for _, record := range snapshot.OwnedRoots {
+			values = append(values, record.Present)
+		}
+		return values
+	}()) {
+		return errors.New("case setup requires a clean disposable baseline")
+	}
+	for _, service := range snapshot.Services {
+		if service.Present {
+			return errors.New("case setup requires a clean disposable baseline")
 		}
 	}
-	for _, v := range append(snapshot.Files, snapshot.Runtime...) {
-		if v.Present {
-			return errors.New("restore requires a clean disposable baseline")
+	for _, process := range snapshot.Processes {
+		if process.Present {
+			return errors.New("case setup requires a clean disposable baseline")
 		}
+	}
+	for _, listener := range snapshot.Listeners {
+		if listener.Present {
+			return errors.New("case setup requires a clean disposable baseline")
+		}
+	}
+	for _, rule := range snapshot.OwnedFirewallRules {
+		if rule.Present {
+			return errors.New("case setup requires a clean disposable baseline")
+		}
+	}
+	for _, records := range [][]fixtureproto.StateRecord{snapshot.RegistryRecords, snapshot.OwnershipArtifacts, snapshot.RecoveryArtifacts, snapshot.TransactionArtifacts, snapshot.FixtureResidues} {
+		for _, record := range records {
+			if record.Present {
+				return errors.New("case setup requires a clean disposable baseline")
+			}
+		}
+	}
+	for _, adapter := range snapshot.Adapters {
+		if strings.EqualFold(adapter.InterfaceAlias, "RegenBioOverseasAccess") {
+			return errors.New("case setup requires a clean disposable baseline")
+		}
+	}
+	return verifyLocalServerResidueAbsent()
+}
+
+func verifyLocalServerResidueAbsent() error {
+	if serviceExists("RegenBioOverseasAccessServer") || fileExists(`C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`) || fileExists(`C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`) || fileExists(`C:\ProgramData\RegenBio\OverseasAccessServer\config.json`) {
+		return errors.New("local production server residue remains on the client host")
 	}
 	return nil
 }

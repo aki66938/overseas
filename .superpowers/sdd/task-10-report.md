@@ -2,46 +2,160 @@
 
 ## Status
 
-`DONE_WITH_CONCERNS`: all five carried code prerequisites and the non-live runbook contract are implemented and verified. The live VM/physical-host acceptance gate was deliberately not executed and therefore remains externally blocked. This report is a code-readiness result, not a physical-host PASS.
+`DONE_WITH_CONCERNS` as of 2026-08-31.
 
-`OVERSEAS_ACCESS_INTEGRATION=1` was never set. No VM or workstation route, DNS, firewall, adapter, service, installer, credential, or runtime state was mutated.
+Code readiness is green for the non-live Task 10 gate-preparation scope. The
+live VM101 + disposable physical-host acceptance gate was not executed and
+remains externally blocked. This report is a non-live code-and-runbook
+readiness result only.
+
+`OVERSEAS_ACCESS_INTEGRATION=1` was never set. No VM or workstation route, DNS,
+firewall, adapter, service, installer, credential, or runtime state was
+intentionally mutated during this remediation pass.
+
+## What changed in this review-fix pass
+
+1. Locked/generated client config is now treated as credentialless. Task 10 now
+   rejects any plaintext tunnel password in the locked fixture config, extracts
+   only non-secret provisioning metadata from that config, and keeps the secret
+   path outside the rendered fixture config.
+2. Fixture action setup now requires a genuinely clean baseline before
+   `case-setup`, always uses `install` for that path, never silently switches to
+   `repair`, provisions before agent start, and verifies that the physical
+   client does not own a local server service/config/listener.
+3. Local server staging on the physical client was removed from the Task 10
+   harness path. Server identity is now consumed as a pinned remote attestation
+   artifact bound to the expected VM101 SSH host-key fingerprint, service/core
+   hashes, server config hash, PID chain, and `172.20.9.15:18443` listener.
+4. Manifest handling is now identically strict on both sides of the install
+   contract for the current reviewed 16 signed payload entries. Extra or missing
+   entries are refused.
+5. The runbook now documents the stronger non-live gate: explicit zero-drift
+   WhatIf comparison, guarded remote attestation capture, hidden/background
+   standard-client gate, guarded bundle/MSI verification before `msiexec`,
+   explicit pipe-only provisioning, no preset PID variables, per-fault fresh PID
+   capture, and a separate forced-reboot section.
 
 ## Code readiness
 
-1. Protocol v4 derives the exact corporate CIDRs, corporate DNS resolvers, and internal suffixes from the detached-signed fixture manifest. Client direct routes reject unbounded/port/network escapes and any address outside the exact signed private allowlist. Direct DNS is exact, and suffix matching requires either equality or a `.` label boundary.
-2. The release payload parser accepts the actual emitted release schema (`source_commit`, `mode`, destination, hashes, signer declarations, and Authenticode declarations), requires the complete core payload set, and safely includes every additional signed metadata entry. Clean-host setup starts the locally owned production server, installs, derives the credential document only from the locked client config, invokes the installed manifest-pinned provisioner with zero argv and an anonymous stdin pipe, zeroes the buffer, then starts the agent. Connect paths lock and revalidate the rendered runtime config.
-3. Snapshot evidence derives every installed path/hash from the signed payload entries, inventories unexpected files recursively in both client roots, captures root presence and the dynamic network-state file, and requires exact setup hashes plus full payload/runtime/root absence at uninstall.
-4. The local production server is installed only into fixed ACL-protected, run-marked roots. The action binds the exact service executable, core, server config, listener, and hashes. Snapshot validation requires one chain from SCM service PID to service image, child core PID/image, client-facing listener PID/image, and locked server-config hash. The production service readiness probe now derives its target from the locked server config rather than a hard-coded loopback address.
-5. Integrated non-live refusal tests cover unrelated private CIDR/DNS values, suffix collisions, unbounded/direct-port escapes, real release-manifest metadata and unsafe/reserved entries, pipe-only provisioning order and rollback, missing/wrong/residual payload files, unexpected owned-root files, changed network/payload response bindings, and mismatched server parent/listener/config identity.
+The following Task 10 review findings are now addressed in code and tests:
 
-## Runbook readiness
+1. Credential source
+   - `tests/integration/fixtureconfig` rejects locked client configs that carry
+     a plaintext tunnel password.
+   - Fixture action uses a pinned credential source path/hash plus the installed
+     payload-pinned `credential-provisioner.exe`.
+   - Provisioning input now flows through an anonymous pipe from the credential
+     source process to the provisioner process; the secret is no longer derived
+     from the locked config body.
 
-`docs/sing-box-poc-runbook.md` records the fixed VM facts and the external input ledger, requires independently verified SSH host-key pinning, new empty baselines, server WhatIf with zero drift, stop/go before every mutation group, the standard-client gate before the corporate-signed MSI, lifecycle/leak probes, exact rollback, sanitized evidence, and a FAIL verdict for any mandatory failure. Every documented native invocation immediately captures both `$?` and `$LASTEXITCODE` and aborts on either failure. The legacy runbook tests were preserved byte-for-byte and the Task 10 contract tests were appended.
+2. Clean-host setup
+   - `case-setup` now refuses any pre-existing MSI, owned roots, runtime files,
+     services, processes, listeners, firewall rules, registry/ownership/
+     recovery/transaction residue, or managed TUN adapter state in the supplied
+     baseline snapshot.
+   - `case-setup` no longer falls back to `repair`.
 
-## Strict RED → GREEN evidence
+3. Remote topology
+   - The fixture driver validates a pinned remote attestation artifact instead of
+     accepting local server ownership on the physical client.
+   - Snapshot validation now treats any local server service/process/config/
+     listener presence on the physical client as residue.
 
-Focused RED failures were observed before each implementation slice, including missing network/payload protocol fields, missing payload parser and credential document APIs, missing complete installed-file and production-server ownership checks, missing setup sequencing, the real release-manifest schema being rejected, the server readiness address being hard-coded, reserved runtime payload names being accepted, and direct routes with a port escape being accepted. Each focused package was green before the next slice.
+4. Signed payload strictness
+   - Payload manifest parsing now requires exactly the reviewed 16 signed
+     entries; it no longer tolerates extras.
 
-## Final non-live verification
+5. Runbook contract
+   - `docs/sing-box-poc-runbook.md` and
+     `tests/powershell/Runbook.Tests.ps1` were updated together so the static
+     operator procedure matches the hardened non-live contract actually required
+     by the review.
 
-- rerun on 2026-08-31 with the locked toolchain;
-- locked `go test -count=1 ./...`: PASS;
-- locked `go vet ./...`: PASS;
-- locked `go test -count=20 ./tests/integration/fixtureproto ./tests/integration/fixtureconfig ./tests/integration/fixtureaction ./tests/integration/fixturedriver ./internal/agent ./internal/supervisor`: PASS;
-- Windows PowerShell 5.1 Pester: `113 passed, 0 failed, 0 skipped`;
-- PowerShell 7 Pester: `113 passed, 0 failed, 0 skipped`;
-- Windows amd64 builds through the locked Go wrapper: integration driver, sentinel, action helper, agent, UI, credential provisioner, installer verifier, and production server service all PASS;
-- `git diff --check`: PASS, with only the repository's configured LF-to-CRLF warnings;
-- explicit tracked-content scans for private-key markers, bearer-token patterns, and quoted `password`/`secret`/`pin` assignments: no matches in repository content; remaining `token`/`credential` matches are structural test/documentation vocabulary only.
+## Strict RED → GREEN record
 
-The full Go/vet/repetition matrix was rerun after the last implementation change before commit. An additional `go generate ./cmd/overseas-client` probe on this workstation attempted a network deprecation lookup for `github.com/akavel/rsrc@v0.10.2` despite the checked-in `rsrc_windows_amd64.syso` and warm module cache; the required eight locked Windows binary builds still completed successfully and no Task 10 code change was required for that environment-specific generator behavior.
+Focused RED was observed first in the touched packages:
 
-## Exact external inputs still required
+- `fixtureconfig`: missing credentialless-config rejection, missing attestation
+  type/validation, and non-strict payload count handling.
+- `fixtureaction`: stale test contract still expected password material from the
+  locked config and still modeled local server staging during `case-setup`.
+- `fixtureproto` / `fixturedriver`: still modeled local server identity on the
+  physical client instead of remote attestation + local-server absence.
+- Runbook tests: still allowed weaker MSI/provisioning/lifecycle/WhatIf wording.
 
-- the corporate fixture-manifest signer allowlist and detached-signed fixture manifest containing exact `corporate_cidrs`, `corporate_dns`, `internal_suffixes`, and all artifact paths/hashes;
-- a corporate-signed release payload manifest and detached signature, matching signed bundle, exact executable signer allowlists, and a corporate-signed custom MSI;
-- locked generated client/server/action configs and exact hashes, including the production listener, distinct sentinel/fake identities and endpoints, and a future RFC3339 credential expiration;
-- the real SSH Ed25519 SHA256 host-key fingerprint supplied out of band for `DESKTOP-1BVR2H6`;
-- an explicitly authorized disposable physical Windows host identity/token, a new empty ACL-protected evidence baseline directory, maintenance window, VM-console recovery owner, telecom PIN-holder availability, and written stop/go approval.
+Each slice was implemented only after the failing expectation existed, then
+rerun to GREEN before moving on.
 
-The corporate signer and disposable physical host are external dependencies. Until those inputs exist and the authorized run preserves all scenario/repetition/zero-drift evidence, Task 10 must not be reported as live PASS.
+## Final non-live verification actually executed on 2026-08-31
+
+- Locked full Go test:
+  `scripts/windows/invoke-locked-client-tool.ps1 -Tool Go -ToolArguments @('test','-count=1','./...')`
+  → PASS.
+- Locked full Go vet:
+  `scripts/windows/invoke-locked-client-tool.ps1 -Tool Go -ToolArguments @('vet','./...')`
+  → PASS.
+- Locked 20x repetition suite:
+  `scripts/windows/invoke-locked-client-tool.ps1 -Tool Go -ToolArguments @('test','-count=20','./tests/integration/fixtureproto','./tests/integration/fixtureconfig','./tests/integration/fixtureaction','./tests/integration/fixturedriver','./internal/agent','./internal/supervisor')`
+  → PASS.
+- Windows PowerShell 5.1 Pester:
+  `Invoke-Pester -Script tests/powershell -PassThru`
+  → `113 passed, 0 failed, 0 skipped`.
+- PowerShell 7 Pester:
+  `Invoke-Pester -Script tests/powershell -PassThru`
+  → `113 passed, 0 failed, 0 skipped`.
+- Locked Windows amd64 builds:
+  - `tests/integration/fixturedriver` → `bin/overseas-access-integration-driver.exe`
+  - `tests/integration/fixtureserver` → `bin/fixture-sentinel.exe`
+  - `tests/integration/fixtureaction` → `bin/fixture-action.exe`
+  - `./cmd/overseas-agent` → `bin/overseas-agent.exe`
+  - `./cmd/overseas-client` → `bin/overseas-client.exe`
+  - `./cmd/credential-provisioner` → `bin/credential-provisioner.exe`
+  - `./cmd/installer-verifier` → `bin/installer-verifier.exe`
+  - `./cmd/overseas-server-service` → `bin/overseas-server-service.exe`
+  → all 8 PASS.
+- `git diff --check` → PASS, with only the repository’s LF→CRLF warning noise.
+- PowerShell AST parse across repository `*.ps1` → `AST_OK`.
+- Repository scans:
+  - private-key marker scan → no matches.
+  - bearer-token scan → no matches.
+  - PIN assignment scan → no matches.
+  - changed-file secret scan → clean.
+  - full-tree password-assignment scan produced matches only in historical
+    `.superpowers/sdd/review-*.diff` artifacts, earlier design notes/briefs, and
+    intentional unit-test fixtures under `internal/singconfig/*_test.go`; no new
+    live credential material was introduced by this Task 10 change set.
+
+## Remaining concerns and external blockers
+
+1. Live gate not executed
+   - The VM101 server install/status/rollback flow, physical-host standard-client
+     gate, custom MSI install, lifecycle faults, and 20 live repetitions remain
+     unexecuted in this non-live pass.
+
+2. External inputs still required
+   - corporate-signed fixture manifest and detached signature;
+   - corporate-signed release payload manifest and detached signature;
+   - corporate signer thumbprint / executable signer allowlists;
+   - corporate-signed MSI;
+   - locked generated client/server/action configs and hashes;
+   - pinned VM101 SSH Ed25519 SHA256 host-key fingerprint for
+     `DESKTOP-1BVR2H6`;
+   - pinned remote server attestation artifact for the actual live run;
+   - authorized disposable physical Windows host identity/token;
+   - new empty ACL-protected baseline evidence directory;
+   - maintenance window, VM-console recovery owner, telecom PIN-holder
+     availability, and written stop/go approvals.
+
+3. Code-readiness boundary
+   - Task 10 is ready for the live gate procedure, but it is not a live PASS.
+     Any report that collapses non-live readiness into live acceptance would be
+     incorrect.
+
+## Final verdict
+
+Task 10 non-live preparation is `DONE_WITH_CONCERNS`.
+
+- Code readiness: PASS for the reviewed non-live scope.
+- Live acceptance gate: still blocked by external inputs and by deliberate
+  non-execution of VM/physical-host mutations.

@@ -487,7 +487,7 @@ func (s Snapshot) Validate(expectedNonce string, bindings ...FixtureBinding) err
 		}
 	}
 	if len(bindings) > 0 {
-		if err := validateServerOwnership(s, bindings[0]); err != nil {
+		if err := validateLocalServerAbsence(s, bindings[0]); err != nil {
 			return err
 		}
 	}
@@ -546,50 +546,26 @@ func validateInstalledPayloadFiles(records []FileRecord, expected []PayloadFileB
 	return nil
 }
 
-func validateServerOwnership(s Snapshot, binding FixtureBinding) error {
-	var service *ServiceRecord
-	for index := range s.Services {
-		if s.Services[index].Role == "server-service" && s.Services[index].Present {
-			if service != nil {
-				return errors.New("server service identity is ambiguous")
-			}
-			service = &s.Services[index]
+func validateLocalServerAbsence(s Snapshot, binding FixtureBinding) error {
+	for _, service := range s.Services {
+		if service.Role == "server-service" && service.Present {
+			return errors.New("local server service residue is present on the client host")
 		}
 	}
-	var host, core *ProcessRecord
-	for index := range s.Processes {
-		switch s.Processes[index].Role {
-		case "server-service":
-			if s.Processes[index].Present {
-				host = &s.Processes[index]
-			}
-		case "server-core":
-			if s.Processes[index].Present {
-				core = &s.Processes[index]
-			}
+	for _, process := range s.Processes {
+		if (process.Role == "server-service" || process.Role == "server-core") && process.Present {
+			return errors.New("local server process residue is present on the client host")
 		}
 	}
-	var listener *ListenerRecord
-	for index := range s.Listeners {
-		if s.Listeners[index].Endpoint == binding.ServerListenerEndpoint && s.Listeners[index].Present {
-			listener = &s.Listeners[index]
+	for _, listener := range s.Listeners {
+		if listener.Endpoint == binding.ServerListenerEndpoint && listener.Present {
+			return errors.New("local server listener residue is present on the client host")
 		}
 	}
-	present := service != nil || host != nil || core != nil || listener != nil
-	if !present {
-		return nil
-	}
-	if service == nil || host == nil || core == nil || listener == nil || service.PID != host.PID || core.ParentPID != host.PID || listener.PID != core.PID || service.PathSHA256 != binding.Artifacts.ServerServiceSHA256 || host.ImageSHA256 != binding.Artifacts.ServerServiceSHA256 || core.ImageSHA256 != binding.Artifacts.CoreSHA256 || listener.ImageSHA256 != binding.Artifacts.CoreSHA256 || listener.Role != "server-core" {
-		return errors.New("server service/listener/core ownership is not cryptographically bound")
-	}
-	configOK := false
 	for _, file := range s.RuntimeFiles {
-		if file.Role == "server-config" && file.Present && file.ExpectedSHA256 == binding.ServerConfigSHA256 && file.SHA256 == binding.ServerConfigSHA256 {
-			configOK = true
+		if file.Role == "server-config" && file.Present {
+			return errors.New("local server config residue is present on the client host")
 		}
-	}
-	if !configOK {
-		return errors.New("server config identity is not cryptographically bound")
 	}
 	return nil
 }

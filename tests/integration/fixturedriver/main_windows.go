@@ -45,8 +45,13 @@ type fixtureConfig struct {
 	HostIdentity                 string                      `json:"host_identity"`
 	EvidenceRoot                 string                      `json:"evidence_root"`
 	PayloadPath                  string                      `json:"payload_path"`
+	CredentialSourcePath         string                      `json:"credential_source_path"`
+	CredentialSourceSHA256       string                      `json:"credential_source_sha256"`
 	GeneratedConfigPath          string                      `json:"generated_config_path"`
 	ServerConfigPath             string                      `json:"server_config_path"`
+	ServerAttestationPath        string                      `json:"server_attestation_path"`
+	ServerAttestationSHA256      string                      `json:"server_attestation_sha256"`
+	ServerHostKeyFingerprint     string                      `json:"server_host_key_fingerprint"`
 	ActionConfigPath             string                      `json:"action_config_path"`
 	FixtureManifestPath          string                      `json:"fixture_manifest_path"`
 	FixtureManifestSignaturePath string                      `json:"fixture_manifest_signature_path"`
@@ -80,6 +85,7 @@ func (c fixtureConfig) Validate() error {
 	}
 	for name, value := range map[string]string{
 		"payload path": c.PayloadPath, "generated config path": c.GeneratedConfigPath, "server config path": c.ServerConfigPath, "action config path": c.ActionConfigPath, "fixture manifest path": c.FixtureManifestPath, "fixture manifest signature path": c.FixtureManifestSignaturePath, "powershell path": c.PowerShellPath, "action helper path": c.ActionHelperPath, "evidence root": c.EvidenceRoot,
+		"credential source path": c.CredentialSourcePath, "server attestation path": c.ServerAttestationPath,
 		"public sentinel": c.PublicSentinel, "public sentinel health": c.PublicSentinelHealth, "corporate sentinel": c.CorporateSentinel,
 		"fake upstream control": c.FakeUpstreamControl, "fake upstream data": c.FakeUpstreamData,
 	} {
@@ -87,15 +93,18 @@ func (c fixtureConfig) Validate() error {
 			return fmt.Errorf("%s is required", name)
 		}
 	}
-	for name, value := range map[string]string{"payload path": c.PayloadPath, "generated config path": c.GeneratedConfigPath, "server config path": c.ServerConfigPath, "action config path": c.ActionConfigPath, "fixture manifest path": c.FixtureManifestPath, "fixture manifest signature path": c.FixtureManifestSignaturePath, "powershell path": c.PowerShellPath, "action helper path": c.ActionHelperPath, "evidence root": c.EvidenceRoot} {
+	for name, value := range map[string]string{"payload path": c.PayloadPath, "credential source path": c.CredentialSourcePath, "generated config path": c.GeneratedConfigPath, "server config path": c.ServerConfigPath, "server attestation path": c.ServerAttestationPath, "action config path": c.ActionConfigPath, "fixture manifest path": c.FixtureManifestPath, "fixture manifest signature path": c.FixtureManifestSignaturePath, "powershell path": c.PowerShellPath, "action helper path": c.ActionHelperPath, "evidence root": c.EvidenceRoot} {
 		if !filepath.IsAbs(value) || filepath.Clean(value) != value {
 			return fmt.Errorf("%s must be absolute and clean", name)
 		}
 	}
-	for name, value := range map[string]string{"payload hash": c.Binding.PayloadSHA256, "config hash": c.Binding.ConfigSHA256, "server config hash": c.Binding.ServerConfigSHA256, "action config hash": c.Binding.ActionConfigSHA256, "manifest hash": c.Binding.Artifacts.ManifestSHA256} {
+	for name, value := range map[string]string{"payload hash": c.Binding.PayloadSHA256, "credential source hash": c.CredentialSourceSHA256, "config hash": c.Binding.ConfigSHA256, "server config hash": c.Binding.ServerConfigSHA256, "server attestation hash": c.ServerAttestationSHA256, "action config hash": c.Binding.ActionConfigSHA256, "manifest hash": c.Binding.Artifacts.ManifestSHA256} {
 		if !isSHA256(value) {
 			return fmt.Errorf("%s is invalid", name)
 		}
+	}
+	if !strings.HasPrefix(c.ServerHostKeyFingerprint, "SHA256:") || strings.TrimSpace(strings.TrimPrefix(c.ServerHostKeyFingerprint, "SHA256:")) == "" {
+		return errors.New("server host key fingerprint is invalid")
 	}
 	if c.Binding.FakeUpstreamIdentity == "" || c.Binding.PublicSentinelIdentity == "" || c.Binding.CorporateSentinelIdentity == "" {
 		return errors.New("all fixture identities are required")
@@ -202,8 +211,11 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			if actionConfig.FixtureManifestPath != config.FixtureManifestPath || actionConfig.GeneratedConfigPath != config.GeneratedConfigPath || actionConfig.ServerConfigPath != config.ServerConfigPath || actionConfig.ServerConfigSHA256 != config.Binding.ServerConfigSHA256 || actionConfig.ServerListenerEndpoint != config.Binding.ServerListenerEndpoint {
+			if actionConfig.FixtureManifestPath != config.FixtureManifestPath || actionConfig.GeneratedConfigPath != config.GeneratedConfigPath || actionConfig.ServerConfigPath != config.ServerConfigPath || actionConfig.ServerConfigSHA256 != config.Binding.ServerConfigSHA256 || actionConfig.ServerListenerEndpoint != config.Binding.ServerListenerEndpoint || actionConfig.CredentialSourcePath != config.CredentialSourcePath || actionConfig.CredentialSourceSHA256 != config.CredentialSourceSHA256 || actionConfig.ServerAttestationPath != config.ServerAttestationPath || actionConfig.ServerAttestationSHA256 != config.ServerAttestationSHA256 || actionConfig.ServerHostKeyFingerprint != config.ServerHostKeyFingerprint {
 				return errors.New("action config fixture/config path mismatch")
+			}
+			if err := validateRemoteServerAttestation(config, manifest); err != nil {
+				return err
 			}
 			return actionConfig.Validate(manifest, config.FakeUpstreamData, config.FakeUpstreamControl, config.PublicSentinel, config.Binding.FakeUpstreamIdentity, config.PayloadPath)
 		},
@@ -517,6 +529,16 @@ func validateFixtureAssets(ctx context.Context, config fixtureConfig) (io.Closer
 		return fail(fmt.Errorf("lock payload manifest signature: %w", err))
 	}
 	locks = append(locks, payloadSignatureLock)
+	credentialSourceLock, err := lockPinnedInput(config.CredentialSourcePath, config.CredentialSourceSHA256)
+	if err != nil {
+		return fail(fmt.Errorf("lock credential source: %w", err))
+	}
+	locks = append(locks, credentialSourceLock)
+	serverAttestationLock, err := lockPinnedInput(config.ServerAttestationPath, config.ServerAttestationSHA256)
+	if err != nil {
+		return fail(fmt.Errorf("lock server attestation: %w", err))
+	}
+	locks = append(locks, serverAttestationLock)
 	manifestData, err := os.ReadFile(config.FixtureManifestPath)
 	if err != nil {
 		return fail(err)
@@ -581,7 +603,22 @@ func validateFixtureAssets(ctx context.Context, config fixtureConfig) (io.Closer
 			}
 		}
 	}
+	if err := validateRemoteServerAttestation(config, manifest); err != nil {
+		return fail(err)
+	}
 	return locks, nil
+}
+
+func validateRemoteServerAttestation(config fixtureConfig, manifest fixtureconfig.Manifest) error {
+	data, err := os.ReadFile(config.ServerAttestationPath)
+	if err != nil {
+		return err
+	}
+	attestation, err := fixtureconfig.ParseServerAttestation(data)
+	if err != nil {
+		return err
+	}
+	return attestation.Validate(manifest, config.Binding.ServerListenerEndpoint, config.Binding.ServerConfigSHA256, config.ServerHostKeyFingerprint)
 }
 
 func lockUnhashedInput(path string) (io.Closer, error) {
@@ -875,7 +912,16 @@ func buildActionFacts(config fixtureConfig, request fixtureproto.Request, snapsh
 			serverConfigPresent = true
 		}
 	}
-	facts["server_identity_verified"] = fmt.Sprintf("%t", serverServicePresent && processPresent["server-service"] && processPresent["server-core"] && serverListenerPresent && serverConfigPresent)
+	serverIdentityVerified := false
+	if request.Action == "case-setup" || request.Action == "preflight" || request.Action == "capture" || request.Action == "agent-start" || request.Action == "machine-recover" || request.Action == "uninstall" || request.Action == "restore" {
+		manifestData, err := os.ReadFile(config.FixtureManifestPath)
+		if err == nil {
+			if manifest, parseErr := fixtureconfig.ParseManifest(manifestData); parseErr == nil {
+				serverIdentityVerified = validateRemoteServerAttestation(config, manifest) == nil
+			}
+		}
+	}
+	facts["server_identity_verified"] = fmt.Sprintf("%t", serverIdentityVerified)
 	facts["server_identity_absent"] = fmt.Sprintf("%t", !serverPresent && !serverListenerPresent && !serverServicePresent && !serverConfigPresent)
 	if request.Action == "restore" {
 		facts["restore_input_sha256"] = request.BaselineSHA256

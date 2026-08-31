@@ -184,7 +184,12 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'new empty baseline directory',
             'operator stop/go approval',
             'OVERSEAS_ACCESS_INTEGRATION=1 must never be set',
-            'developer workstation is not the designated host'
+            'developer workstation is not the designated host',
+            'remote attestation captured from VM101',
+            'source commit',
+            'credential-source',
+            'server-attestation.json',
+            'The only allowed runtime sing-box client config is the product-owned ACL-protected runtime file'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required runbook input or fact.'
         }
@@ -201,6 +206,10 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'STOP/GO — standard-client activation',
             'STOP/GO — custom-MSI install',
             'STOP/GO — lifecycle and uninstall',
+            'STOP/GO — agent fault',
+            'STOP/GO — core fault',
+            'STOP/GO — UI fault',
+            'STOP/GO — forced reboot',
             'STOP/GO — rollback',
             'deploy\server\install-server.ps1 -Mode Rollback',
             'msiexec.exe /x $CorporateSignedMsiPath /qn /norestart',
@@ -218,9 +227,12 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath' -Prefix 'VmFacts'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath' -Prefix 'VmBaseline'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath' -Prefix 'TelecomConnect'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath' -Prefix 'ServerWhatIf'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath' -Prefix 'ServerInstall'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath' -Prefix 'ServerStatus'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath' -Prefix 'ServerAttestation'
         Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath' -Prefix 'ServerRollback'
 
         $runbook = $lines -join "`n"
@@ -229,37 +241,56 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
             'Get-NetTCPConnection', 'Get-Service', 'Get-Process', 'Get-NetFirewallRule',
             'sing-box absence/presence', 'direct Google failure',
             'curl.exe --proxy http://127.0.0.1:8080',
-            '-Mode Install', '-Mode Status', '-Mode Rollback', '-WhatIf'
+            '-Mode Install', '-Mode Status', '-Mode Rollback', '-WhatIf',
+            'Compare-CanonicalStateSnapshots',
+            'zero changes after WhatIf',
+            'server-WhatIf filesystem registry scheduled tasks server-owned state'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required VM evidence or server-operation contract.'
         }
     }
 
-    It 'gates the standard client before a corporate-signed custom MSI and covers acceptance evidence' {
+    It 'gates the standard client, MSI verification, pipe-only provisioning, and lifecycle capture' {
         $lines = Get-SingBoxRunbookLines
+        $runbook = $lines -join "`n"
 
-        Assert-GuardedNativeCommand -Lines $lines -Command '& $StandardSingBoxPath run -c $StandardClientConfigPath' -Prefix 'StandardClient'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& $InstallerVerifierPath verify-bundle --msi $CorporateSignedMsiPath --fixture-manifest $FixtureManifestPath --fixture-signature $FixtureManifestSignaturePath --payload-manifest $PayloadManifestPath --payload-signature $PayloadManifestSignaturePath --expected-commit $ExpectedSourceCommit --expected-signer $CorporateSignerThumbprint --evidence $VerifierEvidencePath' -Prefix 'InstallerVerifier'
         Assert-GuardedNativeCommand -Lines $lines -Command '& git.exe ls-remote $ApprovedGitProbeRepository > $GitProbePath' -Prefix 'GitProbe'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $AgentProcessId /T /F' -Prefix 'AgentKill'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $CoreProcessId /T /F' -Prefix 'CoreKill'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $UiProcessId /T /F' -Prefix 'UiKill'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $AgentCapture.pid /T /F' -Prefix 'AgentKill'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $CoreCapture.pid /T /F' -Prefix 'CoreKill'
+        Assert-GuardedNativeCommand -Lines $lines -Command '& taskkill.exe /PID $UiCapture.pid /T /F' -Prefix 'UiKill'
         Assert-GuardedNativeCommand -Lines $lines -Command '& shutdown.exe /r /t 0 /f' -Prefix 'Reboot'
         Assert-GuardedNativeCommand -Lines $lines -Command '& msiexec.exe /i $CorporateSignedMsiPath /qn /norestart /l*v $MsiInstallLogPath' -Prefix 'MsiInstall'
         Assert-GuardedNativeCommand -Lines $lines -Command '& msiexec.exe /x $CorporateSignedMsiPath /qn /norestart /l*v $MsiUninstallLogPath' -Prefix 'MsiUninstall'
 
-        $runbook = $lines -join "`n"
         foreach ($text in @(
             'standard-client gate PASS is required before custom MSI',
             'Get-AuthenticodeSignature', '$CorporateSignerThumbprint',
+            'Get-FileHash', '$StandardSingBoxSha256', '$StandardClientConfigSha256',
+            'Start-Process -FilePath $StandardSingBoxPath -ArgumentList @(''run'',''-c'',$StandardClientConfigPath) -WindowStyle Hidden -PassThru',
+            '$StandardClientProcess.HasExited',
+            'Stop-Process -Id $StandardClientProcess.Id -Force',
+            'Invoke-PipeOnlyProvisioning -CredentialSourcePath $CredentialSourcePath -ProvisionerPath $ProvisionerPath',
+            'AnonymousPipeServerStream',
+            'Credential prompt: enter the one-time secret only at the console attached to the credential source',
+            'Install must leave the agent stopped before provisioning.',
+            'credential.bin was not created',
+            'Agent service did not reach Running after provisioning',
             'browser', 'Git', 'HTTPS', 'corporate DNS', 'AD', 'EC',
             'direct access to VM:8080 failure', 'service stop leak failure',
             'telecom-process stop leak failure', 'node loss', 'telecom loss',
             '20 clean enable/disable cycles', 'exact final-state restoration',
             'nonce receipt', 'leak receipt', 'route/DNS/firewall snapshots',
-            'redacted logs', 'one full workday'
+            'redacted logs', 'one full workday',
+            'Never accept preset PID variables',
+            'Capture-ManagedProcess'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required client acceptance contract.'
         }
+
+        Assert-NotMatches -Text $runbook -Pattern '\$AgentProcessId\b' -Message 'Runbook must not rely on preset agent PID variables.'
+        Assert-NotMatches -Text $runbook -Pattern '\$CoreProcessId\b' -Message 'Runbook must not rely on preset core PID variables.'
+        Assert-NotMatches -Text $runbook -Pattern '\$UiProcessId\b' -Message 'Runbook must not rely on preset UI PID variables.'
     }
 
     It 'requires evidence collection, zero-drift comparison, and a fail verdict on mandatory failure' {
@@ -267,9 +298,10 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         foreach ($text in @(
             'Get-FileHash', 'Compress-Archive', 'baseline-vm.json', 'baseline-physical.json',
             'server-whatif.json', 'server-install.json', 'server-status.json',
-            'server-rollback.json', 'standard-client.json', 'custom-client.json',
-            'lifecycle-20-cycles.json', 'verdict.json',
-            'FAIL', 'Never label a partial test PASS', 'zero changes after WhatIf'
+            'server-rollback.json', 'server-attestation.json', 'standard-client.json', 'custom-client.json',
+            'lifecycle-20-cycles.json', 'installer-verifier.json', 'verdict.json',
+            'FAIL', 'Never label a partial test PASS', 'zero changes after WhatIf',
+            'Compare-CanonicalStateSnapshots', 'filesystem', 'registry', 'scheduled tasks', 'server-owned state'
         )) {
             Assert-Matches -Text $runbook -Pattern ([regex]::Escape($text)) -Message 'Missing required evidence or verdict contract.'
         }

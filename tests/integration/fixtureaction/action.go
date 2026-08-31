@@ -47,21 +47,21 @@ type serverPlan struct {
 	ListenerEndpoint                                       string
 }
 
-func runCaseSetup(operation string, setupServer func() error, install func(string) error, provision, startAgent, cleanupServer func() error) error {
-	if setupServer == nil || install == nil || provision == nil || startAgent == nil || cleanupServer == nil {
+func runCaseSetup(operation string, requireClean, install func(string) error, provision, startAgent func() error) error {
+	if requireClean == nil || install == nil || provision == nil || startAgent == nil {
 		return errors.New("case setup step is absent")
 	}
-	if err := setupServer(); err != nil {
-		return errors.Join(err, cleanupServer())
+	if err := requireClean(operation); err != nil {
+		return err
 	}
 	if err := install(operation); err != nil {
-		return errors.Join(err, cleanupServer())
+		return err
 	}
 	if err := provision(); err != nil {
-		return errors.Join(err, cleanupServer())
+		return err
 	}
 	if err := startAgent(); err != nil {
-		return errors.Join(err, cleanupServer())
+		return err
 	}
 	return nil
 }
@@ -181,10 +181,10 @@ func verifyInstalledArtifactsAbsent(manifest fixtureconfig.Manifest, roles []str
 	return nil
 }
 
-func provisionerPlan(clientConfig []byte, payload fixtureconfig.PayloadManifest, expiresAt string) (string, []string, []byte, error) {
+func provisionerPlan(config runtimeConfig, clientConfig []byte, payload fixtureconfig.PayloadManifest) (string, string, fixtureconfig.ProvisioningDetails, error) {
 	installed, err := payload.InstalledFiles()
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", fixtureconfig.ProvisioningDetails{}, err
 	}
 	var executable string
 	for _, file := range installed {
@@ -194,13 +194,16 @@ func provisionerPlan(clientConfig []byte, payload fixtureconfig.PayloadManifest,
 		}
 	}
 	if executable == "" {
-		return "", nil, nil, errors.New("credential provisioner is absent from the payload manifest")
+		return "", "", fixtureconfig.ProvisioningDetails{}, errors.New("credential provisioner is absent from the payload manifest")
 	}
-	document, err := fixtureconfig.CredentialDocument(clientConfig, expiresAt)
+	metadata, err := fixtureconfig.ProvisioningMetadata(clientConfig)
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", fixtureconfig.ProvisioningDetails{}, err
 	}
-	return executable, nil, document, nil
+	if !filepath.IsAbs(config.CredentialSourcePath) || filepath.Clean(config.CredentialSourcePath) != config.CredentialSourcePath {
+		return "", "", fixtureconfig.ProvisioningDetails{}, errors.New("credential source path is invalid")
+	}
+	return executable, config.CredentialSourcePath, metadata, nil
 }
 
 func verifyInstalledPayloadHashes(manifest fixtureconfig.PayloadManifest, hashFile func(string) (string, error)) error {

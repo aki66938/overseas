@@ -61,16 +61,12 @@ func TestValidateResponseBindsEveryRequestAndFixtureIdentity(t *testing.T) {
 	}
 }
 
-func TestSnapshotRequiresCompletePayloadHashesNoUnexpectedFilesAndServerOwnership(t *testing.T) {
+func TestSnapshotRequiresCompletePayloadHashesNoUnexpectedFilesAndNoLocalServerResidue(t *testing.T) {
 	binding := validBinding()
 	snapshot := validSnapshot("nonce-1")
 	snapshot.InstalledFiles = []FileRecord{{Role: "payload", Name: binding.PayloadFiles[0].Name, Path: binding.PayloadFiles[0].Path, ExpectedSHA256: binding.PayloadFiles[0].SHA256, Present: true, SHA256: binding.PayloadFiles[0].SHA256}}
 	snapshot.UnexpectedFiles = []FileRecord{}
 	snapshot.OwnedRoots = []RootRecord{{Path: `C:\Program Files\RegenBio\OverseasAccess`, Present: true}, {Path: `C:\ProgramData\RegenBio\OverseasAccess`, Present: true}}
-	snapshot.Services = append(snapshot.Services, ServiceRecord{Role: "server-service", Name: "RegenBioOverseasAccessServer", Present: true, Status: "Running", StartMode: "Automatic", Path: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, PathSHA256: binding.Artifacts.ServerServiceSHA256, PID: 50})
-	snapshot.Processes = append(snapshot.Processes, ProcessRecord{Role: "server-service", Present: true, PID: 50, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\overseas-server-service.exe`, ImageSHA256: binding.Artifacts.ServerServiceSHA256}, ProcessRecord{Role: "server-core", Present: true, PID: 51, ParentPID: 50, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, ImageSHA256: binding.Artifacts.CoreSHA256})
-	snapshot.RuntimeFiles = append(snapshot.RuntimeFiles, FileRecord{Role: "server-config", Path: `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`, ExpectedSHA256: binding.ServerConfigSHA256, Present: true, SHA256: binding.ServerConfigSHA256})
-	snapshot.Listeners = append(snapshot.Listeners, ListenerRecord{Role: "server-core", Endpoint: "172.20.9.15:18443", Present: true, PID: 51, ImagePath: `C:\Program Files\RegenBio\OverseasAccessServer\sing-box.exe`, ImageSHA256: binding.Artifacts.CoreSHA256})
 	if err := snapshot.Validate("nonce-1", binding); err != nil {
 		t.Fatalf("Validate()=%v", err)
 	}
@@ -86,9 +82,9 @@ func TestSnapshotRequiresCompletePayloadHashesNoUnexpectedFilesAndServerOwnershi
 		t.Fatalf("unexpected file Validate()=%v", err)
 	}
 	changed = snapshot.Clone()
-	changed.Processes[len(changed.Processes)-1].ParentPID = 49
-	if err := changed.Validate("nonce-1", binding); err == nil || !strings.Contains(err.Error(), "server") {
-		t.Fatalf("wrong parent Validate()=%v", err)
+	changed.RuntimeFiles = append(changed.RuntimeFiles, FileRecord{Role: "server-config", Path: `C:\ProgramData\RegenBio\OverseasAccessServer\config.json`, ExpectedSHA256: binding.ServerConfigSHA256, Present: true, SHA256: binding.ServerConfigSHA256})
+	if err := changed.Validate("nonce-1", binding); err == nil || !strings.Contains(strings.ToLower(err.Error()), "local server config residue") {
+		t.Fatalf("server config residue Validate()=%v", err)
 	}
 }
 
