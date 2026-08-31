@@ -20,7 +20,10 @@ or runtime state was intentionally mutated.
    file from exactly one independently approved `DESKTOP-1BVR2H6 ssh-ed25519`
    public-key line, requires exactly one derived fingerprint equal to the
    separately approved value, rejects ambiguity, and pins both that file and the
-   Ed25519 host-key algorithm on every SSH invocation. Live keyscan output is
+   Ed25519 host-key algorithm on every SSH invocation. Every SSH call also uses
+   `-F NUL`, `GlobalKnownHostsFile=NUL`, `VerifyHostKeyDNS=no`, and
+   `UpdateHostKeys=no`, so user configuration, global known-hosts, DNS SSHFP,
+   and host-key learning cannot add another trust source. Live keyscan output is
    never trusted.
 2. `installer-verifier.exe verify-bundle` is a real pre-install command. A clean-
    host staged verifier is pinned externally by SHA256 and Authenticode before it
@@ -50,9 +53,11 @@ or runtime state was intentionally mutated.
    the exact three fixed firewall-rule names with stable rule/description,
    application, port, address, service, interface, interface-type, and security
    filter surfaces, and server-owned evidence/marker state. Duplicate named
-   rules and capture errors fail closed. Volatile timestamps, process IDs,
-   process inventories, and network probes are excluded from that equality
-   surface.
+   rules and capture errors fail closed. Firewall capture enumerates ActiveStore
+   exactly once with `-ErrorAction Stop`, then selects the three names only from
+   that in-memory result; an enumeration error cannot be reported as an absent
+   rule. Volatile timestamps, process IDs, process inventories, and network
+   probes are excluded from that equality surface.
 8. The runbook invokes the pinned Go `provision-credential` helper after MSI with
    four exact external SHA256 bindings for the action config, generated client
    config, credential-source executable, and server attestation. The helper
@@ -76,6 +81,10 @@ the missing four-hash direct-provisioning contract, keyscan-derived/multi-key
 SSH trust, incomplete exact-name firewall capture, malformed nested canonical
 PowerShell, and non-fail-closed capture; each corresponding focused suite was
 then rerun to GREEN.
+The final P1 follow-up produced RED failures for missing SSH configuration/trust-
+source isolation and for a mocked non-terminating ActiveStore read error; the
+minimal runbook changes then made the same focused PowerShell 5.1 and PowerShell
+7 suites GREEN.
 
 ## Fresh non-live verification executed on 2026-08-31
 
@@ -83,8 +92,8 @@ then rerun to GREEN.
 - Locked `go vet ./...`: PASS.
 - Locked `go test -count=20` for fixtureproto, fixtureconfig, fixtureaction,
   fixturedriver, agent, and supervisor: PASS.
-- Windows PowerShell 5.1 full Pester: `114 passed, 0 failed, 0 skipped`.
-- PowerShell 7 full Pester: `114 passed, 0 failed, 0 skipped`.
+- Windows PowerShell 5.1 full Pester: `115 passed, 0 failed, 0 skipped`.
+- PowerShell 7 full Pester: `115 passed, 0 failed, 0 skipped`.
 - Locked Windows amd64 builds: all eight PASS (`fixturedriver`,
   `fixtureserver`, `fixtureaction`, `overseas-agent`, `overseas-client`,
   `credential-provisioner`, `installer-verifier`, and

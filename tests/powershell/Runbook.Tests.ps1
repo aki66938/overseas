@@ -232,18 +232,20 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 
     It 'requires guarded SSH, VM inventory, baseline, telecom CONNECT, and server operations' {
         $lines = Get-SingBoxRunbookLines
+		$sshPrefix = '& ssh.exe -F NUL -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath -o GlobalKnownHostsFile=NUL -o VerifyHostKeyDNS=no -o UpdateHostKeys=no'
 
         Assert-GuardedNativeCommand -Lines $lines -Command '$PinnedKnownHostsFingerprintLines = @(& ssh-keygen.exe -lf $KnownHostsPath -E sha256)' -Prefix 'PinnedKnownHostsFingerprint'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmFactsCommand > $VmFactsPath' -Prefix 'VmFacts'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmBaselineCommand > $VmBaselinePath' -Prefix 'VmBaseline'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $TelecomConnectCommand > $TelecomConnectPath' -Prefix 'TelecomConnect'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfBeforePath' -Prefix 'VmWhatIfBefore'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerWhatIfCommand > $ServerWhatIfPath' -Prefix 'ServerWhatIf'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $VmCanonicalStateCommand > $VmWhatIfAfterPath' -Prefix 'VmWhatIfAfter'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerInstallCommand > $ServerInstallPath' -Prefix 'ServerInstall'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerStatusCommand > $ServerStatusPath' -Prefix 'ServerStatus'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerAttestationCommand > $ServerAttestationPath' -Prefix 'ServerAttestation'
-        Assert-GuardedNativeCommand -Lines $lines -Command '& ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath $VmSshTarget $ServerRollbackCommand > $ServerRollbackPath' -Prefix 'ServerRollback'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$VmFactsCommand > `$VmFactsPath" -Prefix 'VmFacts'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$VmBaselineCommand > `$VmBaselinePath" -Prefix 'VmBaseline'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$TelecomConnectCommand > `$TelecomConnectPath" -Prefix 'TelecomConnect'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$VmCanonicalStateCommand > `$VmWhatIfBeforePath" -Prefix 'VmWhatIfBefore'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$ServerWhatIfCommand > `$ServerWhatIfPath" -Prefix 'ServerWhatIf'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$VmCanonicalStateCommand > `$VmWhatIfAfterPath" -Prefix 'VmWhatIfAfter'
+		Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$VmBaselineCommand > `$VmPreInstallPath" -Prefix 'VmPreInstall'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$ServerInstallCommand > `$ServerInstallPath" -Prefix 'ServerInstall'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$ServerStatusCommand > `$ServerStatusPath" -Prefix 'ServerStatus'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$ServerAttestationCommand > `$ServerAttestationPath" -Prefix 'ServerAttestation'
+        Assert-GuardedNativeCommand -Lines $lines -Command "$sshPrefix `$VmSshTarget `$ServerRollbackCommand > `$ServerRollbackPath" -Prefix 'ServerRollback'
 
         $runbook = $lines -join "`n"
         foreach ($text in @(
@@ -275,9 +277,12 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
         }
 		Assert-NotMatches -Text $runbook -Pattern 'ssh-keyscan|ScannedHostKeyPath' -Message 'Known-host trust must not be constructed from keyscan output.'
 		$sshLines = @($lines | Where-Object { $_ -like '& ssh.exe *' })
-		Assert-True -Condition ($sshLines.Count -gt 0) -Message 'Runbook has no SSH commands.'
+		Assert-Equal -Actual $sshLines.Count -Expected 11 -Message 'Runbook must contain the reviewed set of eleven SSH commands.'
 		foreach ($sshLine in $sshLines) {
-			Assert-Matches -Text $sshLine -Pattern ([regex]::Escape('-o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=$KnownHostsPath')) -Message 'Every SSH invocation must pin the sole Ed25519 key algorithm and known_hosts file.'
+			Assert-True -Condition ($sshLine.StartsWith($sshPrefix + ' ')) -Message 'Every SSH invocation must exclude config, global known_hosts, DNS, and host-key update bypasses while pinning the sole Ed25519 user known_hosts file.'
+			foreach ($uniqueOption in @('-F NUL', '-o StrictHostKeyChecking=yes', '-o HostKeyAlgorithms=ssh-ed25519', '-o UserKnownHostsFile=$KnownHostsPath', '-o GlobalKnownHostsFile=NUL', '-o VerifyHostKeyDNS=no', '-o UpdateHostKeys=no')) {
+				Assert-Equal -Actual ([regex]::Matches($sshLine, [regex]::Escape($uniqueOption))).Count -Expected 1 -Message "SSH trust option must occur exactly once: $uniqueOption"
+			}
 		}
 
 		$canonicalLine = @($lines | Where-Object { $_ -like '$VmCanonicalStateCommand =*' })
@@ -295,7 +300,8 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 			"'RegenBioOverseasAccess-AllowEmployee-In'",
 			"'RegenBioOverseasAccess-Block8080-Remote'",
 			"'RegenBioOverseasAccess-BlockManagement-Employee'",
-			'Get-NetFirewallRule -Name $name', 'Description',
+			'$activeFirewallRules=@(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)',
+			'$rules=@($activeFirewallRules|Where-Object{$_.Name-ceq$name})', 'Description',
 			'Get-NetFirewallApplicationFilter', 'Get-NetFirewallPortFilter',
 			'Get-NetFirewallAddressFilter', 'Get-NetFirewallServiceFilter',
 			'Get-NetFirewallInterfaceFilter', 'Get-NetFirewallInterfaceTypeFilter',
@@ -308,7 +314,27 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 			Assert-Matches -Text $canonicalLine[0] -Pattern ([regex]::Escape($text)) -Message 'Canonical WhatIf firewall surface is incomplete.'
 		}
 		Assert-NotMatches -Text $canonicalLine[0] -Pattern 'Get-NetFirewallRule\|Where-Object\s*\{\s*\$_\.Group' -Message 'Canonical WhatIf firewall capture must use only the exact three rule names, not Group ownership.'
+		Assert-NotMatches -Text $canonicalLine[0] -Pattern 'Get-NetFirewallRule\s+-Name|Get-NetFirewallRule[^;]*SilentlyContinue' -Message 'Firewall read failures must not be collapsed into missing named rules.'
     }
+
+	It 'fails the canonical WhatIf snapshot when the ActiveStore firewall read emits an error' {
+		$lines = Get-SingBoxRunbookLines
+		$canonicalLine = @($lines | Where-Object { $_ -like '$VmCanonicalStateCommand =*' })
+		Assert-Equal -Actual $canonicalLine.Count -Expected 1 -Message 'Canonical WhatIf command must be declared exactly once.'
+		. ([scriptblock]::Create($canonicalLine[0]))
+		$canonicalPrefix = 'powershell.exe -NoProfile -Command "'
+		$canonicalInner = $VmCanonicalStateCommand.Substring($canonicalPrefix.Length, $VmCanonicalStateCommand.Length - $canonicalPrefix.Length - 1)
+		$firewallRead = [regex]::Match($canonicalInner, '\$activeFirewallRules=@\(Get-NetFirewallRule[^;]+\);')
+		Assert-True -Condition $firewallRead.Success -Message 'Canonical WhatIf snapshot has no isolated ActiveStore firewall read.'
+		Mock Get-NetFirewallRule { Write-Error 'forced ActiveStore read failure' }
+
+		$failure = $null
+		try { & ([scriptblock]::Create($firewallRead.Value)) | Out-Null }
+		catch { $failure = $_ }
+		Assert-True -Condition ($null -ne $failure) -Message 'Canonical WhatIf snapshot treated a firewall read failure as missing rules.'
+		Assert-Matches -Text ([string] $failure) -Pattern 'forced ActiveStore read failure' -Message "Canonical WhatIf snapshot did not preserve the firewall read failure: $failure"
+		Assert-MockCalled Get-NetFirewallRule -Times 1 -Exactly
+	}
 
     It 'gates the standard client, MSI verification, pipe-only provisioning, and lifecycle capture' {
         $lines = Get-SingBoxRunbookLines
