@@ -4,13 +4,14 @@
 
 **Goal:** Build, sign and install a Windows TUN client whose only overseas outbound is HTTP CONNECT to `172.20.9.15:8080`, leaving it disconnected for the user-run FlClash-off acceptance test.
 
-**Architecture:** Add an explicit `http-connect` node transport to policy schema 2. The agent renders this transport without loading a DPAPI secret, while retaining the existing direct host route, corporate bypass, DNS hijack and fail-closed network controller. Package it as a PoC-signed MSI, install without starting the service or changing proxy settings, and prepare a separately invoked recovery command for the user's live test.
+**Architecture:** Add an explicit `http-connect` node transport to policy schema 2. The agent renders this transport without loading a DPAPI secret, while retaining the existing direct host route, corporate bypass, DNS hijack and fail-closed network controller. Schema 1 remains readable only for the repository's legacy Shadowsocks compatibility path; the new signed package contains schema 2 exclusively. Package it as a PoC-signed MSI, install without starting the service or changing proxy settings, and prepare a separately invoked recovery command for the user's live test.
 
 **Tech Stack:** Go 1.27, sing-box 1.13.19, Windows Service Control Manager, Wintun, PowerShell 5.1/7, Pester 3.4, WiX 4.0.6, Windows SDK SignTool.
 
 ## Global Constraints
 
 - The approved upstream is exactly IPv4 `172.20.9.15`, TCP port `8080`, transport `http-connect`.
+- Schema 1 validation and credential behavior remain intact for legacy tests and artifacts; schema 2 requires `http-connect` and forbids a credential reference.
 - VM101 is not modified by this plan; no RegenBio server service or TCP 18443 listener is deployed.
 - Installation must leave `RegenBioOverseasAccessAgent` stopped and the UI disconnected.
 - No step closes, reconfigures or otherwise mutates FlClash or Windows system proxy settings.
@@ -35,7 +36,7 @@
 
 - [ ] **Step 1: Write failing access-model tests**
 
-Add cases proving schema 2 requires every node transport to equal `http-connect`, accepts only `172.20.9.15:8080` for this PoC, and rejects empty, `shadowsocks`, loopback, wildcard, another address, or another port. Update canonical-hash fixtures so `Transport` participates in the digest.
+Add cases proving schema 2 requires every node transport to equal `http-connect`, accepts only `172.20.9.15:8080` for this PoC, forbids a credential reference, and rejects empty, `shadowsocks`, loopback, wildcard, another address, or another port. Retain schema-1 acceptance tests for the legacy DPAPI/Shadowsocks policy. Update canonical-hash fixtures so `Transport` participates in the schema-2 digest.
 
 - [ ] **Step 2: Run the focused model tests and witness RED**
 
@@ -61,7 +62,7 @@ type Node struct {
 }
 ```
 
-Set the supported schema version to `2`; validate the exact approved transport/address/port tuple and include `Transport` in canonical node sorting.
+Dispatch validation by schema version: schema 1 retains the existing credential and node rules, while schema 2 rejects a nonempty credential, validates the exact approved transport/address/port tuple, and includes `Transport` in canonical node sorting.
 
 - [ ] **Step 4: Run focused model tests and witness GREEN**
 
