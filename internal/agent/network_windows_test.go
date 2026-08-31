@@ -106,6 +106,56 @@ func TestWindowsNetworkRestoreDeletesSnapshotOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestWindowsNetworkCapturedOnlyRestoreDoesNotRewriteInterfaces(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	input := runner.inputFor(t, networkOperationRestore)
+	if input.RestoreInterfaces {
+		t.Fatal("captured-only restore rewrites interfaces")
+	}
+	if !strings.Contains(restoreNetworkPowerShell, "if ([bool]$i.RestoreInterfaces)") {
+		t.Fatal("restore script does not gate interface mutation by ownership phase")
+	}
+}
+
+func TestWindowsNetworkTUNOwnedRestoreUsesStableInterfaceGUID(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WaitTUNReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), store.snapshot); err != nil {
+		t.Fatal(err)
+	}
+	input := runner.inputFor(t, networkOperationRestore)
+	if !input.RestoreInterfaces || input.Interfaces[0].InterfaceGuid != "physical-guid" {
+		t.Fatalf("TUN-owned restore input = %#v", input)
+	}
+	for _, required := range []string{"Get-NetAdapter -IncludeHidden", "InterfaceGuid", "InterfaceIndex", "$matches.Count -ne 1"} {
+		if !strings.Contains(restoreNetworkPowerShell, required) {
+			t.Fatalf("restore script does not contain %q", required)
+		}
+	}
+}
+
 func TestWindowsNetworkReconcileIsIdempotentAcrossServiceRestart(t *testing.T) {
 	snapshot := capturedWindowsSnapshot(t)
 	runner := &fakeNetworkRunner{}
@@ -373,6 +423,16 @@ func TestWindowsNetworkReconcileRejectsTamperedOwnedRouteTuplesBeforeCleanup(t *
 		}},
 		{name: "TUN identity", mutate: func(value *WindowsNetworkSnapshot) { value.OwnedTUN.InterfaceAlias = "foreign-tun" }},
 		{name: "TUN identity relation", mutate: func(value *WindowsNetworkSnapshot) { value.OwnedTUN.InterfaceIndex++ }},
+		{name: "missing physical GUID", mutate: func(value *WindowsNetworkSnapshot) { value.Interfaces[0].InterfaceGuid = "" }},
+		{name: "duplicate physical GUID", mutate: func(value *WindowsNetworkSnapshot) {
+			duplicate := value.Interfaces[0]
+			duplicate.Index++
+			duplicate.Alias = "Duplicate Ethernet"
+			value.Interfaces = append(value.Interfaces, duplicate)
+		}},
+		{name: "physical GUID collides with TUN", mutate: func(value *WindowsNetworkSnapshot) {
+			value.Interfaces[0].InterfaceGuid = value.OwnedTUN.InterfaceGuid
+		}},
 		{name: "cleared TUN ownership", mutate: func(value *WindowsNetworkSnapshot) {
 			value.OwnedTUN = nil
 			value.OwnedRoutes = nil
@@ -786,6 +846,7 @@ func validWindowsSnapshot() WindowsNetworkSnapshot {
 		Version: 1,
 		Interfaces: []WindowsInterfaceSnapshot{{
 			Index:           7,
+			InterfaceGuid:   "physical-guid",
 			Alias:           "Ethernet",
 			InterfaceMetric: 25,
 			AutomaticMetric: true,

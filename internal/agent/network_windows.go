@@ -54,6 +54,7 @@ var errSnapshotNotFound = errors.New("network snapshot not found")
 
 type WindowsInterfaceSnapshot struct {
 	Index           int      `json:"Index"`
+	InterfaceGuid   string   `json:"InterfaceGuid"`
 	Alias           string   `json:"Alias"`
 	InterfaceMetric int      `json:"InterfaceMetric"`
 	AutomaticMetric bool     `json:"AutomaticMetric"`
@@ -119,6 +120,7 @@ type WindowsNetworkSnapshot struct {
 
 type windowsNetworkInput struct {
 	Interfaces                []WindowsInterfaceSnapshot `json:"Interfaces,omitempty"`
+	RestoreInterfaces         bool                       `json:"RestoreInterfaces,omitempty"`
 	FirewallRuleNames         []string                   `json:"FirewallRuleNames,omitempty"`
 	FirewallGroup             string                     `json:"FirewallGroup,omitempty"`
 	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses,omitempty"`
@@ -602,6 +604,7 @@ func activationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
 
 func (m *WindowsNetworkManager) restorationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
 	input := activationInput(snapshot)
+	input.RestoreInterfaces = snapshot.OwnershipPhase == windowsSnapshotPhaseTUNOwned
 	// Version-1 snapshots written before the route-guard remediation did not
 	// persist these derived sets. Re-derive them from the validated immutable
 	// policy so the in-script catch path remains fail-closed during upgrade.
@@ -672,10 +675,16 @@ func validateWindowsSnapshot(snapshot WindowsNetworkSnapshot) error {
 			return errors.New("captured node bypass decision is invalid")
 		}
 	}
+	seenInterfaceGUIDs := make(map[string]struct{}, len(snapshot.Interfaces))
 	for _, networkInterface := range snapshot.Interfaces {
-		if networkInterface.Index <= 0 || strings.TrimSpace(networkInterface.Alias) == "" {
+		guid := strings.ToLower(strings.TrimSpace(networkInterface.InterfaceGuid))
+		if networkInterface.Index <= 0 || strings.TrimSpace(networkInterface.Alias) == "" || guid == "" {
 			return errors.New("captured interface state is invalid")
 		}
+		if _, duplicate := seenInterfaceGUIDs[guid]; duplicate {
+			return errors.New("captured interface GUID is duplicated")
+		}
+		seenInterfaceGUIDs[guid] = struct{}{}
 		for _, server := range networkInterface.DNSServers {
 			if _, err := netip.ParseAddr(server); err != nil {
 				return errors.New("captured DNS state is invalid")
@@ -714,6 +723,11 @@ func (m *WindowsNetworkManager) validateWindowsSnapshot(snapshot WindowsNetworkS
 	}
 	if err := validateTUNIdentity(*snapshot.OwnedTUN, snapshot.BaselineAdapterGuids); err != nil {
 		return err
+	}
+	for _, networkInterface := range snapshot.Interfaces {
+		if strings.EqualFold(strings.TrimSpace(networkInterface.InterfaceGuid), strings.TrimSpace(snapshot.OwnedTUN.InterfaceGuid)) {
+			return errors.New("captured physical interface identity collides with the owned TUN")
+		}
 	}
 	expectedOwned := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+len(snapshot.NodeRoutes))
 	for _, value := range m.blockedPrefixes {
@@ -1086,6 +1100,7 @@ foreach ($index in @($defaults.InterfaceIndex | Sort-Object -Unique)) {
   $registry = Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\' + $adapter.InterfaceGuid) -ErrorAction SilentlyContinue
   $interfaces += [pscustomobject]@{
     Index = [int]$index
+    InterfaceGuid = [string]$adapter.InterfaceGuid
     Alias = [string]$adapter.InterfaceAlias
     InterfaceMetric = [int]$ip.InterfaceMetric
     AutomaticMetric = ([string]$ip.AutomaticMetric -eq 'Enabled')
@@ -1243,13 +1258,20 @@ function Install-Emergency {
   }
 }
 try {
+if ([bool]$i.RestoreInterfaces) {
+$allAdapters = @(Get-NetAdapter -IncludeHidden)
 foreach ($physical in @($i.Interfaces)) {
+  $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
+  if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
+  if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
+  $currentIndex = [int]$matches[0].InterfaceIndex
   if ([bool]$physical.DNSAutomatic) {
-    Set-DnsClientServerAddress -InterfaceIndex $physical.Index -ResetServerAddresses
+    Set-DnsClientServerAddress -InterfaceIndex $currentIndex -ResetServerAddresses
   } else {
-    Set-DnsClientServerAddress -InterfaceIndex $physical.Index -ServerAddresses @($physical.DNSServers)
+    Set-DnsClientServerAddress -InterfaceIndex $currentIndex -ServerAddresses @($physical.DNSServers)
   }
-  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $physical.Index -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric
+  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $currentIndex -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric
+}
 }
 foreach ($route in @($i.OwnedRoutes)) {
   Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
