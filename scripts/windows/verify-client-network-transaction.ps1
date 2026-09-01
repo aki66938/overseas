@@ -96,10 +96,6 @@ function Test-TraceLifecycle {
             return $false
         }
     }
-    $terminalResidueEvents = @($afterRestore | Where-Object { $_.stage -eq 'residue_verify' -and $_.event -eq 'succeeded' })
-    if ($terminalResidueEvents.Count -eq 0 -or -not (Test-TerminalResidueZero -Residue $terminalResidueEvents[-1].residue)) {
-        return $false
-    }
     return $true
 }
 

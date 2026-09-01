@@ -38,21 +38,32 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 		t.Fatalf("gate is not LocalSystem: %s", got)
 	}
 
-	statePath := filepath.Join(t.TempDir(), "network-state.json")
-	sink := &recordingTraceSink{}
-	manager, err := newWindowsNetworkManager(validPolicy(), statePath, powerShellNetworkRunner{}, fileSnapshotStore{}, WithWindowsTraceSink(sink))
+	testRoot := t.TempDir()
+	statePath := filepath.Join(testRoot, "network-state.json")
+	recorder, err := traceevent.NewRecorder(traceevent.RecorderConfig{
+		Directory: filepath.Join(testRoot, "logs"), MemoryCapacity: 128, MaxFileBytes: 65536, RetainFiles: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Errorf("close trace recorder: %v", err)
+		}
+	}()
+	manager, err := newWindowsNetworkManager(validPolicy(), statePath, powerShellNetworkRunner{}, fileSnapshotStore{}, WithWindowsTraceSink(recorder))
 	if err != nil {
 		t.Fatal(err)
 	}
 	evidence := &liveTraceEvidence{SchemaVersion: 1}
-	defer writeLiveTraceEvidence(t, os.Getenv(liveTraceEvidenceEnvironment), manager, sink, evidence)
+	defer writeLiveTraceEvidence(t, os.Getenv(liveTraceEvidenceEnvironment), manager, recorder, evidence)
 	ctx, cancel := context.WithTimeout(traceevent.WithGeneration(context.Background(), 1), 120*time.Second)
 	defer cancel()
 	snapshot, err := manager.Capture(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	evidence.BeforePublish = sink.eventsCopy()
+	evidence.BeforePublish = recorder.Batch(0, 128).Events
 	restored := false
 	defer func() {
 		if restored {
@@ -68,7 +79,7 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	if _, err := manager.InstallPublicTCPBlock(ctx); err != nil {
 		t.Fatal(err)
 	}
-	evidence.AfterPublish = sink.eventsCopy()
+	evidence.AfterPublish = recorder.Batch(0, 128).Events
 	if err := manager.Restore(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +95,8 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 		t.Fatalf("network residue = %#v", residue)
 	}
 	evidence.TerminalResidue = &residue
-	evidence.AfterRestore = sink.eventsCopy()
-	events := sink.eventsCopy()
+	evidence.AfterRestore = recorder.Batch(0, 128).Events
+	events := recorder.Batch(0, 128).Events
 	for _, stage := range []string{
 		traceevent.StageNetworkCapture,
 		traceevent.StageAdapterScan,
@@ -101,7 +112,7 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	assertTracePairs(t, events)
 }
 
-func writeLiveTraceEvidence(t *testing.T, path string, manager *WindowsNetworkManager, sink *recordingTraceSink, evidence *liveTraceEvidence) {
+func writeLiveTraceEvidence(t *testing.T, path string, manager *WindowsNetworkManager, source traceevent.Source, evidence *liveTraceEvidence) {
 	t.Helper()
 	if path == "" {
 		return
@@ -121,7 +132,7 @@ func writeLiveTraceEvidence(t *testing.T, path string, manager *WindowsNetworkMa
 		}
 	}
 	if len(evidence.AfterRestore) == 0 {
-		evidence.AfterRestore = sink.eventsCopy()
+		evidence.AfterRestore = source.Batch(0, 128).Events
 	}
 	encoded, err := json.Marshal(evidence)
 	if err != nil {

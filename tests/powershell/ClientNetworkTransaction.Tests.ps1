@@ -1,5 +1,6 @@
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repo 'scripts\windows\verify-client-network-transaction.ps1'
+$integrationPath = Join-Path $repo 'internal\agent\network_windows_integration_test.go'
 
 Describe 'Client LocalSystem network transaction gate' {
     It 'exists and parses in Windows PowerShell 5.1' {
@@ -50,6 +51,7 @@ Describe 'Client LocalSystem network transaction gate' {
 
     It 'captures structured trace checkpoints and proves paired lifecycle stages' {
         $source = Get-Content -LiteralPath $scriptPath -Raw
+        $integrationSource = Get-Content -LiteralPath $integrationPath -Raw
         foreach ($literal in @(
             'OVERSEAS_ACCESS_TRACE_EVIDENCE_PATH',
             'BeforePublish',
@@ -70,6 +72,8 @@ Describe 'Client LocalSystem network transaction gate' {
         $source | Should Match 'SchemaVersion\s*=\s*2'
         $source | Should Match 'TraceLifecycleComplete\s*=\s*\$traceLifecycleComplete'
         $source | Should Match 'TerminalResidueZero\s*=\s*\$terminalResidueZero'
+        $integrationSource | Should Match ([regex]::Escape('traceevent.NewRecorder'))
+        $integrationSource | Should Match ([regex]::Escape('.Batch(0,'))
     }
 
     It 'keeps the trace sidecar create-new bounded and removes it after evidence publication' {
