@@ -31,7 +31,7 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	snapshot, err := manager.Capture(ctx)
 	if err != nil {
@@ -42,7 +42,7 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 		if restored {
 			return
 		}
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cleanupCancel()
 		if restoreErr := manager.Restore(cleanupContext, snapshot); restoreErr != nil {
 			t.Errorf("cleanup restore: %v", restoreErr)

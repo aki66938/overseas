@@ -52,6 +52,7 @@ const (
 	windowsSnapshotPhaseProtected = "protected"
 	windowsSnapshotPhaseTUNOwned  = "tun-owned"
 	maxNetworkDiagnosticBytes     = 512
+	windowsEmergencyTimeout       = 30 * time.Second
 )
 
 type fixedNetworkOperationError struct {
@@ -370,7 +371,9 @@ func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) (<-ch
 	}
 	m.mu.Unlock()
 	if err := m.reconcileProtection(ctx); err != nil {
-		return nil, errors.Join(err, m.installEmergencyProtection(ctx))
+		emergencyContext, cancelEmergency := context.WithTimeout(context.WithoutCancel(ctx), windowsEmergencyTimeout)
+		defer cancelEmergency()
+		return nil, errors.Join(err, m.installEmergencyProtection(emergencyContext))
 	}
 	monitorContext, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

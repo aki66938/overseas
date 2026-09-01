@@ -831,6 +831,28 @@ func TestWindowsNetworkReconciliationFailureInstallsCatchAllEmergencyBlock(t *te
 	}
 }
 
+func TestWindowsNetworkReconciliationFailureUsesFreshEmergencyContext(t *testing.T) {
+	runner := &fakeNetworkRunner{
+		capture:   validWindowsSnapshot(),
+		runErrors: map[string][]error{networkOperationBlock: {errors.New("firewall publication failed")}},
+	}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := manager.InstallPublicTCPBlock(canceled); err == nil {
+		t.Fatal("InstallPublicTCPBlock() succeeded after firewall publication failure")
+	}
+	if runner.emergencyContextErr != nil {
+		t.Fatalf("emergency context was already canceled: %v", runner.emergencyContextErr)
+	}
+}
+
 func TestWindowsNetworkRestoreCancellationDoesNotLeakStaleMonitorFailure(t *testing.T) {
 	runner := &fakeNetworkRunner{
 		capture:        validWindowsSnapshot(),
@@ -1173,20 +1195,21 @@ func firstIndex(values []string, target string) int {
 }
 
 type fakeNetworkRunner struct {
-	trace          *callTrace
-	capture        WindowsNetworkSnapshot
-	ready          WindowsTUNIdentity
-	operations     []string
-	inputs         map[string][]byte
-	restoreErrors  []error
-	scans          [][]WindowsAdapterIdentity
-	inputHistory   map[string][][]byte
-	mu             sync.Mutex
-	runErrors      map[string][]error
-	blockScanAfter int
-	scanCalls      int
-	scanStarted    chan struct{}
-	scanStartOnce  sync.Once
+	trace               *callTrace
+	capture             WindowsNetworkSnapshot
+	ready               WindowsTUNIdentity
+	operations          []string
+	inputs              map[string][]byte
+	restoreErrors       []error
+	scans               [][]WindowsAdapterIdentity
+	inputHistory        map[string][][]byte
+	mu                  sync.Mutex
+	runErrors           map[string][]error
+	blockScanAfter      int
+	scanCalls           int
+	scanStarted         chan struct{}
+	scanStartOnce       sync.Once
+	emergencyContextErr error
 }
 
 func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []byte) ([]byte, error) {
@@ -1203,6 +1226,9 @@ func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []b
 	f.inputHistory[operation] = append(f.inputHistory[operation], append([]byte(nil), input...))
 	if f.trace != nil {
 		f.trace.record(operation)
+	}
+	if operation == networkOperationEmergency {
+		f.emergencyContextErr = ctx.Err()
 	}
 	if queued := f.runErrors[operation]; len(queued) != 0 {
 		err := queued[0]
