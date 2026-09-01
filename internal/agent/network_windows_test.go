@@ -488,8 +488,12 @@ func TestWindowsNetworkReconcileIsIdempotentAcrossServiceRestart(t *testing.T) {
 	if err := manager.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := runner.count(networkOperationRestore); got != 1 {
-		t.Fatalf("restore operations = %d, want 1", got)
+	if got := runner.count(networkOperationRestore); got != 2 {
+		t.Fatalf("restore operations = %d, want one snapshot restore and one orphan cleanup", got)
+	}
+	input := runner.lastInputFor(t, networkOperationRestore)
+	if input.RestoreInterfaces || len(input.OwnedRoutes) != 0 {
+		t.Fatalf("second reconciliation was not a non-invasive orphan cleanup: %#v", input)
 	}
 }
 
@@ -1219,12 +1223,12 @@ func TestWindowsNetworkReadinessRejectsUnownedOrMalformedTUN(t *testing.T) {
 			value.InterfaceGuid = "baseline-guid"
 			return value
 		}()},
-		{name: "wrong description", identity: func() WindowsTUNIdentity {
+		{name: "wrong alias", identity: func() WindowsTUNIdentity {
 			value := validTUNIdentity()
-			value.InterfaceDescription = "Ethernet Adapter"
+			value.InterfaceAlias = "Ethernet"
 			return value
 		}()},
-		{name: "hardware adapter", identity: func() WindowsTUNIdentity { value := validTUNIdentity(); value.HardwareInterface = true; return value }()},
+		{name: "missing guid", identity: func() WindowsTUNIdentity { value := validTUNIdentity(); value.InterfaceGuid = ""; return value }()},
 		{name: "wrong address", identity: func() WindowsTUNIdentity {
 			value := validTUNIdentity()
 			value.Addresses = []string{"172.19.0.5/30"}
@@ -1246,6 +1250,71 @@ func TestWindowsNetworkReadinessRejectsUnownedOrMalformedTUN(t *testing.T) {
 				t.Fatal("WaitTUNReady() accepted an unowned or malformed adapter")
 			}
 		})
+	}
+}
+
+func TestWindowsNetworkReadinessAcceptsNewFixedIdentityWithoutDriverMetadataHeuristic(t *testing.T) {
+	identity := validTUNIdentity()
+	identity.InterfaceDescription = "sing-tun"
+	identity.Virtual = false
+
+	snapshot := validWindowsSnapshot()
+	snapshot.BaselineAdapterGuids = []string{"baseline-guid"}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, &fakeNetworkRunner{capture: snapshot, ready: identity}, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WaitTUNReady(context.Background()); err != nil {
+		t.Fatalf("WaitTUNReady() rejected a newly created fixed-identity TUN: %v", err)
+	}
+}
+
+func TestWindowsNetworkProtectionMonitorCarriesConnectionGeneration(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protectionInterval = time.Millisecond
+	ctx := traceevent.WithGeneration(context.Background(), 42)
+	snapshot, err := manager.Capture(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForNetworkOperationCount(t, runner, networkOperationScan, 2)
+	manager.stopProtection()
+	for _, generation := range runner.generationsFor(networkOperationScan) {
+		if generation != 42 {
+			t.Fatalf("scan generation = %d, want 42", generation)
+		}
+	}
+	if err := manager.Restore(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsNetworkReconcileWithoutSnapshotRemovesOrphanedManagedRules(t *testing.T) {
+	runner := &fakeNetworkRunner{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.count(networkOperationRestore); got != 1 {
+		t.Fatalf("restore operations = %d, want 1 orphan cleanup", got)
+	}
+	input := runner.inputFor(t, networkOperationRestore)
+	if input.RestoreInterfaces || input.FirewallGroup != windowsFirewallGroup || len(input.OwnedRoutes) != 0 {
+		t.Fatalf("orphan cleanup input = %#v", input)
 	}
 }
 
@@ -1395,12 +1464,17 @@ type fakeNetworkRunner struct {
 	scanStartOnce       sync.Once
 	emergencyContextErr error
 	residue             windowsResidueCounts
+	generations         map[string][]uint64
 }
 
 func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.operations = append(f.operations, operation)
+	if f.generations == nil {
+		f.generations = make(map[string][]uint64)
+	}
+	f.generations[operation] = append(f.generations[operation], traceevent.GenerationFromContext(ctx))
 	if f.inputs == nil {
 		f.inputs = make(map[string][]byte)
 	}
@@ -1491,6 +1565,12 @@ func (f *fakeNetworkRunner) count(operation string) int {
 		}
 	}
 	return count
+}
+
+func (f *fakeNetworkRunner) generationsFor(operation string) []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64(nil), f.generations[operation]...)
 }
 
 func waitForNetworkOperationCount(t *testing.T, runner *fakeNetworkRunner, operation string, want int) {

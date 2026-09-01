@@ -294,6 +294,15 @@ func TestPipeConnectReceivesBoundedOperationContext(t *testing.T) {
 	}
 }
 
+func TestPipeDisconnectHasDedicatedRecoveryDeadline(t *testing.T) {
+	if got := PipeTimeoutForAction(ActionDisconnect); got != PipeDisconnectTimeout {
+		t.Fatalf("disconnect timeout = %s, want %s", got, PipeDisconnectTimeout)
+	}
+	if PipeDisconnectTimeout <= PipeOperationTimeout {
+		t.Fatalf("disconnect timeout %s must exceed ordinary operation timeout %s", PipeDisconnectTimeout, PipeOperationTimeout)
+	}
+}
+
 func TestPipeDiagnosticsAreRedacted(t *testing.T) {
 	controller := &fakePipeController{
 		status: Status{State: accessmodel.StateFailed},

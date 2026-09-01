@@ -503,7 +503,7 @@ func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) (<-ch
 		defer cancelEmergency()
 		return nil, errors.Join(err, m.installEmergencyProtection(emergencyContext))
 	}
-	monitorContext, cancel := context.WithCancel(context.Background())
+	monitorContext, cancel := context.WithCancel(traceevent.WithGeneration(context.Background(), traceevent.GenerationFromContext(ctx)))
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.protectionCancel = cancel
@@ -607,7 +607,7 @@ func (m *WindowsNetworkManager) armEmergencyProtection(ctx context.Context) erro
 	// explicitly preserves an emergency rule installed during this handoff.
 	m.stopProtection()
 	m.mu.Lock()
-	monitorContext, cancel := context.WithCancel(context.Background())
+	monitorContext, cancel := context.WithCancel(traceevent.WithGeneration(context.Background(), traceevent.GenerationFromContext(ctx)))
 	done := make(chan struct{})
 	m.protectionCancel = cancel
 	m.protectionDone = done
@@ -751,6 +751,15 @@ func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 	snapshot, err := m.store.Load(m.statePath)
 	if errors.Is(err, errSnapshotNotFound) {
 		m.mu.Unlock()
+		input := windowsNetworkInput{
+			FirewallRuleNames:         windowsFirewallRuleNames(),
+			FirewallGroup:             windowsFirewallGroup,
+			BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
+			DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
+		}
+		if _, cleanupErr := m.run(ctx, networkOperationRestore, input); cleanupErr != nil {
+			return errors.Join(cleanupErr, m.armEmergencyProtection(ctx))
+		}
 		return nil
 	}
 	if err != nil {
@@ -1171,9 +1180,6 @@ func validateTUNIdentity(identity WindowsTUNIdentity, baseline []string) error {
 		if strings.EqualFold(guid, identity.InterfaceGuid) {
 			return errors.New("TUN adapter was present before core launch")
 		}
-	}
-	if identity.HardwareInterface || !identity.Virtual || !strings.HasPrefix(identity.InterfaceDescription, "Wintun Userspace Tunnel") {
-		return errors.New("TUN adapter type or description is not owned")
 	}
 	if len(identity.Addresses) != 1 || identity.Addresses[0] != windowsTUNAddress {
 		return errors.New("TUN adapter address does not match the rendered configuration")
