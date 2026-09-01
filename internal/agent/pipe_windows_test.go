@@ -303,6 +303,17 @@ func TestPipeDisconnectHasDedicatedRecoveryDeadline(t *testing.T) {
 	}
 }
 
+func TestPipeDisconnectReceivesDedicatedRecoveryContext(t *testing.T) {
+	controller := &deadlinePipeController{fakePipeController: fakePipeController{status: Status{State: accessmodel.StateConnected}}}
+	_, ok := pipeTransaction(t, NewPipeServer(controller), Request{ID: "disconnect-deadline", Action: ActionDisconnect})
+	if !ok {
+		t.Fatal("disconnect returned no response")
+	}
+	if controller.remaining <= 20*time.Second || controller.remaining > PipeDisconnectTimeout {
+		t.Fatalf("disconnect context deadline remaining = %s", controller.remaining)
+	}
+}
+
 func TestPipeDiagnosticsAreRedacted(t *testing.T) {
 	controller := &fakePipeController{
 		status: Status{State: accessmodel.StateFailed},
@@ -443,6 +454,15 @@ func (d *deadlinePipeController) Connect(ctx context.Context) Status {
 	}
 	d.remaining = time.Until(deadline)
 	return Status{State: accessmodel.StateConnected}
+}
+
+func (d *deadlinePipeController) Disconnect(ctx context.Context) Status {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return Status{State: accessmodel.StateFailed, ErrorCode: "missing_deadline"}
+	}
+	d.remaining = time.Until(deadline)
+	return Status{State: accessmodel.StateDisconnected}
 }
 
 func (c *deadlineTrackingConn) SetDeadline(deadline time.Time) error {

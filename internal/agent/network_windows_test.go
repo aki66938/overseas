@@ -1270,6 +1270,14 @@ func TestWindowsNetworkReadinessAcceptsNewFixedIdentityWithoutDriverMetadataHeur
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatalf("WaitTUNReady() rejected a newly created fixed-identity TUN: %v", err)
 	}
+	if err := manager.ActivateTUNRoutes(context.Background()); err != nil {
+		t.Fatalf("ActivateTUNRoutes() rejected the accepted fixed-identity TUN: %v", err)
+	}
+	for _, mutableMetadata := range []string{"InterfaceDescription", "HardwareInterface", "Virtual"} {
+		if strings.Contains(activateNetworkPowerShell, mutableMetadata) {
+			t.Fatalf("activation script still depends on mutable adapter metadata %q", mutableMetadata)
+		}
+	}
 }
 
 func TestWindowsNetworkProtectionMonitorCarriesConnectionGeneration(t *testing.T) {

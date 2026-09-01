@@ -1705,7 +1705,7 @@ if ($adapters.Count -ne 1 -or -not ($addresses -contains [string]$i.TUNAddress))
 } | ConvertTo-Json -Compress -Depth 5`
 
 const activateNetworkPowerShell = `$tun = Get-NetAdapter -InterfaceIndex $i.OwnedTUN.InterfaceIndex -IncludeHidden -ErrorAction Stop
-if ([string]$tun.InterfaceGuid -ne [string]$i.OwnedTUN.InterfaceGuid -or [string]$tun.InterfaceAlias -ne [string]$i.OwnedTUN.InterfaceAlias -or [string]$tun.InterfaceDescription -ne [string]$i.OwnedTUN.InterfaceDescription -or [bool]$tun.HardwareInterface -ne [bool]$i.OwnedTUN.HardwareInterface -or [bool]$tun.Virtual -ne [bool]$i.OwnedTUN.Virtual) { throw 'Owned TUN identity changed before activation.' }
+if ([string]$tun.InterfaceGuid -ne [string]$i.OwnedTUN.InterfaceGuid -or [string]$tun.InterfaceAlias -ne [string]$i.OwnedTUN.InterfaceAlias) { throw 'Owned TUN identity changed before activation.' }
 $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $tun.InterfaceIndex -ErrorAction Stop | ForEach-Object { ([string]$_.IPAddress) + '/' + ([string]$_.PrefixLength) })
 if ($addresses.Count -ne 1 -or $addresses[0] -ne [string]$i.TUNAddress) { throw 'Owned TUN address changed before activation.' }
 Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $i.OwnedTUN.InterfaceIndex -AutomaticMetric Disabled -InterfaceMetric 1
