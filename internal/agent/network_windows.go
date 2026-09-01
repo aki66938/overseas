@@ -278,7 +278,10 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 	for _, value := range policy.CorporateDNS {
 		dnsExcluded4 = append(dnsExcluded4, netip.PrefixFrom(netip.MustParseAddr(value), 32))
 	}
-	dnsBlocked := append(complementIPv4Prefixes(dnsExcluded4), complementIPv6From(netip.MustParsePrefix("::/0"), nil)...)
+	dnsBlocked := normalizeWindowsFirewallPrefixes(append(
+		complementIPv4Prefixes(dnsExcluded4),
+		complementIPv6From(netip.MustParsePrefix("::/0"), nil)...,
+	))
 	return &WindowsNetworkManager{
 		policy:             clonePolicy(policy),
 		statePath:          statePath,
@@ -1022,6 +1025,27 @@ func encodePowerShell(script string) string {
 		binary.LittleEndian.PutUint16(bytes[index*2:], value)
 	}
 	return base64.StdEncoding.EncodeToString(bytes)
+}
+
+func normalizeWindowsFirewallPrefixes(values []string) []string {
+	result := make([]string, 0, len(values)+1)
+	seen := make(map[string]struct{}, len(values)+1)
+	appendUnique := func(value string) {
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	for _, value := range values {
+		if value == "::/0" {
+			appendUnique("::/1")
+			appendUnique("8000::/1")
+			continue
+		}
+		appendUnique(value)
+	}
+	return result
 }
 
 func complementIPv4Prefixes(excluded []netip.Prefix) []string {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -708,6 +709,62 @@ func TestWindowsNetworkDNSProtectionBlocksSecondaryPrivateAndPublicResolvers(t *
 	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("172.19.0.2"), false)
 	if !strings.Contains(blockNetworkPowerShell, "-RemotePort 53") || !strings.Contains(blockNetworkPowerShell, "$i.DNSBlockedRemoteAddresses") {
 		t.Fatal("dedicated all-destination DNS egress rules are missing")
+	}
+}
+
+func TestNormalizeWindowsFirewallPrefixesSplitsIPv6DefaultAndDeduplicates(t *testing.T) {
+	input := []string{"10.0.0.0/8", "::/0", "::/1", "192.0.2.1/32", "::/0"}
+	want := []string{"10.0.0.0/8", "::/1", "8000::/1", "192.0.2.1/32"}
+	if got := normalizeWindowsFirewallPrefixes(input); !slices.Equal(got, want) {
+		t.Fatalf("normalized = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsNetworkDNSFirewallPrefixesExcludeRejectedIPv6Default(t *testing.T) {
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, &fakeNetworkRunner{}, &fakeSnapshotStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(manager.dnsBlockedPrefixes, "::/0") || !slices.Contains(manager.dnsBlockedPrefixes, "::/1") || !slices.Contains(manager.dnsBlockedPrefixes, "8000::/1") {
+		t.Fatalf("DNS firewall prefixes = %#v", manager.dnsBlockedPrefixes)
+	}
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("2001:4860:4860::8888"), true)
+	assertAddressCovered(t, manager.dnsBlockedPrefixes, netip.MustParseAddr("fd00::53"), true)
+}
+
+func TestWindowsNetworkEveryFirewallPhaseUsesNormalizedDNSPrefixes(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := value.(WindowsNetworkSnapshot)
+	if !slices.Equal(snapshot.DNSBlockedRemoteAddresses, manager.dnsBlockedPrefixes) {
+		t.Fatalf("snapshot DNS prefixes = %#v", snapshot.DNSBlockedRemoteAddresses)
+	}
+	if _, err := manager.InstallPublicTCPBlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.installEmergencyProtection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{networkOperationBlock, networkOperationVerify, networkOperationEmergency} {
+		input := runner.inputFor(t, operation)
+		if !slices.Equal(input.DNSBlockedRemoteAddresses, manager.dnsBlockedPrefixes) || slices.Contains(input.DNSBlockedRemoteAddresses, "::/0") {
+			t.Fatalf("%s DNS prefixes = %#v", operation, input.DNSBlockedRemoteAddresses)
+		}
+	}
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	input := runner.inputFor(t, networkOperationRestore)
+	if !slices.Equal(input.DNSBlockedRemoteAddresses, manager.dnsBlockedPrefixes) || slices.Contains(input.DNSBlockedRemoteAddresses, "::/0") {
+		t.Fatalf("restore DNS prefixes = %#v", input.DNSBlockedRemoteAddresses)
 	}
 }
 
