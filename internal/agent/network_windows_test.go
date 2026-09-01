@@ -65,6 +65,9 @@ func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 		!strings.Contains(verifyScript, "active_store_verify:") {
 		t.Fatal("published firewall rules are not exactly verified in ActiveStore")
 	}
+	if !strings.Contains(verifyScript, "Normalize-AddressToken") || !strings.Contains(verifyScript, "Assert-EqualAddressSet") {
+		t.Fatal("ActiveStore verification does not normalize Windows host-prefix rendering")
+	}
 	if store.snapshot.OwnershipPhase != "protected" || len(store.snapshot.GuardRoutes) != 0 {
 		t.Fatalf("protected snapshot = %#v", store.snapshot)
 	}

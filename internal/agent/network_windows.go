@@ -1271,6 +1271,16 @@ function Assert-EqualSet([string]$label, $actual, $expected) {
   $right = @($expected | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Sort-Object -Unique)
   if ($left.Count -ne $right.Count -or [string]::Join('|', $left) -ne [string]::Join('|', $right)) { throw ('active_store_verify: ' + $label + ' does not match.') }
 }
+function Normalize-AddressToken($value) {
+  $text = ([string]$value).Trim().ToLowerInvariant()
+  if ($text -match '^(?<address>.+)/(32|128)$') { return [string]$Matches.address }
+  return $text
+}
+function Assert-EqualAddressSet([string]$label, $actual, $expected) {
+  $left = @($actual | ForEach-Object { Normalize-AddressToken $_ } | Sort-Object -Unique)
+  $right = @($expected | ForEach-Object { Normalize-AddressToken $_ } | Sort-Object -Unique)
+  if ($left.Count -ne $right.Count -or [string]::Join('|', $left) -ne [string]::Join('|', $right)) { throw ('active_store_verify: ' + $label + ' does not match.') }
+}
 function Assert-Rule([string]$name, [string]$protocol, $remotePort, $remoteAddress, [string]$interfaceAlias) {
   $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $name -ErrorAction SilentlyContinue)
   if ($rules.Count -ne 1) { throw ('active_store_verify: expected exactly one rule named ' + $name + '.') }
@@ -1281,7 +1291,7 @@ function Assert-Rule([string]$name, [string]$protocol, $remotePort, $remoteAddre
   Assert-EqualSet ($name + ' remote port') @($port[0].RemotePort) @($remotePort)
   $address = @($rule | Get-NetFirewallAddressFilter)
   if ($address.Count -ne 1) { throw ('active_store_verify: address filter is ambiguous for ' + $name + '.') }
-  Assert-EqualSet ($name + ' remote address') @($address[0].RemoteAddress) @($remoteAddress)
+  Assert-EqualAddressSet ($name + ' remote address') @($address[0].RemoteAddress) @($remoteAddress)
   if (-not [string]::IsNullOrWhiteSpace($interfaceAlias)) {
     $interface = @($rule | Get-NetFirewallInterfaceFilter)
     if ($interface.Count -ne 1) { throw ('active_store_verify: interface filter is ambiguous for ' + $name + '.') }
