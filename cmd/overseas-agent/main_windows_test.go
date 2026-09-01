@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -35,6 +37,56 @@ func TestRenderClientConfigUsesDirectTelecomHTTPOutbound(t *testing.T) {
 	}
 	if _, exists := config.Outbounds[1]["password"]; exists {
 		t.Fatal("HTTP outbound contains a password")
+	}
+}
+
+func TestServiceTraceClosesAndRecordsNormalLifecycle(t *testing.T) {
+	controller := &fakeServiceController{
+		recoverStatus: agent.Status{State: accessmodel.StateDisconnected}, disconnectStatus: agent.Status{State: accessmodel.StateDisconnected},
+	}
+	trace := &fakeServiceTrace{}
+	handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}, trace: trace}
+	requests := make(chan svc.ChangeRequest, 1)
+	changes := make(chan svc.Status, 4)
+	result := make(chan serviceResult, 1)
+	go func() {
+		specific, code := handler.Execute(nil, requests, changes)
+		result <- serviceResult{specific: specific, code: code}
+	}()
+	waitForRunning(t, changes)
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	got := <-result
+	if got.specific || got.code != 0 || trace.closeCalls != 1 {
+		t.Fatalf("result=%#v closeCalls=%d", got, trace.closeCalls)
+	}
+	events := trace.eventsCopy()
+	if len(events) < 3 || events[0].Generation != 0 || events[0].Stage != traceevent.StageServiceRecovery || events[0].Event != traceevent.EventState {
+		t.Fatalf("service trace = %#v", events)
+	}
+	if events[len(events)-1].Message != "Windows 服务已停止" {
+		t.Fatalf("terminal service event = %#v", events[len(events)-1])
+	}
+}
+
+func TestServiceTraceClosesWhenStartupRecoveryFails(t *testing.T) {
+	trace := &fakeServiceTrace{}
+	handler := &serviceHandler{
+		controller: &fakeServiceController{recoverStatus: agent.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed}},
+		pipe:       blockingPipeRunner{}, trace: trace,
+	}
+	specific, code := handler.Execute(nil, make(chan svc.ChangeRequest), make(chan svc.Status, 2))
+	if !specific || code != serviceExitRestore || trace.closeCalls != 1 {
+		t.Fatalf("specific=%v code=%d closeCalls=%d", specific, code, trace.closeCalls)
+	}
+	events := trace.eventsCopy()
+	if len(events) < 2 || events[len(events)-1].Level != traceevent.LevelError || events[len(events)-1].Event != traceevent.EventState {
+		t.Fatalf("failure trace = %#v", events)
+	}
+}
+
+func TestServiceTraceProductionLimitsAreFixed(t *testing.T) {
+	if traceDirectory != dataDirectory+`\logs` || traceMemoryCapacity != 2048 || traceMaxFileBytes != 2*1024*1024 || traceRetainFiles != 5 {
+		t.Fatalf("trace limits = directory %q capacity %d bytes %d files %d", traceDirectory, traceMemoryCapacity, traceMaxFileBytes, traceRetainFiles)
 	}
 }
 
@@ -174,4 +226,48 @@ func waitForRunning(t *testing.T, changes <-chan svc.Status) {
 			return
 		}
 	}
+}
+
+type fakeServiceTrace struct {
+	mu         sync.Mutex
+	events     []traceevent.Event
+	closeCalls int
+}
+
+func (f *fakeServiceTrace) Record(event traceevent.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	event.SchemaVersion = traceevent.SchemaVersion
+	event.Sequence = uint64(len(f.events) + 1)
+	event.TimestampUTC = time.Now().UTC()
+	f.events = append(f.events, event)
+}
+
+func (f *fakeServiceTrace) Batch(after uint64, limit int) traceevent.Batch {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	batch := traceevent.Batch{NextSequence: after}
+	if len(f.events) != 0 {
+		batch.OldestSequence = f.events[0].Sequence
+	}
+	for _, event := range f.events {
+		if event.Sequence > after && len(batch.Events) < limit {
+			batch.Events = append(batch.Events, event)
+			batch.NextSequence = event.Sequence
+		}
+	}
+	return batch
+}
+
+func (f *fakeServiceTrace) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCalls++
+	return nil
+}
+
+func (f *fakeServiceTrace) eventsCopy() []traceevent.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]traceevent.Event(nil), f.events...)
 }

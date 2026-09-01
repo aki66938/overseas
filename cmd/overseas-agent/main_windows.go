@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
@@ -19,6 +20,7 @@ import (
 	"corp.example/overseas-access-gateway/internal/secret"
 	"corp.example/overseas-access-gateway/internal/singconfig"
 	"corp.example/overseas-access-gateway/internal/supervisor"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 	"golang.org/x/sys/windows/svc"
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +38,11 @@ const (
 	corePath         = installDirectory + `\sing-box.exe`
 	renderedPath     = dataDirectory + `\sing-box.json`
 	networkStatePath = dataDirectory + `\network-state.json`
+	traceDirectory   = dataDirectory + `\logs`
+
+	traceMemoryCapacity = 2048
+	traceMaxFileBytes   = 2 * 1024 * 1024
+	traceRetainFiles    = 5
 )
 
 type controllerLifecycle interface {
@@ -47,17 +54,28 @@ type pipeRunner interface {
 	ListenAndServe(context.Context) error
 }
 
+type serviceTrace interface {
+	traceevent.Sink
+	traceevent.Source
+	Close() error
+}
+
 type serviceHandler struct {
 	controller controllerLifecycle
 	pipe       pipeRunner
+	trace      serviceTrace
+	traceClose sync.Once
 }
 
 func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
+	defer s.closeTrace()
+	s.recordService(traceevent.LevelInfo, "Windows 服务开始启动")
 	changes <- svc.Status{State: svc.StartPending}
 	recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), serviceStopTimeout)
 	recovery := s.controller.Recover(recoveryContext)
 	cancelRecovery()
 	if recovery.State != accessmodel.StateDisconnected {
+		s.recordService(traceevent.LevelError, "Windows 服务启动恢复失败")
 		changes <- svc.Status{State: svc.StopPending}
 		return true, serviceExitRestore
 	}
@@ -67,6 +85,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	pipeErrors := make(chan error, 1)
 	go func() { pipeErrors <- s.pipe.ListenAndServe(pipeContext) }()
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	s.recordService(traceevent.LevelInfo, "Windows 服务正在运行")
 
 	for {
 		select {
@@ -85,9 +104,12 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				return false, 0
 			}
 			changes <- svc.Status{State: svc.StopPending}
+			s.recordService(traceevent.LevelError, "本地控制通道意外停止")
 			if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
+				s.recordService(traceevent.LevelError, "控制通道停止后的网络恢复失败")
 				return true, serviceExitRestore
 			}
+			s.recordService(traceevent.LevelError, "Windows 服务因控制通道故障停止")
 			return true, serviceExitPipe
 		}
 	}
@@ -95,11 +117,35 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 
 func (s *serviceHandler) stop(changes chan<- svc.Status, cancelPipe context.CancelFunc) (bool, uint32) {
 	changes <- svc.Status{State: svc.StopPending}
+	s.recordService(traceevent.LevelInfo, "Windows 服务正在停止")
 	cancelPipe()
 	if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
+		s.recordService(traceevent.LevelError, "Windows 服务停止时网络恢复失败")
 		return true, serviceExitRestore
 	}
+	s.recordService(traceevent.LevelInfo, "Windows 服务已停止")
 	return false, 0
+}
+
+func (s *serviceHandler) recordService(level, message string) {
+	if s.trace == nil {
+		return
+	}
+	generation := uint64(0)
+	if s.controller != nil {
+		generation = s.controller.Diagnostics().Generation
+	}
+	s.trace.Record(traceevent.Event{
+		Generation: generation, Level: level, Component: traceevent.ComponentService,
+		Stage: traceevent.StageServiceRecovery, Event: traceevent.EventState, Message: message,
+	})
+}
+
+func (s *serviceHandler) closeTrace() {
+	if s.trace == nil {
+		return
+	}
+	s.traceClose.Do(func() { _ = s.trace.Close() })
 }
 
 func disconnectWithTimeout(controller controllerLifecycle) agent.Status {
@@ -126,7 +172,10 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, "overseas access service configuration is invalid")
 		os.Exit(serviceExitConfig)
 	}
+	defer handler.closeTrace()
 	if err := svc.Run(serviceName, handler); err != nil {
+		handler.recordService(traceevent.LevelError, "Windows 服务意外停止")
+		handler.closeTrace()
 		_, _ = fmt.Fprintln(os.Stderr, "overseas access service stopped unexpectedly")
 		os.Exit(serviceExitPipe)
 	}
@@ -141,11 +190,24 @@ func buildService() (*serviceHandler, error) {
 	if err := yaml.Unmarshal(contents, &bootstrap); err != nil {
 		return nil, err
 	}
+	recorder, err := traceevent.NewRecorder(traceevent.RecorderConfig{
+		Directory: traceDirectory, MemoryCapacity: traceMemoryCapacity,
+		MaxFileBytes: traceMaxFileBytes, RetainFiles: traceRetainFiles, Now: time.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	keepRecorder := false
+	defer func() {
+		if !keepRecorder {
+			_ = recorder.Close()
+		}
+	}()
 	verify := func(path string) error {
 		return coreverify.Verify(path, bootstrap.CoreSHA256, bootstrap.SignerAllowlist)
 	}
 	process := &supervisedCore{verifyExecutable: verify}
-	network, err := agent.NewWindowsNetworkManager(bootstrap.Policy, networkStatePath)
+	network, err := agent.NewWindowsNetworkManager(bootstrap.Policy, networkStatePath, agent.WithWindowsTraceSink(recorder))
 	if err != nil {
 		return nil, err
 	}
@@ -158,9 +220,16 @@ func buildService() (*serviceHandler, error) {
 		RenderConfig:      renderClientConfig,
 		WriteConfigAtomic: writeConfigAtomic,
 		Now:               time.Now,
+		Trace:             recorder,
 	}
 	controller := agent.NewController(bootstrap.Policy, network, process, agent.WithDependencies(dependencies))
-	return &serviceHandler{controller: controller, pipe: agent.NewPipeServer(controller)}, nil
+	handler := &serviceHandler{
+		controller: controller,
+		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder)),
+		trace:      recorder,
+	}
+	keepRecorder = true
+	return handler, nil
 }
 
 func loadCredential(ctx context.Context, reference accessmodel.CredentialRef) (agent.Credential, error) {
