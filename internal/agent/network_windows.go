@@ -29,6 +29,7 @@ const (
 	networkOperationCapture   = "capture"
 	networkOperationScan      = "scan"
 	networkOperationBlock     = "block"
+	networkOperationVerify    = "verify"
 	networkOperationEmergency = "emergency"
 	networkOperationReady     = "ready"
 	networkOperationActivate  = "activate"
@@ -389,7 +390,10 @@ func (m *WindowsNetworkManager) reconcileProtection(ctx context.Context) error {
 		DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
 		ProtectedAdapters:         protected,
 	}
-	_, err = m.run(ctx, networkOperationBlock, input)
+	if _, err = m.run(ctx, networkOperationBlock, input); err != nil {
+		return err
+	}
+	_, err = m.run(ctx, networkOperationVerify, input)
 	return err
 }
 
@@ -1082,6 +1086,7 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationCapture:   captureNetworkPowerShell,
 	networkOperationScan:      scanNetworkPowerShell,
 	networkOperationBlock:     blockNetworkPowerShell,
+	networkOperationVerify:    verifyNetworkPowerShell,
 	networkOperationEmergency: emergencyNetworkPowerShell,
 	networkOperationReady:     readyNetworkPowerShell,
 	networkOperationActivate:  activateNetworkPowerShell,
@@ -1200,6 +1205,40 @@ foreach ($adapter in @($i.ProtectedAdapters)) {
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
 Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Where-Object { $desired -notcontains $_.Name } | Remove-NetFirewallRule -ErrorAction Stop`
+
+const verifyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
+$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+function Assert-EqualSet([string]$label, $actual, $expected) {
+  $left = @($actual | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Sort-Object -Unique)
+  $right = @($expected | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Sort-Object -Unique)
+  if ($left.Count -ne $right.Count -or [string]::Join('|', $left) -ne [string]::Join('|', $right)) { throw ('active_store_verify: ' + $label + ' does not match.') }
+}
+function Assert-Rule([string]$name, [string]$protocol, $remotePort, $remoteAddress, [string]$interfaceAlias) {
+  $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $name -ErrorAction SilentlyContinue)
+  if ($rules.Count -ne 1) { throw ('active_store_verify: expected exactly one rule named ' + $name + '.') }
+  $rule = $rules[0]
+  if ([string]$rule.Group -ne [string]$i.FirewallGroup -or [string]$rule.Enabled -ne 'True' -or [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Block') { throw ('active_store_verify: rule metadata does not match for ' + $name + '.') }
+  $port = @($rule | Get-NetFirewallPortFilter)
+  if ($port.Count -ne 1 -or [string]$port[0].Protocol -ne $protocol) { throw ('active_store_verify: protocol does not match for ' + $name + '.') }
+  Assert-EqualSet ($name + ' remote port') @($port[0].RemotePort) @($remotePort)
+  $address = @($rule | Get-NetFirewallAddressFilter)
+  if ($address.Count -ne 1) { throw ('active_store_verify: address filter is ambiguous for ' + $name + '.') }
+  Assert-EqualSet ($name + ' remote address') @($address[0].RemoteAddress) @($remoteAddress)
+  if (-not [string]::IsNullOrWhiteSpace($interfaceAlias)) {
+    $interface = @($rule | Get-NetFirewallInterfaceFilter)
+    if ($interface.Count -ne 1) { throw ('active_store_verify: interface filter is ambiguous for ' + $name + '.') }
+    Assert-EqualSet ($name + ' interface alias') @($interface[0].InterfaceAlias) @($interfaceAlias)
+  }
+}
+$remote = @($i.BlockedRemoteAddresses)
+foreach ($adapter in @($i.ProtectedAdapters)) {
+  $suffix = ([string]$adapter.InterfaceGuid).Trim('{}').Replace('-', '')
+  Assert-Rule (([string]$i.FirewallRuleNames[0]) + '.' + $suffix) 'TCP' @('Any') $remote ([string]$adapter.InterfaceAlias)
+  Assert-Rule (([string]$i.FirewallRuleNames[1]) + '.' + $suffix) 'UDP' @('443') $remote ([string]$adapter.InterfaceAlias)
+  Assert-Rule (([string]$i.FirewallRuleNames[2]) + '.' + $suffix) 'UDP' @('Any') $remote ([string]$adapter.InterfaceAlias)
+}
+Assert-Rule ([string]$i.FirewallRuleNames[3]) 'UDP' @('53') @($i.DNSBlockedRemoteAddresses) ''
+Assert-Rule ([string]$i.FirewallRuleNames[4]) 'TCP' @('53') @($i.DNSBlockedRemoteAddresses) ''`
 
 const emergencyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)

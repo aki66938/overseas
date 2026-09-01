@@ -37,8 +37,16 @@ func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 	if snapshot == nil || !store.exists {
 		t.Fatal("captured network state was not persisted")
 	}
-	if got, want := trace.calls(), []string{"capture", "save", "save", "scan", "block"}; !equalStrings(got, want) {
+	if got, want := trace.calls(), []string{"capture", "save", "save", "scan", "block", "verify"}; !equalStrings(got, want) {
 		t.Fatalf("call order = %v, want %v", got, want)
+	}
+	verifyScript, exists := networkPowerShellScripts["verify"]
+	if !exists || !strings.Contains(verifyScript, "Get-NetFirewallRule -PolicyStore ActiveStore") ||
+		!strings.Contains(verifyScript, "Get-NetFirewallInterfaceFilter") ||
+		!strings.Contains(verifyScript, "Get-NetFirewallAddressFilter") ||
+		!strings.Contains(verifyScript, "Get-NetFirewallPortFilter") ||
+		!strings.Contains(verifyScript, "active_store_verify:") {
+		t.Fatal("published firewall rules are not exactly verified in ActiveStore")
 	}
 	if store.snapshot.OwnershipPhase != "protected" || len(store.snapshot.GuardRoutes) != 0 {
 		t.Fatalf("protected snapshot = %#v", store.snapshot)
