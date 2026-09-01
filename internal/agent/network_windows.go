@@ -1148,14 +1148,24 @@ foreach ($node in @($i.NodeAddresses)) {
 
 const scanNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $null = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$adapters = @(Get-NetAdapter -IncludeHidden | Where-Object Status -ne 'Not Present' | ForEach-Object {
-  [pscustomobject]@{
-    InterfaceIndex = [int]$_.InterfaceIndex
-    InterfaceGuid = [string]$_.InterfaceGuid
-    InterfaceAlias = [string]$_.InterfaceAlias
-    Status = [string]$_.Status
+$indices = @(Get-NetIPInterface | Where-Object { [int]$_.InterfaceIndex -gt 0 } | Select-Object -ExpandProperty InterfaceIndex | Sort-Object -Unique)
+$adapters = @()
+foreach ($index in $indices) {
+  $matches = @(Get-NetAdapter -IncludeHidden -InterfaceIndex ([int]$index) -ErrorAction SilentlyContinue)
+  if ($matches.Count -eq 0) { continue }
+  if ($matches.Count -ne 1) { throw 'adapter_identity_join: IP interface did not resolve to exactly one adapter.' }
+  $adapter = $matches[0]
+  if ([int]$adapter.InterfaceIndex -le 0 -or [string]::IsNullOrWhiteSpace([string]$adapter.InterfaceGuid) -or [string]::IsNullOrWhiteSpace([string]$adapter.InterfaceAlias)) {
+    throw 'adapter_identity_join: adapter identity is incomplete.'
   }
-})
+  $adapters += [pscustomobject]@{
+    InterfaceIndex = [int]$adapter.InterfaceIndex
+    InterfaceGuid = [string]$adapter.InterfaceGuid
+    InterfaceAlias = [string]$adapter.InterfaceAlias
+    Status = [string]$adapter.Status
+  }
+}
+$adapters = @($adapters)
 ConvertTo-Json -InputObject $adapters -Compress -Depth 4`
 
 const blockNetworkPowerShell = `$ErrorActionPreference = 'Stop'

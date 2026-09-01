@@ -549,8 +549,18 @@ func TestWindowsNetworkProtectionCoversRASAndHotPluggedAdaptersByIdentity(t *tes
 	if !strings.Contains(scanNetworkPowerShell, "ConvertTo-Json -InputObject $adapters") {
 		t.Fatal("single-adapter scans are not encoded as a JSON array")
 	}
-	if !strings.Contains(scanNetworkPowerShell, "Status -ne 'Not Present'") {
-		t.Fatal("adapter scan does not exclude Windows ghost adapters")
+	if !strings.Contains(scanNetworkPowerShell, "Get-NetIPInterface") ||
+		!strings.Contains(scanNetworkPowerShell, "Sort-Object -Unique") ||
+		!strings.Contains(scanNetworkPowerShell, "Get-NetAdapter -IncludeHidden -InterfaceIndex") {
+		t.Fatal("adapter scan is not rooted in the Windows IP stack")
+	}
+	if strings.Contains(scanNetworkPowerShell, "Where-Object Status -ne 'Not Present'") ||
+		strings.Contains(scanNetworkPowerShell, "WAN Miniport") ||
+		strings.Contains(scanNetworkPowerShell, "InterfaceDescription") {
+		t.Fatal("adapter scan still relies on NDIS status or device-name filtering")
+	}
+	if !strings.Contains(scanNetworkPowerShell, "adapter_identity_join:") {
+		t.Fatal("ambiguous IP-to-adapter joins are not stage-labelled")
 	}
 }
 
