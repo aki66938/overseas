@@ -134,6 +134,19 @@ func TestDiagnosticsRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsAcceptsBoundedNetworkStageAndDetail(t *testing.T) {
+	message := `{"state":"failed","error_code":"public_tcp_block_failed","message":"无法建立防泄漏保护","generation":2,"stage":"firewall_publish","detail":"The specified interface was not found."}`
+	client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "failed", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
+
+	diagnostics, err := client.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.Stage != "firewall_publish" || diagnostics.Detail != "The specified interface was not found." {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
 func TestDiagnosticsRejectsSecretOrConfigFields(t *testing.T) {
 	tests := []string{
 		`{"id":"request-fixed","state":"failed","message":"{\"state\":\"failed\",\"generation\":1,\"secret\":\"abc\"}"}` + "\n",

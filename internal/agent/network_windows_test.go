@@ -11,9 +11,26 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 )
+
+func TestPowerShellNetworkDiagnosticIsBoundedAndDoesNotIncludeInput(t *testing.T) {
+	input := []byte(`{"credential":"never-copy-this-input"}`)
+	raw := []byte("adapter_identity_join:\r\n" + strings.Repeat("x", 1000) + "\x00")
+	detail := sanitizePowerShellDetail(raw)
+	if len(detail) > maxNetworkDiagnosticBytes || !utf8.ValidString(detail) {
+		t.Fatalf("diagnostic length/encoding = %d/%v", len(detail), utf8.ValidString(detail))
+	}
+	if strings.ContainsAny(detail, "\r\n\x00") || strings.Contains(detail, string(input)) {
+		t.Fatalf("unsafe diagnostic %q", detail)
+	}
+	err := newFixedNetworkOperationError(networkOperationScan, errors.New("exit status 1"), raw)
+	if err.DiagnosticStage() != "adapter_identity_join" || err.DiagnosticDetail() != detail || strings.Contains(err.Error(), string(input)) {
+		t.Fatalf("typed diagnostic = stage=%q detail=%q error=%q", err.DiagnosticStage(), err.DiagnosticDetail(), err.Error())
+	}
+}
 
 func TestWindowsNetworkCapturePersistsExactStateBeforeMutation(t *testing.T) {
 	trace := &callTrace{}

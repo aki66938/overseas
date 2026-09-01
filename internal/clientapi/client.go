@@ -40,6 +40,8 @@ type Diagnostics struct {
 	ErrorCode  string                      `json:"error_code,omitempty"`
 	Message    string                      `json:"message,omitempty"`
 	Generation uint64                      `json:"generation"`
+	Stage      string                      `json:"stage,omitempty"`
+	Detail     string                      `json:"detail,omitempty"`
 }
 
 type dialPipeFunc func(context.Context, string) (net.Conn, error)
@@ -224,7 +226,32 @@ func decodeDiagnosticsMessage(message string) (Diagnostics, error) {
 	if !isApprovedErrorCode(diagnostics.ErrorCode) {
 		return Diagnostics{}, ErrInvalidResponseCode
 	}
+	if !isApprovedDiagnostic(diagnostics.Stage, diagnostics.Detail) {
+		return Diagnostics{}, ErrInvalidResponseShape
+	}
 	return diagnostics, nil
+}
+
+func isApprovedDiagnostic(stage, detail string) bool {
+	if stage == "" {
+		return detail == ""
+	}
+	approved := map[string]bool{
+		"ip_interface_scan":     true,
+		"adapter_identity_join": true,
+		"firewall_publish":      true,
+		"active_store_verify":   true,
+		"emergency_protection":  true,
+	}
+	if !approved[stage] || detail == "" || len(detail) > 512 {
+		return false
+	}
+	for _, value := range detail {
+		if value < 0x20 || value == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func newRequestID() (string, error) {

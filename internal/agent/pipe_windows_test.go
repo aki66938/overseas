@@ -156,6 +156,8 @@ func TestPipeDiagnosticsAreRedacted(t *testing.T) {
 			State:     accessmodel.StateFailed,
 			ErrorCode: ErrorCredential,
 			Message:   "credential topsecret could not be read",
+			Stage:     "firewall_publish",
+			Detail:    "fixed operation topsecret failed",
 		},
 	}
 	server := NewPipeServer(controller, WithPipeRedactions([]byte("topsecret")))

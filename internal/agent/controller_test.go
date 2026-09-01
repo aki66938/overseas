@@ -33,6 +33,41 @@ func TestControllerConnectFailureRemainsFailClosed(t *testing.T) {
 	}
 }
 
+func TestControllerPublishesTypedNetworkDiagnosticWithoutChangingStatus(t *testing.T) {
+	network := newFakeNetwork()
+	network.blockErr = testDiagnosticError{stage: "firewall_publish", detail: "The specified interface was not found."}
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+
+	status := controller.Connect(context.Background())
+	diagnostics := controller.Diagnostics()
+
+	if status.ErrorCode != ErrorPublicTCPBlock || status.Message != "无法建立防泄漏保护" {
+		t.Fatalf("status = %#v", status)
+	}
+	if diagnostics.Stage != "firewall_publish" || diagnostics.Detail != "The specified interface was not found." {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestControllerDropsIncompleteNetworkDiagnostic(t *testing.T) {
+	network := newFakeNetwork()
+	network.blockErr = testDiagnosticError{detail: "unclassified native failure"}
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+
+	_ = controller.Connect(context.Background())
+	diagnostics := controller.Diagnostics()
+
+	if diagnostics.Stage != "" || diagnostics.Detail != "" {
+		t.Fatalf("incomplete diagnostics were published: %#v", diagnostics)
+	}
+}
+
+type testDiagnosticError struct{ stage, detail string }
+
+func (e testDiagnosticError) Error() string            { return "fixed network operation failed" }
+func (e testDiagnosticError) DiagnosticStage() string  { return e.stage }
+func (e testDiagnosticError) DiagnosticDetail() string { return e.detail }
+
 func TestControllerDisconnectRestoresCapturedState(t *testing.T) {
 	network := newFakeNetwork()
 	process := newFakeProcess()
@@ -565,6 +600,7 @@ type fakeNetwork struct {
 	restoreErrors  []error
 	activateErr    error
 	readyErr       error
+	blockErr       error
 	log            []string
 	trace          *callTrace
 	failures       chan error
@@ -592,6 +628,9 @@ func (f *fakeNetwork) InstallPublicTCPBlock(context.Context) (<-chan error, erro
 	f.log = append(f.log, "block")
 	if f.trace != nil {
 		f.trace.record("block")
+	}
+	if f.blockErr != nil {
+		return nil, f.blockErr
 	}
 	return f.failures, nil
 }

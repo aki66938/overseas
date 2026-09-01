@@ -20,7 +20,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 )
@@ -49,7 +51,63 @@ const (
 	windowsSnapshotPhaseCaptured  = "captured"
 	windowsSnapshotPhaseProtected = "protected"
 	windowsSnapshotPhaseTUNOwned  = "tun-owned"
+	maxNetworkDiagnosticBytes     = 512
 )
+
+type fixedNetworkOperationError struct {
+	operation string
+	stage     string
+	detail    string
+	err       error
+}
+
+func newFixedNetworkOperationError(operation string, err error, stderr []byte) *fixedNetworkOperationError {
+	detail := sanitizePowerShellDetail(stderr)
+	stage := map[string]string{
+		networkOperationScan:      "ip_interface_scan",
+		networkOperationBlock:     "firewall_publish",
+		networkOperationVerify:    "active_store_verify",
+		networkOperationEmergency: "emergency_protection",
+	}[operation]
+	if operation == networkOperationScan && strings.Contains(detail, "adapter_identity_join:") {
+		stage = "adapter_identity_join"
+	}
+	return &fixedNetworkOperationError{operation: operation, stage: stage, detail: detail, err: err}
+}
+
+func (e *fixedNetworkOperationError) Error() string {
+	if e.detail == "" {
+		return fmt.Sprintf("fixed network operation %s failed: %v", e.operation, e.err)
+	}
+	return fmt.Sprintf("fixed network operation %s failed: %v: %s", e.operation, e.err, e.detail)
+}
+
+func (e *fixedNetworkOperationError) Unwrap() error           { return e.err }
+func (e *fixedNetworkOperationError) DiagnosticStage() string { return e.stage }
+func (e *fixedNetworkOperationError) DiagnosticDetail() string {
+	return e.detail
+}
+
+func sanitizePowerShellDetail(raw []byte) string {
+	normalized := strings.Join(strings.Fields(strings.Map(func(value rune) rune {
+		if unicode.IsControl(value) || unicode.IsSpace(value) {
+			return ' '
+		}
+		return value
+	}, string(raw))), " ")
+	if len(normalized) <= maxNetworkDiagnosticBytes {
+		return normalized
+	}
+	limit := 0
+	for _, value := range normalized {
+		size := utf8.RuneLen(value)
+		if limit+size > maxNetworkDiagnosticBytes {
+			break
+		}
+		limit += size
+	}
+	return normalized[:limit]
+}
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
 
@@ -930,10 +988,10 @@ func (powerShellNetworkRunner) Run(ctx context.Context, operation string, input 
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("start fixed network operation %s: %w", operation, err)
+		return nil, newFixedNetworkOperationError(operation, err, nil)
 	}
 	if err := command.Wait(); err != nil {
-		return nil, fmt.Errorf("fixed network operation %s failed: %w", operation, err)
+		return nil, newFixedNetworkOperationError(operation, err, stderr.Bytes())
 	}
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }

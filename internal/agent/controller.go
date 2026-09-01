@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -36,6 +37,14 @@ type Diagnostics struct {
 	ErrorCode  string                      `json:"error_code,omitempty"`
 	Message    string                      `json:"message,omitempty"`
 	Generation uint64                      `json:"generation"`
+	Stage      string                      `json:"stage,omitempty"`
+	Detail     string                      `json:"detail,omitempty"`
+}
+
+type stagedDiagnosticError interface {
+	error
+	DiagnosticStage() string
+	DiagnosticDetail() string
 }
 
 // Credential is the decrypted, short-lived material consumed by the renderer.
@@ -118,17 +127,19 @@ type Controller struct {
 	process ProcessSupervisor
 	deps    Dependencies
 
-	mu              sync.Mutex
-	status          Status
-	generation      uint64
-	transition      *transition
-	snapshot        any
-	hasSnapshot     bool
-	processStarted  bool
-	processInstance ProcessInstance
-	monitorCancel   context.CancelFunc
-	monitorDone     chan struct{}
-	reconciled      bool
+	mu               sync.Mutex
+	status           Status
+	generation       uint64
+	transition       *transition
+	snapshot         any
+	hasSnapshot      bool
+	processStarted   bool
+	processInstance  ProcessInstance
+	monitorCancel    context.CancelFunc
+	monitorDone      chan struct{}
+	reconciled       bool
+	diagnosticStage  string
+	diagnosticDetail string
 }
 
 func NewController(policy accessmodel.Policy, network NetworkManager, process ProcessSupervisor, options ...Option) *Controller {
@@ -181,6 +192,8 @@ func (c *Controller) Connect(ctx context.Context) Status {
 		active := &transition{kind: "connect", done: make(chan struct{}), cancel: cancel}
 		c.transition = active
 		c.status = Status{State: accessmodel.StateConnecting, Message: "正在建立安全连接"}
+		c.diagnosticStage = ""
+		c.diagnosticDetail = ""
 		c.mu.Unlock()
 
 		status, instance, failures, started := c.runConnect(operationContext)
@@ -284,7 +297,23 @@ func (c *Controller) Diagnostics() Diagnostics {
 		ErrorCode:  c.status.ErrorCode,
 		Message:    c.status.Message,
 		Generation: c.generation,
+		Stage:      c.diagnosticStage,
+		Detail:     c.diagnosticDetail,
 	}
+}
+
+func (c *Controller) recordDiagnostic(err error) {
+	var diagnostic stagedDiagnosticError
+	if !errors.As(err, &diagnostic) {
+		return
+	}
+	if diagnostic.DiagnosticStage() == "" || diagnostic.DiagnosticDetail() == "" {
+		return
+	}
+	c.mu.Lock()
+	c.diagnosticStage = diagnostic.DiagnosticStage()
+	c.diagnosticDetail = diagnostic.DiagnosticDetail()
+	c.mu.Unlock()
 }
 
 func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <-chan error, bool) {
@@ -335,6 +364,7 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 		}
 		snapshot, err := c.network.Capture(ctx)
 		if err != nil {
+			c.recordDiagnostic(err)
 			return failure(ErrorNetworkCapture), nil, nil, false
 		}
 		c.mu.Lock()
@@ -344,6 +374,7 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 	}
 	failures, err := c.network.InstallPublicTCPBlock(ctx)
 	if err != nil {
+		c.recordDiagnostic(err)
 		return failure(ErrorPublicTCPBlock), nil, nil, false
 	}
 	if c.deps.RenderConfig == nil || c.deps.WriteConfigAtomic == nil || c.deps.ConfigPath == "" {

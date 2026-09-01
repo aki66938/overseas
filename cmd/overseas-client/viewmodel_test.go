@@ -232,6 +232,8 @@ func TestViewModelCopiesOnlyRedactedDiagnostics(t *testing.T) {
 			ErrorCode:  agent.ErrorCredential,
 			Message:    "credential [REDACTED] unavailable",
 			Generation: 7,
+			Stage:      "firewall_publish",
+			Detail:     "The specified interface was not found.",
 		},
 	}
 	vm := NewViewModel(client, clipboard)
