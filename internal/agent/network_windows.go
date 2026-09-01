@@ -975,14 +975,29 @@ func (fileSnapshotStore) Delete(path string) error {
 
 type powerShellNetworkRunner struct{}
 
+func powerShellInputEnvelope(input []byte) []byte {
+	return []byte(base64.StdEncoding.EncodeToString(input))
+}
+
+const networkPowerShellTransportPrologue = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$envelope = [Console]::In.ReadToEnd().Trim()
+if ([string]::IsNullOrWhiteSpace($envelope)) { throw 'PowerShell input envelope is empty.' }
+$jsonBytes = [Convert]::FromBase64String($envelope)
+$json = $utf8.GetString($jsonBytes)
+$i = ($json | ConvertFrom-Json)`
+
 func (powerShellNetworkRunner) Run(ctx context.Context, operation string, input []byte) ([]byte, error) {
 	script, exists := networkPowerShellScripts[operation]
 	if !exists {
 		return nil, errors.New("unknown network operation")
 	}
-	command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShell(script))
+	command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShell(networkPowerShellTransportPrologue+"\n"+script))
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	command.Stdin = bytes.NewReader(input)
+	command.Stdin = bytes.NewReader(powerShellInputEnvelope(input))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -992,6 +1007,10 @@ func (powerShellNetworkRunner) Run(ctx context.Context, operation string, input 
 	}
 	if err := command.Wait(); err != nil {
 		return nil, newFixedNetworkOperationError(operation, err, stderr.Bytes())
+	}
+	if !utf8.Valid(stdout.Bytes()) {
+		const detail = "invalid PowerShell UTF-8 output"
+		return nil, newFixedNetworkOperationError(operation, errors.New(detail), []byte(detail))
 	}
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
@@ -1151,9 +1170,7 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationRestore:   restoreNetworkPowerShell,
 }
 
-const captureNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$defaults = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric)
+const captureNetworkPowerShell = `$defaults = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric)
 if ($defaults.Count -eq 0) { throw 'No IPv4 default route exists.' }
 $interfaces = @()
 foreach ($index in @($defaults.InterfaceIndex | Sort-Object -Unique)) {
@@ -1209,9 +1226,7 @@ foreach ($node in @($i.NodeAddresses)) {
   NodeRoutes = @($nodeRoutes)
 } | ConvertTo-Json -Compress -Depth 8`
 
-const scanNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$null = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$indices = @(Get-NetIPInterface | Where-Object { [int]$_.InterfaceIndex -gt 0 } | Select-Object -ExpandProperty InterfaceIndex | Sort-Object -Unique)
+const scanNetworkPowerShell = `$indices = @(Get-NetIPInterface | Where-Object { [int]$_.InterfaceIndex -gt 0 } | Select-Object -ExpandProperty InterfaceIndex | Sort-Object -Unique)
 $adapters = @()
 foreach ($index in $indices) {
   $matches = @(Get-NetAdapter -IncludeHidden -InterfaceIndex ([int]$index) -ErrorAction SilentlyContinue)
@@ -1231,9 +1246,7 @@ foreach ($index in $indices) {
 $adapters = @($adapters)
 ConvertTo-Json -InputObject $adapters -Compress -Depth 4`
 
-const blockNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$remote = @($i.BlockedRemoteAddresses)
+const blockNetworkPowerShell = `$remote = @($i.BlockedRemoteAddresses)
 $dnsRemote = @($i.DNSBlockedRemoteAddresses)
 $desired = @([string]$i.FirewallRuleNames[3], [string]$i.FirewallRuleNames[4], [string]$i.FirewallRuleNames[5])
 function Test-ManagedAdapterRule([string]$name, [string]$alias) {
@@ -1264,9 +1277,7 @@ if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewall
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
 Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Where-Object { $desired -notcontains $_.Name } | Remove-NetFirewallRule -ErrorAction Stop`
 
-const verifyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-function Assert-EqualSet([string]$label, $actual, $expected) {
+const verifyNetworkPowerShell = `function Assert-EqualSet([string]$label, $actual, $expected) {
   $left = @($actual | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Sort-Object -Unique)
   $right = @($expected | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Sort-Object -Unique)
   if ($left.Count -ne $right.Count -or [string]::Join('|', $left) -ne [string]::Join('|', $right)) { throw ('active_store_verify: ' + $label + ' does not match.') }
@@ -1308,9 +1319,7 @@ foreach ($adapter in @($i.ProtectedAdapters)) {
 Assert-Rule ([string]$i.FirewallRuleNames[3]) 'UDP' @('53') @($i.DNSBlockedRemoteAddresses) ''
 Assert-Rule ([string]$i.FirewallRuleNames[4]) 'TCP' @('53') @($i.DNSBlockedRemoteAddresses) ''`
 
-const emergencyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$remote = @($i.BlockedRemoteAddresses)
+const emergencyNetworkPowerShell = `$remote = @($i.BlockedRemoteAddresses)
 $dnsRemote = @($i.DNSBlockedRemoteAddresses)
 function Test-ManagedRule([string]$name) {
   $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
@@ -1321,9 +1330,7 @@ if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[5]))) { New-NetFirewall
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
 if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }`
 
-const readyNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$deadline = [DateTime]::UtcNow.AddSeconds(2)
+const readyNetworkPowerShell = `$deadline = [DateTime]::UtcNow.AddSeconds(2)
 do {
   $adapters = @(Get-NetAdapter -InterfaceAlias $i.TUNInterface -IncludeHidden -ErrorAction SilentlyContinue)
   if ($adapters.Count -gt 1) { throw 'More than one fixed TUN adapter exists.' }
@@ -1345,9 +1352,7 @@ if ($adapters.Count -ne 1 -or -not ($addresses -contains [string]$i.TUNAddress))
   Addresses = @($addresses)
 } | ConvertTo-Json -Compress -Depth 5`
 
-const activateNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$tun = Get-NetAdapter -InterfaceIndex $i.OwnedTUN.InterfaceIndex -IncludeHidden -ErrorAction Stop
+const activateNetworkPowerShell = `$tun = Get-NetAdapter -InterfaceIndex $i.OwnedTUN.InterfaceIndex -IncludeHidden -ErrorAction Stop
 if ([string]$tun.InterfaceGuid -ne [string]$i.OwnedTUN.InterfaceGuid -or [string]$tun.InterfaceAlias -ne [string]$i.OwnedTUN.InterfaceAlias -or [string]$tun.InterfaceDescription -ne [string]$i.OwnedTUN.InterfaceDescription -or [bool]$tun.HardwareInterface -ne [bool]$i.OwnedTUN.HardwareInterface -or [bool]$tun.Virtual -ne [bool]$i.OwnedTUN.Virtual) { throw 'Owned TUN identity changed before activation.' }
 $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $tun.InterfaceIndex -ErrorAction Stop | ForEach-Object { ([string]$_.IPAddress) + '/' + ([string]$_.PrefixLength) })
 if ($addresses.Count -ne 1 -or $addresses[0] -ne [string]$i.TUNAddress) { throw 'Owned TUN address changed before activation.' }
@@ -1361,9 +1366,7 @@ foreach ($route in @($i.OwnedRoutes)) {
   New-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore ActiveStore | Out-Null
 }`
 
-const restoreNetworkPowerShell = `$ErrorActionPreference = 'Stop'
-$i = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-function Install-Emergency {
+const restoreNetworkPowerShell = `function Install-Emergency {
   $name = [string]$i.FirewallRuleNames[5]
   $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
   if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Emergency firewall rule name collision.' }

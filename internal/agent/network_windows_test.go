@@ -3,7 +3,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -15,6 +17,71 @@ import (
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 )
+
+func TestPowerShellInputEnvelopeIsASCIIAndRoundTripsUnicodeJSON(t *testing.T) {
+	input := []byte(`{"InterfaceAlias":"以太网","Secondary":"本地连接"}`)
+	envelope := powerShellInputEnvelope(input)
+	for _, value := range envelope {
+		if value > 0x7f {
+			t.Fatalf("envelope contains non-ASCII byte %x", value)
+		}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(envelope))
+	if err != nil || !bytes.Equal(decoded, input) {
+		t.Fatalf("round trip = %q, %v", decoded, err)
+	}
+}
+
+func TestPowerShellNetworkRunnerRoundTripsUnicodeUnderSystemCodePage(t *testing.T) {
+	const operation = "transport_unicode_test"
+	networkPowerShellScripts[operation] = `[pscustomobject]@{InterfaceAlias=[string]$i.InterfaceAlias;Secondary=[string]$i.Secondary}|ConvertTo-Json -Compress`
+	defer delete(networkPowerShellScripts, operation)
+	input := []byte(`{"InterfaceAlias":"以太网","Secondary":"本地连接"}`)
+	output, err := (powerShellNetworkRunner{}).Run(context.Background(), operation, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.Valid(output) {
+		t.Fatalf("stdout is not UTF-8: %x", output)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["InterfaceAlias"] != "以太网" || got["Secondary"] != "本地连接" {
+		t.Fatalf("round trip = %#v", got)
+	}
+}
+
+func TestPowerShellNetworkRunnerRejectsInvalidUTF8Stdout(t *testing.T) {
+	const operation = "transport_invalid_stdout_test"
+	networkPowerShellScripts[operation] = `$stream=[Console]::OpenStandardOutput();$stream.WriteByte(255);$stream.Flush()`
+	defer delete(networkPowerShellScripts, operation)
+	if _, err := (powerShellNetworkRunner{}).Run(context.Background(), operation, []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "invalid PowerShell UTF-8 output") {
+		t.Fatalf("invalid stdout error = %v", err)
+	}
+}
+
+func TestPowerShellNetworkRunnerRejectsInvalidUTF8InputBeforeScriptBody(t *testing.T) {
+	const operation = "transport_invalid_input_test"
+	networkPowerShellScripts[operation] = `Write-Output 'script_body_reached'`
+	defer delete(networkPowerShellScripts, operation)
+	if output, err := (powerShellNetworkRunner{}).Run(context.Background(), operation, []byte{0xff}); err == nil || bytes.Contains(output, []byte("script_body_reached")) {
+		t.Fatalf("invalid input reached body: output=%q err=%v", output, err)
+	}
+}
+
+func TestPowerShellTransportSuppressesProgressBeforeFailure(t *testing.T) {
+	const operation = networkOperationBlock
+	original := networkPowerShellScripts[operation]
+	networkPowerShellScripts[operation] = `Write-Progress -Activity noisy -Completed;throw 'transport_marker'`
+	defer func() { networkPowerShellScripts[operation] = original }()
+	_, err := (powerShellNetworkRunner{}).Run(context.Background(), operation, []byte(`{}`))
+	diagnostic, ok := err.(interface{ DiagnosticDetail() string })
+	if !ok || !strings.Contains(diagnostic.DiagnosticDetail(), "transport_marker") || strings.Contains(diagnostic.DiagnosticDetail(), `S="progress"`) {
+		t.Fatalf("diagnostic = %#v", err)
+	}
+}
 
 func TestPowerShellNetworkDiagnosticIsBoundedAndDoesNotIncludeInput(t *testing.T) {
 	input := []byte(`{"credential":"never-copy-this-input"}`)
