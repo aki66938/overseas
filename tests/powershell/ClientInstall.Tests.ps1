@@ -13,6 +13,10 @@ $verifierMainPath = Join-Path $repoRoot 'cmd\installer-verifier\main.go'
 $runtimeOwnerPath = Join-Path $repoRoot 'internal\runtimeowner\owner.go'
 $credentialWriterPath = Join-Path $repoRoot 'cmd\credential-provisioner\main_windows.go'
 $configWriterPath = Join-Path $repoRoot 'cmd\overseas-agent\main_windows.go'
+$traceEventPath = Join-Path $repoRoot 'internal\traceevent\event.go'
+$pipePath = Join-Path $repoRoot 'internal\agent\pipe_windows.go'
+$clientViewModelPath = Join-Path $repoRoot 'cmd\overseas-client\viewmodel.go'
+$clientWindowPath = Join-Path $repoRoot 'cmd\overseas-client\main_windows.go'
 $realTestPathCommand = Get-Command Test-Path -CommandType Cmdlet
 
 function Get-ClientInstallFailureMessage {
@@ -24,6 +28,51 @@ function Get-ClientInstallFailureMessage {
 }
 
 Describe 'Transactional Windows client installer' {
+
+    It 'defines a bounded redacted trace protocol without secret-bearing fields' {
+        $eventSource = Get-Content -LiteralPath $traceEventPath -Raw
+        $pipeSource = Get-Content -LiteralPath $pipePath -Raw
+        $agentSource = Get-Content -LiteralPath $configWriterPath -Raw
+        $pipeSource | Should Match ([regex]::Escape('ActionTrace       = "trace"'))
+        foreach ($field in @('schema_version', 'sequence', 'timestamp_utc', 'generation', 'level', 'component', 'stage', 'event', 'elapsed_ms', 'message', 'detail', 'detail_truncated', 'residue')) {
+            $eventSource | Should Match ([regex]::Escape('json:"' + $field))
+        }
+        $eventSource | Should Not Match 'json:"(?:password|credential|private_key|access_token|config)'
+        $agentSource | Should Match ([regex]::Escape('traceDirectory   = dataDirectory + `\logs`'))
+        $agentSource | Should Match 'traceMaxFileBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024'
+        $agentSource | Should Match 'traceRetainFiles\s*=\s*5'
+    }
+
+    It 'installs a protected service-only log directory before the service can start' {
+        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text | Should Match ([regex]::Escape('$LogRoot = Join-Path $DataRoot ''logs'''))
+        $installStart = $text.IndexOf('function Install-ClientTransaction')
+        $installEnd = $text.IndexOf('function Repair-ClientTransaction', $installStart)
+        $installBody = $text.Substring($installStart, $installEnd - $installStart)
+        $protectLogIndex = $installBody.IndexOf('Protect-OwnedDirectory -Path $LogRoot')
+        $serviceIndex = $installBody.IndexOf('Ensure-OwnedService')
+        $protectLogIndex | Should BeGreaterThan -1
+        $serviceIndex | Should BeGreaterThan $protectLogIndex
+        $text | Should Match 'Remove-OwnedTraceDirectory'
+    }
+
+    It 'shows the expanded timeline and restores before every failed-state retry' {
+        $windowSource = Get-Content -LiteralPath $clientWindowPath -Raw
+        $viewModelSource = Get-Content -LiteralPath $clientViewModelPath -Raw
+        foreach ($literal in @('windowWidth  = 820', 'windowHeight = 620', 'GenerationText', 'StageText', 'ProtectionText', 'LogText', '仅恢复网络', '复制全部日志')) {
+            ($windowSource + $viewModelSource) | Should Match ([regex]::Escape($literal))
+        }
+        $safeStart = $viewModelSource.IndexOf('func (v *ViewModel) safeRetry')
+        $safeEnd = $viewModelSource.IndexOf('func (v *ViewModel) Restore', $safeStart)
+        $safeRetry = $viewModelSource.Substring($safeStart, $safeEnd - $safeStart)
+        $disconnectIndex = $safeRetry.IndexOf('v.client.Disconnect')
+        $diagnosticsIndex = $safeRetry.IndexOf('v.client.Diagnostics')
+        $connectIndex = $safeRetry.IndexOf('v.client.Connect')
+        $disconnectIndex | Should BeGreaterThan -1
+        $diagnosticsIndex | Should BeGreaterThan $disconnectIndex
+        $connectIndex | Should BeGreaterThan $diagnosticsIndex
+        $safeRetry | Should Match 'Residue\.IsZero\(\)'
+    }
     It 'exists, parses in Windows PowerShell 5.1, and exposes only explicit lifecycle modes' {
         (Test-Path -LiteralPath $scriptPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return }
@@ -695,7 +744,7 @@ Describe 'Transactional Windows client installer' {
         $script:ShortcutPath = Join-Path $TestDrive 'absent-shortcut.lnk'
         $journalPath = Join-Path $TestDrive 'uninstall.json'
         [IO.File]::WriteAllText($journalPath, '{"SchemaVersion":2,"Operation":"Uninstall","Phase":"DeletingRoot","PendingResource":"C:\\Program Files\\RegenBio\\OverseasAccess"}')
-        foreach ($name in @('Resume-ClientTransaction','Request-ControlledDisconnect','Assert-NetworkRestored','Remove-OwnedFirewallRules','Remove-OwnedShortcut','Remove-OwnedService','Clear-OwnedSensitiveRuntimeFiles','Assert-ServiceAbsent','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-OwnedFirewallAbsent')) {
+        foreach ($name in @('Resume-ClientTransaction','Request-ControlledDisconnect','Assert-NetworkRestored','Remove-OwnedFirewallRules','Remove-OwnedShortcut','Remove-OwnedService','Clear-OwnedSensitiveRuntimeFiles','Remove-OwnedTraceDirectory','Assert-ServiceAbsent','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-OwnedFirewallAbsent')) {
             Set-Item -Path ('function:' + $name) -Value { }
         }
         function Remove-OwnedRoot { throw 'injected root delete failure' }

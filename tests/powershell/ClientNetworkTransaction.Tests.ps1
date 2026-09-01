@@ -47,4 +47,36 @@ Describe 'Client LocalSystem network transaction gate' {
         $source | Should Match ([regex]::Escape('$ErrorActionPreference = ''Continue'''))
         $source | Should Match ([regex]::Escape('$ErrorActionPreference = $previousErrorActionPreference'))
     }
+
+    It 'captures structured trace checkpoints and proves paired lifecycle stages' {
+        $source = Get-Content -LiteralPath $scriptPath -Raw
+        foreach ($literal in @(
+            'OVERSEAS_ACCESS_TRACE_EVIDENCE_PATH',
+            'BeforePublish',
+            'AfterPublish',
+            'AfterRestore',
+            'TerminalResidue',
+            'network_capture',
+            'adapter_scan',
+            'firewall_publish',
+            'active_store_verify',
+            'network_restore',
+            'residue_verify',
+            "'started'",
+            "'succeeded'"
+        )) {
+            $source | Should Match ([regex]::Escape($literal))
+        }
+        $source | Should Match 'SchemaVersion\s*=\s*2'
+        $source | Should Match 'TraceLifecycleComplete\s*=\s*\$traceLifecycleComplete'
+        $source | Should Match 'TerminalResidueZero\s*=\s*\$terminalResidueZero'
+    }
+
+    It 'keeps the trace sidecar create-new bounded and removes it after evidence publication' {
+        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source | Should Match ([regex]::Escape('$EvidencePath + ''.trace.json'''))
+        $source | Should Match 'TraceEvidence.{0,80}65536'
+        $source | Should Match 'Remove-Item\s+-LiteralPath\s+\$traceEvidencePath'
+        $source | Should Not Match 'password|credential|private_key|access_token'
+    }
 }

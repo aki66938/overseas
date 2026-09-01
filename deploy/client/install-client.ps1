@@ -18,6 +18,7 @@ $ServiceName = 'RegenBioOverseasAccessAgent'
 $ServiceDisplayName = 'RegenBio Overseas Access Agent'
 $InstallRoot = 'C:\Program Files\RegenBio\OverseasAccess'
 $DataRoot = 'C:\ProgramData\RegenBio\OverseasAccess'
+$LogRoot = Join-Path $DataRoot 'logs'
 $TransactionRoot = 'C:\ProgramData\RegenBio\InstallerTransactions'
 $RootOwnerFileName = '.regenbio-overseas-access.owner.json'
 $InstallOwnerPath = Join-Path $InstallRoot $RootOwnerFileName
@@ -647,6 +648,23 @@ function Clear-OwnedSensitiveRuntimeFiles {
     if ([IO.File]::Exists($RuntimeOwnershipPath) -or [IO.Directory]::Exists($RuntimeOwnershipPath)) { throw 'Runtime ownership ledger residue remains.' }
 }
 
+function Remove-OwnedTraceDirectory {
+    $expected = Join-Path $DataRoot 'logs'
+    if (-not [string]::Equals((Get-CanonicalPath $LogRoot), (Get-CanonicalPath $expected), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Trace directory is outside the owned data root.'
+    }
+    if (-not (Test-Path -LiteralPath $LogRoot)) { return }
+    if (-not (Test-Path -LiteralPath $LogRoot -PathType Container)) { throw 'Owned trace path is not a directory.' }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $LogRoot -Force)) {
+        if (-not $entry.PSIsContainer -and $entry.Name -match '^trace-\d{8}T\d{6}\.\d{9}Z(?:-\d{2})?-g\d+\.jsonl$') {
+            Remove-Item -LiteralPath $entry.FullName -Force
+            continue
+        }
+        throw "Owned trace directory contains foreign entry '$($entry.Name)'."
+    }
+    Remove-Item -LiteralPath $LogRoot -Force
+}
+
 function Remove-OwnedDirectory {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -793,6 +811,7 @@ function Undo-ClientTransaction {
         Remove-OwnedShortcut
         Remove-OwnedService
         Clear-OwnedSensitiveRuntimeFiles
+        Remove-OwnedTraceDirectory
         foreach ($root in @($InstallRoot, $DataRoot)) {
             if (Test-Path -LiteralPath $root -PathType Container) { Remove-OwnedRoot -Root $root -JournalPath $JournalPath }
         }
@@ -819,6 +838,7 @@ function Install-ClientTransaction {
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingDataRoot' -PendingResource $DataRoot -CompletedResource $InstallRoot
         Protect-OwnedDirectory -Path $DataRoot
         Write-RootOwnershipMarker -Root $DataRoot -TransactionId $TransactionId
+        Protect-OwnedDirectory -Path $LogRoot
         Write-TransactionPhase -Path $JournalPath -Phase 'CopyingPayloads' -CompletedResource $DataRoot
         foreach ($entry in @($Manifest.files)) {
             $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')) { $DataRoot } else { $InstallRoot }
@@ -860,6 +880,7 @@ function Repair-ClientTransaction {
         if ($null -ne $service -and $service.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -ErrorAction Stop }
         Protect-OwnedDirectory -Path $InstallRoot -ReadOnlyForUsers
         Protect-OwnedDirectory -Path $DataRoot
+        Protect-OwnedDirectory -Path $LogRoot
         Write-TransactionPhase -Path $JournalPath -Phase 'RepairPayloads'
         foreach ($entry in @($Manifest.files)) {
             $destinationRoot = if ($entry.name -in @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')) { $DataRoot } else { $InstallRoot }
@@ -901,6 +922,7 @@ function Uninstall-ClientTransaction {
         Remove-OwnedService
         Write-TransactionPhase -Path $JournalPath -Phase 'SensitiveCleanup' -PendingResource $RuntimeOwnershipPath
         Clear-OwnedSensitiveRuntimeFiles
+        Remove-OwnedTraceDirectory
         Assert-ServiceAbsent
         Assert-TunAbsent
         Assert-OwnedRoutesAbsent

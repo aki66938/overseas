@@ -5,6 +5,31 @@ an end-user client. Run it from an elevated PowerShell session on the Windows
 VM, during the approved maintenance window, and test only the operator-approved
 HTTPS target and IPs covered by the telecom/operator whitelist.
 
+## v16 observable recovery and acceptance boundary
+
+For the current failed **generation 5**, collect the untouched diagnostics JSON,
+service/PID, managed-rule count, snapshot phase, product routes, product TUN,
+core-process count, and owned runtime/config existence **before recovery**. Read
+the local named-pipe `trace action` and copy the protected JSONL logs as evidence;
+each file is bounded to 2 MiB and retention is bounded to five files. Do not copy
+credentials, the rendered sing-box configuration, firewall address collections,
+or telecom client material into evidence.
+
+Only the running service's explicit **Disconnect/Recover** path may clean runtime
+network state. Operators **must not manually delete** managed firewall rules,
+routes, TUN adapters, processes, or `network-state.json`. Continue an upgrade only
+after that controlled path reports disconnected and an independent check proves
+zero residue. If controlled recovery cannot prove zero residue, preserve the
+failed state and evidence and stop the release.
+
+The v16 client window is approximately 820×620 with a default-expanded timeline,
+generation/stage/protection summaries, and the three connection, recovery, and
+copy controls. Installing or opening it is not end-to-end acceptance. For the
+final user-run test, the user must **fully exit FlClash**, click once, then verify
+both an approved overseas site and an internal site. On failure, click
+`复制全部日志`; on success, disconnect or use recovery and report the browsing and
+UI result. Acceptance still requires a subsequent independent zero residue check.
+
 ## Stop/go prerequisites
 
 Do not start unless all of the following are present:

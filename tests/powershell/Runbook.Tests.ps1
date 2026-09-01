@@ -14,6 +14,30 @@ function Assert-DocumentationFileExists {
 }
 
 Describe 'Windows forwarding PoC operator documentation' {
+    It 'documents the v16 evidence-first recovery and user acceptance boundary' {
+        if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
+        $runbook = Get-Content -LiteralPath $runbookPath -Raw
+        foreach ($literal in @(
+            'generation 5',
+            'before recovery',
+            'Disconnect/Recover',
+            'must not manually delete',
+            'trace action',
+            '2 MiB',
+            'five files',
+            '820×620',
+            'default-expanded',
+            'fully exit FlClash',
+            '复制全部日志',
+            'zero residue'
+        )) {
+            $runbook | Should Match ([regex]::Escape($literal))
+        }
+        $generationIndex = $runbook.IndexOf('generation 5')
+        $recoveryIndex = $runbook.IndexOf('Disconnect/Recover')
+        $generationIndex | Should BeGreaterThan -1
+        $recoveryIndex | Should BeGreaterThan $generationIndex
+    }
     It 'documents the hardened evidence sequence and its bindings' {
         if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
         $runbook = Get-Content -LiteralPath $runbookPath -Raw
