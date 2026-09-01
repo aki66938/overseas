@@ -12,7 +12,7 @@ const (
 	PipeName               = `\\.\pipe\RegenBioOverseasAccess`
 	MaxPipeFrameBytes      = 64 * 1024
 	PipeOperationTimeout   = 5 * time.Second
-	PipeConnectTimeout     = 30 * time.Second
+	PipeConnectTimeout     = 120 * time.Second
 	PipeSecurityDescriptor = "D:P(D;;GA;;;AN)(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
 
 	ActionConnect     = "connect"
