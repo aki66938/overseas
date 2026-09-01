@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 func TestPipeSecurityDescriptorAllowsAuthenticatedUsersAndDeniesRemoteIdentities(t *testing.T) {
@@ -32,6 +33,150 @@ func TestPipeSecurityDescriptorAllowsAuthenticatedUsersAndDeniesRemoteIdentities
 		strings.Index(PipeSecurityDescriptor, "(D;;GA;;;NU)") > strings.Index(PipeSecurityDescriptor, "(A;;GRGW;;;AU)") {
 		t.Fatalf("deny ACEs must precede Authenticated Users allow ACE: %q", PipeSecurityDescriptor)
 	}
+}
+
+func TestPipeTraceReturnsIncrementalBoundedBatch(t *testing.T) {
+	events := []traceevent.Event{
+		pipeTraceEvent(3, "first"),
+		pipeTraceEvent(4, "second"),
+		pipeTraceEvent(5, "third"),
+	}
+	source := &fakeTraceSource{batch: traceevent.Batch{
+		Events: events, NextSequence: 5, HasMore: true, OldestSequence: 3,
+	}}
+	controller := &fakePipeController{status: Status{State: accessmodel.StateFailed}}
+	server := NewPipeServer(controller, WithTraceSource(source))
+
+	response, ok := pipeTransaction(t, server, Request{ID: "trace-1", Action: ActionTrace, AfterSequence: 2, Limit: 3})
+	if !ok {
+		t.Fatal("trace returned no response")
+	}
+	if response.ID != "trace-1" || response.State != string(accessmodel.StateFailed) || response.ErrorCode != "" {
+		t.Fatalf("response = %#v", response)
+	}
+	var batch traceevent.Batch
+	if err := json.Unmarshal([]byte(response.Message), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Events) != 3 || batch.NextSequence != 5 || !batch.HasMore || batch.OldestSequence != 3 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	if source.after != 2 || source.limit != 3 {
+		t.Fatalf("source request = after %d limit %d", source.after, source.limit)
+	}
+}
+
+func TestPipeTraceUsesDefaultLimitAndSupportsEmptyBatch(t *testing.T) {
+	source := &fakeTraceSource{batch: traceevent.Batch{NextSequence: 9, OldestSequence: 9}}
+	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateDisconnected}}, WithTraceSource(source))
+	response, ok := pipeTransaction(t, server, Request{ID: "trace-empty", Action: ActionTrace, AfterSequence: 9})
+	if !ok {
+		t.Fatal("trace returned no response")
+	}
+	if source.limit != TraceDefaultLimit {
+		t.Fatalf("default limit = %d", source.limit)
+	}
+	var batch traceevent.Batch
+	if err := json.Unmarshal([]byte(response.Message), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Events) != 0 || batch.NextSequence != 9 {
+		t.Fatalf("batch = %#v", batch)
+	}
+}
+
+func TestPipeTraceRejectsInvalidRequestFields(t *testing.T) {
+	controller := &fakePipeController{status: Status{State: accessmodel.StateDisconnected}}
+	server := NewPipeServer(controller, WithTraceSource(&fakeTraceSource{}))
+	frames := []string{
+		`{"id":"negative","action":"trace","limit":-1}` + "\n",
+		`{"id":"large","action":"trace","limit":65}` + "\n",
+		`{"id":"connect-cursor","action":"connect","after_sequence":1}` + "\n",
+		`{"id":"status-limit","action":"status","limit":1}` + "\n",
+	}
+	for _, frame := range frames {
+		if response, ok := rawPipeTransaction(t, server, frame); ok {
+			t.Fatalf("invalid frame returned %#v", response)
+		}
+	}
+}
+
+func TestPipeTraceWithoutSourceFailsClosed(t *testing.T) {
+	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateDisconnected}})
+	response, ok := pipeTransaction(t, server, Request{ID: "no-source", Action: ActionTrace})
+	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StateFailed) {
+		t.Fatalf("response = %#v ok=%v", response, ok)
+	}
+}
+
+func TestPipeTraceRejectsInvalidSourceBatch(t *testing.T) {
+	event := pipeTraceEvent(1, "invalid")
+	event.Stage = "unapproved_stage"
+	source := &fakeTraceSource{batch: traceevent.Batch{Events: []traceevent.Event{event}, NextSequence: 1, OldestSequence: 1}}
+	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateConnected}}, WithTraceSource(source))
+	response, ok := pipeTransaction(t, server, Request{ID: "invalid-source", Action: ActionTrace})
+	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StateFailed) {
+		t.Fatalf("response = %#v ok=%v", response, ok)
+	}
+}
+
+func TestPipeTraceResponseFitsFrameByWholeEvents(t *testing.T) {
+	var events []traceevent.Event
+	for sequence := uint64(1); sequence <= uint64(TraceMaxLimit); sequence++ {
+		event := pipeTraceEvent(sequence, "large")
+		event.Detail = strings.Repeat(`"\\`, traceevent.MaxDetailBytes/2)
+		event.Detail, event.DetailTruncated = traceevent.SanitizeDetail(event.Detail)
+		events = append(events, event)
+	}
+	source := &fakeTraceSource{batch: traceevent.Batch{Events: events, NextSequence: uint64(TraceMaxLimit), OldestSequence: 1}}
+	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateConnected}}, WithTraceSource(source))
+
+	line, ok := rawPipeLine(t, server, Request{ID: "bounded", Action: ActionTrace, Limit: TraceMaxLimit})
+	if !ok {
+		t.Fatal("trace returned no response")
+	}
+	if len(line) > MaxPipeFrameBytes {
+		t.Fatalf("response bytes = %d", len(line))
+	}
+	var response Response
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatal(err)
+	}
+	var batch traceevent.Batch
+	if err := json.Unmarshal([]byte(response.Message), &batch); err != nil {
+		t.Fatalf("nested batch was cut: %v", err)
+	}
+	if len(batch.Events) == 0 || len(batch.Events) >= len(events) || !batch.HasMore {
+		t.Fatalf("batch was not reduced at event boundary: %d events, has_more=%v", len(batch.Events), batch.HasMore)
+	}
+	if batch.NextSequence != batch.Events[len(batch.Events)-1].Sequence {
+		t.Fatalf("next_sequence=%d last=%d", batch.NextSequence, batch.Events[len(batch.Events)-1].Sequence)
+	}
+}
+
+func pipeTraceEvent(sequence uint64, message string) traceevent.Event {
+	return traceevent.Event{
+		SchemaVersion: traceevent.SchemaVersion,
+		Sequence:      sequence,
+		TimestampUTC:  time.Date(2026, 9, 1, 8, 0, int(sequence), 0, time.UTC),
+		Generation:    5,
+		Level:         traceevent.LevelInfo,
+		Component:     traceevent.ComponentNetwork,
+		Stage:         traceevent.StageFirewallPublish,
+		Event:         traceevent.EventState,
+		Message:       message,
+	}
+}
+
+type fakeTraceSource struct {
+	batch traceevent.Batch
+	after uint64
+	limit int
+}
+
+func (f *fakeTraceSource) Batch(after uint64, limit int) traceevent.Batch {
+	f.after, f.limit = after, limit
+	return f.batch
 }
 
 func TestPipeDispatchesOnlyFixedActionsAndEchoesRequestID(t *testing.T) {
@@ -207,6 +352,31 @@ func rawPipeTransaction(t *testing.T, server *PipeServer, frame string) (Respons
 		t.Fatalf("decode response: %v", err)
 	}
 	return response, true
+}
+
+func rawPipeLine(t *testing.T, server *PipeServer, request Request) ([]byte, bool) {
+	t.Helper()
+	serverSide, clientSide := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		server.serveConnection(serverSide)
+		close(done)
+	}()
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = clientSide.Write(append(data, '\n'))
+		close(writeDone)
+	}()
+	_ = clientSide.SetReadDeadline(time.Now().Add(time.Second))
+	line, err := bufio.NewReader(clientSide).ReadBytes('\n')
+	_ = clientSide.Close()
+	<-writeDone
+	<-done
+	return line, err == nil
 }
 
 type fakePipeController struct {

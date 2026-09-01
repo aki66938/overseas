@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 const (
@@ -19,6 +21,10 @@ const (
 	ActionDisconnect  = "disconnect"
 	ActionStatus      = "status"
 	ActionDiagnostics = "diagnostics"
+	ActionTrace       = "trace"
+
+	TraceDefaultLimit = 32
+	TraceMaxLimit     = 64
 
 	ErrorInvalidAction  = "invalid_action"
 	ErrorInvalidRequest = "invalid_request"
@@ -34,8 +40,10 @@ func PipeTimeoutForAction(action string) time.Duration {
 var ErrPipeUnsupported = errors.New("named-pipe service is unsupported on this platform")
 
 type Request struct {
-	ID     string `json:"id"`
-	Action string `json:"action"`
+	ID            string `json:"id"`
+	Action        string `json:"action"`
+	AfterSequence uint64 `json:"after_sequence,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
 }
 
 type Response struct {
@@ -54,7 +62,8 @@ type PipeController interface {
 
 type PipeOption func(*PipeServer)
 
-func WithPipeRedactions(...[]byte) PipeOption { return func(*PipeServer) {} }
+func WithPipeRedactions(...[]byte) PipeOption      { return func(*PipeServer) {} }
+func WithTraceSource(traceevent.Source) PipeOption { return func(*PipeServer) {} }
 
 type PipeServer struct{ controller PipeController }
 

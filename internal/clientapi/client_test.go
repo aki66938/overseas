@@ -12,6 +12,7 @@ import (
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 func TestConnectUsesFixedPipeDeadlineAndRequestShape(t *testing.T) {
@@ -82,6 +83,105 @@ func TestConnectUsesFixedPipeDeadlineAndRequestShape(t *testing.T) {
 	if _, ok := payload["config"]; ok {
 		t.Fatalf("request leaked config field: %#v", payload)
 	}
+}
+
+func TestTraceUsesExactIncrementalRequestAndAcceptsBatch(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	requestSeen := make(chan map[string]any, 1)
+	go func() {
+		defer serverConn.Close()
+		line, _ := bufio.NewReader(serverConn).ReadBytes('\n')
+		var request map[string]any
+		_ = json.Unmarshal(line, &request)
+		requestSeen <- request
+		batch := traceevent.Batch{
+			Events:       []traceevent.Event{clientTraceEvent(8)},
+			NextSequence: 8, OldestSequence: 4,
+		}
+		message, _ := json.Marshal(batch)
+		_ = json.NewEncoder(serverConn).Encode(agent.Response{
+			ID: "request-fixed", State: string(accessmodel.StateFailed), Message: string(message),
+		})
+	}()
+	client := New(
+		WithDialPipe(func(context.Context, string) (net.Conn, error) { return clientConn, nil }),
+		WithRequestIDGenerator(func() (string, error) { return "request-fixed", nil }),
+	)
+	batch, err := client.Trace(context.Background(), 7, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Events) != 1 || batch.NextSequence != 8 || batch.OldestSequence != 4 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	request := <-requestSeen
+	if len(request) != 4 || request["id"] != "request-fixed" || request["action"] != agent.ActionTrace || request["after_sequence"] != float64(7) || request["limit"] != float64(12) {
+		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestTraceRejectsMalformedOrUnapprovedBatch(t *testing.T) {
+	valid := clientTraceEvent(8)
+	validJSON := mustJSON(t, valid)
+	unknownEventJSON := strings.TrimSuffix(validJSON, "}") + `,"unexpected":true}`
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{"unknown batch field", `{"events":[],"next_sequence":7,"oldest_sequence":0,"unexpected":true}`},
+		{"unknown event field", `{"events":[` + unknownEventJSON + `],"next_sequence":8,"oldest_sequence":8}`},
+		{"unknown schema", func() string {
+			event := valid
+			event.SchemaVersion = 2
+			return mustJSON(t, traceevent.Batch{Events: []traceevent.Event{event}, NextSequence: 8, OldestSequence: 8})
+		}()},
+		{"unknown stage", func() string {
+			event := valid
+			event.Stage = "shell"
+			return mustJSON(t, traceevent.Batch{Events: []traceevent.Event{event}, NextSequence: 8, OldestSequence: 8})
+		}()},
+		{"non monotonic", mustJSON(t, traceevent.Batch{Events: []traceevent.Event{clientTraceEvent(9), clientTraceEvent(8)}, NextSequence: 8, OldestSequence: 8})},
+		{"cursor replay", mustJSON(t, traceevent.Batch{Events: []traceevent.Event{clientTraceEvent(7)}, NextSequence: 7, OldestSequence: 7})},
+		{"wrong next", mustJSON(t, traceevent.Batch{Events: []traceevent.Event{valid}, NextSequence: 9, OldestSequence: 8})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: string(accessmodel.StateFailed), Message: test.message})
+			if _, err := client.Trace(context.Background(), 7, 12); !errors.Is(err, ErrInvalidResponseShape) {
+				t.Fatalf("Trace() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTraceRejectsOversizedResponse(t *testing.T) {
+	client := newTestClientWithRawFrame(t, strings.Repeat("x", agent.MaxPipeFrameBytes+1)+"\n")
+	if _, err := client.Trace(context.Background(), 0, 0); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Trace() error = %v", err)
+	}
+}
+
+func clientTraceEvent(sequence uint64) traceevent.Event {
+	return traceevent.Event{
+		SchemaVersion: traceevent.SchemaVersion,
+		Sequence:      sequence,
+		TimestampUTC:  time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC),
+		Generation:    5,
+		Level:         traceevent.LevelInfo,
+		Component:     traceevent.ComponentNetwork,
+		Stage:         traceevent.StageFirewallPublish,
+		Event:         traceevent.EventState,
+		Message:       "published",
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestConnectRejectsMismatchedResponseID(t *testing.T) {

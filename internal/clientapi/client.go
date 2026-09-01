@@ -15,6 +15,7 @@ import (
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 const ErrorUnauthorized = "account_unauthorized"
@@ -94,7 +95,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 }
 
 func (c *Client) Diagnostics(ctx context.Context) (Diagnostics, error) {
-	response, err := c.request(ctx, agent.ActionDiagnostics)
+	response, err := c.request(ctx, agent.Request{Action: agent.ActionDiagnostics})
 	if err != nil {
 		return Diagnostics{}, err
 	}
@@ -108,6 +109,17 @@ func (c *Client) Diagnostics(ctx context.Context) (Diagnostics, error) {
 	return diagnostics, nil
 }
 
+func (c *Client) Trace(ctx context.Context, after uint64, limit int) (traceevent.Batch, error) {
+	if limit < 0 || limit > agent.TraceMaxLimit {
+		return traceevent.Batch{}, ErrInvalidResponseShape
+	}
+	response, err := c.request(ctx, agent.Request{Action: agent.ActionTrace, AfterSequence: after, Limit: limit})
+	if err != nil {
+		return traceevent.Batch{}, err
+	}
+	return decodeTraceMessage(response.Message, after)
+}
+
 func FormatDiagnostics(diagnostics Diagnostics) string {
 	data, err := json.Marshal(diagnostics)
 	if err != nil {
@@ -117,7 +129,7 @@ func FormatDiagnostics(diagnostics Diagnostics) string {
 }
 
 func (c *Client) requestStatus(ctx context.Context, action string) (Status, error) {
-	response, err := c.request(ctx, action)
+	response, err := c.request(ctx, agent.Request{Action: action})
 	if err != nil {
 		return Status{}, err
 	}
@@ -128,7 +140,7 @@ func (c *Client) requestStatus(ctx context.Context, action string) (Status, erro
 	}, nil
 }
 
-func (c *Client) request(ctx context.Context, action string) (agent.Response, error) {
+func (c *Client) request(ctx context.Context, request agent.Request) (agent.Response, error) {
 	if c == nil {
 		return agent.Response{}, fmt.Errorf("%w: client is nil", ErrServiceUnavailable)
 	}
@@ -136,7 +148,7 @@ func (c *Client) request(ctx context.Context, action string) (agent.Response, er
 	if err != nil {
 		return agent.Response{}, fmt.Errorf("%w: %v", ErrRequestID, err)
 	}
-	requestContext, cancel := context.WithTimeout(ctx, agent.PipeTimeoutForAction(action))
+	requestContext, cancel := context.WithTimeout(ctx, agent.PipeTimeoutForAction(request.Action))
 	defer cancel()
 
 	connection, err := c.dialPipe(requestContext, agent.PipeName)
@@ -148,7 +160,7 @@ func (c *Client) request(ctx context.Context, action string) (agent.Response, er
 		return agent.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
 
-	request := agent.Request{ID: requestID, Action: action}
+	request.ID = requestID
 	frame, err := json.Marshal(request)
 	if err != nil {
 		return agent.Response{}, err
@@ -178,6 +190,37 @@ func (c *Client) request(ctx context.Context, action string) (agent.Response, er
 		return agent.Response{}, ErrInvalidResponseCode
 	}
 	return response, nil
+}
+
+func decodeTraceMessage(message string, after uint64) (traceevent.Batch, error) {
+	var batch traceevent.Batch
+	decoder := json.NewDecoder(strings.NewReader(message))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&batch); err != nil {
+		return traceevent.Batch{}, ErrInvalidResponseShape
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return traceevent.Batch{}, ErrInvalidResponseShape
+	}
+	previous := after
+	for _, event := range batch.Events {
+		if err := traceevent.Validate(event); err != nil || event.Sequence <= previous {
+			return traceevent.Batch{}, ErrInvalidResponseShape
+		}
+		if batch.OldestSequence != 0 && event.Sequence < batch.OldestSequence {
+			return traceevent.Batch{}, ErrInvalidResponseShape
+		}
+		previous = event.Sequence
+	}
+	if len(batch.Events) == 0 {
+		if batch.NextSequence != after || batch.HasMore {
+			return traceevent.Batch{}, ErrInvalidResponseShape
+		}
+	} else if batch.NextSequence != batch.Events[len(batch.Events)-1].Sequence {
+		return traceevent.Batch{}, ErrInvalidResponseShape
+	}
+	return batch, nil
 }
 
 func readResponseFrame(connection net.Conn) ([]byte, error) {

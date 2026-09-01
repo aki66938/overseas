@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 
 	"github.com/Microsoft/go-winio"
 )
@@ -30,14 +31,20 @@ const (
 	ActionDisconnect  = "disconnect"
 	ActionStatus      = "status"
 	ActionDiagnostics = "diagnostics"
+	ActionTrace       = "trace"
+
+	TraceDefaultLimit = 32
+	TraceMaxLimit     = 64
 
 	ErrorInvalidAction  = "invalid_action"
 	ErrorInvalidRequest = "invalid_request"
 )
 
 type Request struct {
-	ID     string `json:"id"`
-	Action string `json:"action"`
+	ID            string `json:"id"`
+	Action        string `json:"action"`
+	AfterSequence uint64 `json:"after_sequence,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
 }
 
 type Response struct {
@@ -66,9 +73,14 @@ func WithPipeRedactions(values ...[]byte) PipeOption {
 	}
 }
 
+func WithTraceSource(source traceevent.Source) PipeOption {
+	return func(server *PipeServer) { server.traceSource = source }
+}
+
 type PipeServer struct {
-	controller PipeController
-	redactions [][]byte
+	controller  PipeController
+	redactions  [][]byte
+	traceSource traceevent.Source
 }
 
 func NewPipeServer(controller PipeController, options ...PipeOption) *PipeServer {
@@ -193,6 +205,13 @@ func decodePipeRequest(frame []byte) (Request, error) {
 	}) >= 0 {
 		return Request{}, errors.New("invalid request ID")
 	}
+	if request.Action == ActionTrace {
+		if request.Limit < 0 || request.Limit > TraceMaxLimit {
+			return Request{}, errors.New("invalid trace limit")
+		}
+	} else if request.AfterSequence != 0 || request.Limit != 0 {
+		return Request{}, errors.New("trace fields require trace action")
+	}
 	return request, nil
 }
 
@@ -218,10 +237,72 @@ func (s *PipeServer) dispatch(ctx context.Context, request Request) Response {
 			ErrorCode: diagnostics.ErrorCode,
 			Message:   string(message),
 		}
+	case ActionTrace:
+		if s.traceSource == nil {
+			return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志通道不可用"}
+		}
+		limit := request.Limit
+		if limit == 0 {
+			limit = TraceDefaultLimit
+		}
+		batch := s.traceSource.Batch(request.AfterSequence, limit)
+		if !validTraceBatch(batch, request.AfterSequence, limit) {
+			return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
+		}
+		return s.fitTraceResponse(request, batch)
 	default:
 		return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidAction, Message: "不支持的操作"}
 	}
 	return Response{ID: request.ID, State: string(status.State), ErrorCode: status.ErrorCode, Message: status.Message}
+}
+
+func validTraceBatch(batch traceevent.Batch, after uint64, limit int) bool {
+	if len(batch.Events) > limit {
+		return false
+	}
+	previous := after
+	for _, event := range batch.Events {
+		if traceevent.Validate(event) != nil || event.Sequence <= previous {
+			return false
+		}
+		if batch.OldestSequence == 0 || event.Sequence < batch.OldestSequence {
+			return false
+		}
+		previous = event.Sequence
+	}
+	if len(batch.Events) == 0 {
+		return batch.NextSequence == after && !batch.HasMore
+	}
+	return batch.NextSequence == batch.Events[len(batch.Events)-1].Sequence
+}
+
+func (s *PipeServer) fitTraceResponse(request Request, batch traceevent.Batch) Response {
+	state := s.controller.Status()
+	for count := len(batch.Events); count >= 0; count-- {
+		candidate := batch
+		candidate.Events = append([]traceevent.Event(nil), batch.Events[:count]...)
+		if count == 0 {
+			candidate.NextSequence = request.AfterSequence
+		} else {
+			candidate.NextSequence = candidate.Events[count-1].Sequence
+		}
+		if count < len(batch.Events) {
+			candidate.HasMore = true
+		}
+		message, err := json.Marshal(candidate)
+		if err != nil {
+			break
+		}
+		message = s.redact(message)
+		response := Response{
+			ID: request.ID, State: string(state.State), ErrorCode: state.ErrorCode, Message: string(message),
+		}
+		encoded, err := json.Marshal(response)
+		if err == nil && len(encoded)+1 <= MaxPipeFrameBytes {
+			return response
+		}
+	}
+	return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
 }
 
 func (s *PipeServer) redact(message []byte) []byte {
