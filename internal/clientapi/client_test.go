@@ -247,6 +247,16 @@ func TestDiagnosticsAcceptsBoundedNetworkStageAndDetail(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsAcceptsEveryApprovedTraceStage(t *testing.T) {
+	for _, stage := range traceevent.ApprovedStages() {
+		message := `{"state":"failed","error_code":"public_tcp_block_failed","message":"失败","generation":2,"stage":"` + stage + `","detail":"bounded failure"}`
+		client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "failed", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
+		if _, err := client.Diagnostics(context.Background()); err != nil {
+			t.Fatalf("stage %q rejected: %v", stage, err)
+		}
+	}
+}
+
 func TestDiagnosticsRejectsSecretOrConfigFields(t *testing.T) {
 	tests := []string{
 		`{"id":"request-fixed","state":"failed","message":"{\"state\":\"failed\",\"generation\":1,\"secret\":\"abc\"}"}` + "\n",

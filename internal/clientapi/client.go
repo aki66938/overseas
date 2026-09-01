@@ -279,14 +279,14 @@ func isApprovedDiagnostic(stage, detail string) bool {
 	if stage == "" {
 		return detail == ""
 	}
-	approved := map[string]bool{
-		"ip_interface_scan":     true,
-		"adapter_identity_join": true,
-		"firewall_publish":      true,
-		"active_store_verify":   true,
-		"emergency_protection":  true,
+	approved := false
+	for _, candidate := range traceevent.ApprovedStages() {
+		if stage == candidate {
+			approved = true
+			break
+		}
 	}
-	if !approved[stage] || detail == "" || len(detail) > 512 {
+	if !approved || detail == "" || len([]byte(detail)) > traceevent.MaxDetailBytes {
 		return false
 	}
 	for _, value := range detail {

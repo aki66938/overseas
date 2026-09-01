@@ -4,10 +4,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 const (
@@ -107,6 +109,7 @@ type Dependencies struct {
 	RenderConfig      func(accessmodel.Policy, Credential) ([]byte, error)
 	WriteConfigAtomic func(string, []byte) error
 	Now               func() time.Time
+	Trace             traceevent.Sink
 }
 
 type Option func(*Dependencies)
@@ -188,15 +191,16 @@ func (c *Controller) Connect(ctx context.Context) Status {
 
 		c.generation++
 		generation := c.generation
-		operationContext, cancel := context.WithCancel(ctx)
+		operationContext, cancel := context.WithCancel(traceevent.WithGeneration(ctx, generation))
 		active := &transition{kind: "connect", done: make(chan struct{}), cancel: cancel}
 		c.transition = active
 		c.status = Status{State: accessmodel.StateConnecting, Message: "正在建立安全连接"}
 		c.diagnosticStage = ""
 		c.diagnosticDetail = ""
 		c.mu.Unlock()
+		c.emitTrace(traceevent.Event{Generation: generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentController, Stage: traceevent.StageRequestReceived, Event: traceevent.EventState, Message: "收到连接请求"})
 
-		status, instance, failures, started := c.runConnect(operationContext)
+		status, instance, failures, started := c.runConnect(operationContext, generation)
 		cancel()
 
 		c.mu.Lock()
@@ -257,12 +261,12 @@ func (c *Controller) disconnect(ctx context.Context, recovery bool) Status {
 
 		c.generation++
 		generation := c.generation
-		operationContext, cancel := context.WithCancel(ctx)
+		operationContext, cancel := context.WithCancel(traceevent.WithGeneration(ctx, generation))
 		active := &transition{kind: "disconnect", done: make(chan struct{}), cancel: cancel}
 		c.transition = active
 		c.mu.Unlock()
 
-		status, restored := c.runDisconnect(operationContext)
+		status, restored := c.runDisconnect(operationContext, generation, recovery)
 		cancel()
 
 		c.mu.Lock()
@@ -274,6 +278,8 @@ func (c *Controller) disconnect(ctx context.Context, recovery bool) Status {
 				c.processStarted = false
 				c.processInstance = nil
 				c.reconciled = true
+				c.diagnosticStage = ""
+				c.diagnosticDetail = ""
 			}
 		}
 		c.transition = nil
@@ -302,22 +308,34 @@ func (c *Controller) Diagnostics() Diagnostics {
 	}
 }
 
-func (c *Controller) recordDiagnostic(err error) {
+func (c *Controller) recordDiagnostic(fallbackStage string, err error) (string, string) {
+	stage := fallbackStage
+	detail := ""
 	var diagnostic stagedDiagnosticError
-	if !errors.As(err, &diagnostic) {
-		return
+	if errors.As(err, &diagnostic) {
+		stage = normalizeDiagnosticStage(diagnostic.DiagnosticStage(), fallbackStage)
+		detail = diagnostic.DiagnosticDetail()
 	}
-	if diagnostic.DiagnosticStage() == "" || diagnostic.DiagnosticDetail() == "" {
-		return
+	if detail == "" && err != nil {
+		detail = err.Error()
+	}
+	if detail == "" {
+		detail = fmt.Sprintf("阶段 %s 未提供底层错误文本", stage)
+	}
+	detail, _ = traceevent.SanitizeDetail(detail)
+	if detail == "" {
+		detail = fmt.Sprintf("阶段 %s 失败", stage)
 	}
 	c.mu.Lock()
-	c.diagnosticStage = diagnostic.DiagnosticStage()
-	c.diagnosticDetail = diagnostic.DiagnosticDetail()
+	c.diagnosticStage = stage
+	c.diagnosticDetail = detail
 	c.mu.Unlock()
+	return stage, detail
 }
 
-func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <-chan error, bool) {
+func (c *Controller) runConnect(ctx context.Context, generation uint64) (Status, ProcessInstance, <-chan error, bool) {
 	if err := contextError(ctx); err != nil {
+		c.traceStateFailure(generation, traceevent.ComponentController, traceevent.StageRequestReceived, "连接请求已取消", err, nil)
 		return failure(ErrorCanceled), nil, nil, false
 	}
 	c.mu.Lock()
@@ -325,46 +343,65 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 	previousInstance := c.processInstance
 	c.mu.Unlock()
 	if processMayStillBeRunning {
+		err := errors.New("previous core termination is not proven")
+		startedAt := c.traceStart(generation, traceevent.ComponentCore, traceevent.StageCoreStart, "检查核心进程所有权")
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "无法启动新的核心进程", err, nil)
 		return failure(ErrorRestoreFailed), previousInstance, nil, true
 	}
+	startedAt := c.traceStart(generation, traceevent.ComponentController, traceevent.StagePolicyValidation, "验证访问策略")
 	if err := c.deps.ValidatePolicy(c.policy); err != nil {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StagePolicyValidation, startedAt, "访问策略验证失败", err, nil)
 		return failure(ErrorInvalidPolicy), nil, nil, false
 	}
+	c.traceSuccess(generation, traceevent.ComponentController, traceevent.StagePolicyValidation, startedAt, "访问策略验证通过", "", nil)
+	startedAt = c.traceStart(generation, traceevent.ComponentController, traceevent.StageBinaryVerification, "验证客户端核心")
 	if c.deps.VerifyExecutable == nil || c.deps.ExecutablePath == "" {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageBinaryVerification, startedAt, "客户端核心验证失败", errors.New("binary verifier or executable path is unavailable"), nil)
 		return failure(ErrorInvalidBinary), nil, nil, false
 	}
 	if err := c.deps.VerifyExecutable(c.deps.ExecutablePath); err != nil {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageBinaryVerification, startedAt, "客户端核心验证失败", err, nil)
 		return failure(ErrorInvalidBinary), nil, nil, false
 	}
+	c.traceSuccess(generation, traceevent.ComponentController, traceevent.StageBinaryVerification, startedAt, "客户端核心验证通过", "", nil)
 	credential := Credential{}
 	if c.policy.SchemaVersion == 1 {
+		startedAt = c.traceStart(generation, traceevent.ComponentController, traceevent.StageCredentialLoad, "加载受保护凭据")
 		if c.deps.LoadCredential == nil {
+			c.traceFailure(generation, traceevent.ComponentController, traceevent.StageCredentialLoad, startedAt, "受保护凭据不可用", errors.New("credential loader is unavailable"), nil)
 			return failure(ErrorCredential), nil, nil, false
 		}
 		var err error
 		credential, err = c.deps.LoadCredential(ctx, c.policy.Credential)
 		if err != nil {
+			c.traceFailure(generation, traceevent.ComponentController, traceevent.StageCredentialLoad, startedAt, "受保护凭据不可用", err, nil)
 			return failure(ErrorCredential), nil, nil, false
 		}
 		defer clearBytes(credential.Password)
 		if credential.ExpiresAt.IsZero() || !credential.ExpiresAt.After(c.deps.Now()) {
+			c.traceFailure(generation, traceevent.ComponentController, traceevent.StageCredentialLoad, startedAt, "受保护凭据已过期", errors.New("credential expiry is invalid"), nil)
 			return failure(ErrorExpiredCredential), nil, nil, false
 		}
+		c.traceSuccess(generation, traceevent.ComponentController, traceevent.StageCredentialLoad, startedAt, "受保护凭据加载完成", "", nil)
 	}
 	if err := contextError(ctx); err != nil {
+		startedAt = c.traceStart(generation, traceevent.ComponentController, traceevent.StageNetworkCapture, "保存当前网络状态")
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageNetworkCapture, startedAt, "网络状态保存已取消", err, nil)
 		return failure(ErrorCanceled), nil, nil, false
 	}
 
 	c.mu.Lock()
 	hasSnapshot := c.hasSnapshot
 	c.mu.Unlock()
+	startedAt = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, "保存当前网络状态")
 	if !hasSnapshot {
 		if c.network == nil {
+			c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedAt, "无法保存当前网络状态", errors.New("network manager is unavailable"), nil)
 			return failure(ErrorNetworkCapture), nil, nil, false
 		}
 		snapshot, err := c.network.Capture(ctx)
 		if err != nil {
-			c.recordDiagnostic(err)
+			c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedAt, "无法保存当前网络状态", err, nil)
 			return failure(ErrorNetworkCapture), nil, nil, false
 		}
 		c.mu.Lock()
@@ -372,26 +409,38 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 		c.hasSnapshot = true
 		c.mu.Unlock()
 	}
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedAt, "当前网络状态已保存", "", nil)
+	startedAt = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageFirewallPublish, "发布防泄漏规则")
 	failures, err := c.network.InstallPublicTCPBlock(ctx)
 	if err != nil {
-		c.recordDiagnostic(err)
+		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageFirewallPublish, startedAt, "防泄漏规则发布失败", err, nil)
 		return failure(ErrorPublicTCPBlock), nil, nil, false
 	}
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageFirewallPublish, startedAt, "防泄漏规则已发布", "", nil)
+	startedAt = c.traceStart(generation, traceevent.ComponentController, traceevent.StageConfigRender, "生成受控核心配置")
 	if c.deps.RenderConfig == nil || c.deps.WriteConfigAtomic == nil || c.deps.ConfigPath == "" {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageConfigRender, startedAt, "受控核心配置生成失败", errors.New("configuration renderer or destination is unavailable"), nil)
 		return failure(ErrorRender), nil, failures, false
 	}
 	config, err := c.deps.RenderConfig(c.policy, credential)
 	if err != nil {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageConfigRender, startedAt, "受控核心配置生成失败", err, nil)
 		return failure(ErrorRender), nil, failures, false
 	}
 	defer clearBytes(config)
 	if err := c.deps.WriteConfigAtomic(c.deps.ConfigPath, config); err != nil {
+		c.traceFailure(generation, traceevent.ComponentController, traceevent.StageConfigRender, startedAt, "受控核心配置写入失败", err, nil)
 		return failure(ErrorRender), nil, failures, false
 	}
+	c.traceSuccess(generation, traceevent.ComponentController, traceevent.StageConfigRender, startedAt, "受控核心配置已生成", "", nil)
 	if err := contextError(ctx); err != nil {
+		startedAt = c.traceStart(generation, traceevent.ComponentCore, traceevent.StageCoreStart, "启动访问核心")
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "访问核心启动已取消", err, nil)
 		return failure(ErrorCanceled), nil, failures, false
 	}
+	startedAt = c.traceStart(generation, traceevent.ComponentCore, traceevent.StageCoreStart, "启动访问核心")
 	if c.process == nil {
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "访问核心启动失败", errors.New("process supervisor is unavailable"), nil)
 		return failure(ErrorCoreStart), nil, failures, false
 	}
 	// Start owns the core lifetime until Disconnect. The transition deadline
@@ -399,32 +448,53 @@ func (c *Controller) runConnect(ctx context.Context) (Status, ProcessInstance, <
 	// core when the connect operation itself returns.
 	instance, startResult := c.process.Start(context.WithoutCancel(ctx), c.deps.ExecutablePath, c.deps.ConfigPath)
 	if startResult.Err != nil {
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "访问核心启动失败", startResult.Err, nil)
 		return failure(ErrorCoreStart), instance, failures, !startResult.TerminationProven
 	}
 	if instance == nil {
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "访问核心启动失败", errors.New("process supervisor returned no instance"), nil)
 		return failure(ErrorCoreStart), nil, failures, false
 	}
+	c.traceSuccess(generation, traceevent.ComponentCore, traceevent.StageCoreStart, startedAt, "访问核心已启动", "", nil)
 	started := true
+	startedAt = c.traceStart(generation, traceevent.ComponentCore, traceevent.StageCoreReady, "等待访问核心就绪")
 	if err := instance.Ready(ctx); err != nil {
-		unproven := !instance.Stop(context.Background()).Proven
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreReady, startedAt, "访问核心未就绪", err, nil)
+		unproven := !c.stopInstance(context.Background(), generation, instance).Proven
 		return failure(codeForContext(ctx, ErrorCoreNotReady)), instance, failures, unproven
 	}
+	c.traceSuccess(generation, traceevent.ComponentCore, traceevent.StageCoreReady, startedAt, "访问核心已就绪", "", nil)
+	startedAt = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, "等待 TUN 接口就绪")
 	if err := c.network.WaitTUNReady(ctx); err != nil {
-		unproven := !instance.Stop(context.Background()).Proven
+		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, startedAt, "TUN 接口未就绪", err, nil)
+		unproven := !c.stopInstance(context.Background(), generation, instance).Proven
 		return failure(codeForContext(ctx, ErrorCoreNotReady)), instance, failures, unproven
 	}
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, startedAt, "TUN 接口已就绪", "", nil)
 	if err := contextError(ctx); err != nil {
-		unproven := !instance.Stop(context.Background()).Proven
+		startedAt = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, "启用安全路由")
+		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, startedAt, "安全路由启用已取消", err, nil)
+		unproven := !c.stopInstance(context.Background(), generation, instance).Proven
 		return failure(ErrorCanceled), instance, failures, unproven
 	}
+	startedAt = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, "启用安全路由")
 	if err := c.network.ActivateTUNRoutes(ctx); err != nil {
-		unproven := !instance.Stop(context.Background()).Proven
+		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, startedAt, "安全路由启用失败", err, nil)
+		unproven := !c.stopInstance(context.Background(), generation, instance).Proven
 		return failure(ErrorRouteActivationFailed), instance, failures, unproven
 	}
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, startedAt, "安全路由已启用", "", nil)
+	c.emitTrace(traceevent.Event{Generation: generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentController, Stage: traceevent.StageConnected, Event: traceevent.EventState, Message: "海外访问已连接"})
 	return Status{State: accessmodel.StateConnected, Message: "海外访问已连接"}, instance, failures, started
 }
 
-func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
+func (c *Controller) runDisconnect(ctx context.Context, generation uint64, recovery bool) (Status, bool) {
+	var recoveryStarted time.Time
+	if recovery {
+		recoveryStarted = c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, "恢复服务遗留网络状态")
+	} else {
+		c.emitTrace(traceevent.Event{Generation: generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentController, Stage: traceevent.StageRequestReceived, Event: traceevent.EventState, Message: "收到断开请求"})
+	}
 	c.mu.Lock()
 	started := c.processStarted
 	instance := c.processInstance
@@ -435,23 +505,171 @@ func (c *Controller) runDisconnect(ctx context.Context) (Status, bool) {
 	c.stopLifecycleMonitor()
 
 	if started && instance != nil {
-		termination := instance.Stop(ctx)
+		termination := c.stopInstance(ctx, generation, instance)
 		if !termination.Proven {
 			// Restoring routes, DNS, or the leak block is unsafe until the whole
 			// supervised process tree is proven terminated.
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务遗留核心无法停止", termination.Err, nil)
+			}
 			return failure(ErrorRestoreFailed), false
 		}
 	}
+	restoreStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, "恢复产品拥有的网络状态")
 	if hasSnapshot {
-		if c.network == nil || c.network.Restore(ctx, snapshot) != nil {
+		if c.network == nil {
+			err := errors.New("network manager is unavailable")
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态恢复失败", err, nil)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复失败", err, nil)
+			}
+			return failure(ErrorRestoreFailed), false
+		}
+		if err := c.network.Restore(ctx, snapshot); err != nil {
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态恢复失败", err, nil)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复失败", err, nil)
+			}
 			return failure(ErrorRestoreFailed), false
 		}
 	} else if !reconciled {
-		if c.network == nil || c.network.Reconcile(ctx) != nil {
+		if c.network == nil {
+			err := errors.New("network manager is unavailable")
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态协调失败", err, nil)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复失败", err, nil)
+			}
+			return failure(ErrorRestoreFailed), false
+		}
+		if err := c.network.Reconcile(ctx); err != nil {
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态协调失败", err, nil)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复失败", err, nil)
+			}
 			return failure(ErrorRestoreFailed), false
 		}
 	}
+	c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "产品网络状态已恢复", "", nil)
+	if reporter, ok := c.network.(residueReporter); ok {
+		residueStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, "检查连接残留")
+		residue, err := reporter.Residue(ctx)
+		if err != nil {
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留检查失败", err, nil)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复失败", err, nil)
+			}
+			return failure(ErrorRestoreFailed), false
+		}
+		if !residue.IsZero() {
+			err := errors.New("product-owned network residue remains")
+			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留未清零", err, &residue)
+			if recovery {
+				c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务恢复后仍有残留", err, &residue)
+			}
+			return failure(ErrorRestoreFailed), false
+		}
+		c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留已清零", "", &residue)
+	}
+	if recovery {
+		c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageServiceRecovery, recoveryStarted, "服务遗留状态恢复完成", "", nil)
+	}
 	return Status{State: accessmodel.StateDisconnected, Message: "海外访问已关闭"}, true
+}
+
+type residueReporter interface {
+	Residue(context.Context) (traceevent.Residue, error)
+}
+
+func (c *Controller) traceStart(generation uint64, component, stage, message string) time.Time {
+	startedAt := c.deps.Now()
+	c.emitTrace(traceevent.Event{Generation: generation, Level: traceevent.LevelInfo, Component: component, Stage: stage, Event: traceevent.EventStarted, Message: message})
+	return startedAt
+}
+
+func (c *Controller) traceSuccess(generation uint64, component, stage string, startedAt time.Time, message, detail string, residue *traceevent.Residue) {
+	c.traceTerminal(generation, traceevent.LevelInfo, component, stage, traceevent.EventSucceeded, startedAt, message, detail, residue)
+}
+
+func (c *Controller) traceFailure(generation uint64, component, stage string, startedAt time.Time, message string, err error, residue *traceevent.Residue) {
+	_, detail := c.recordDiagnostic(stage, err)
+	c.traceTerminal(generation, traceevent.LevelError, component, stage, traceevent.EventFailed, startedAt, message, detail, residue)
+}
+
+func (c *Controller) traceStateFailure(generation uint64, component, stage, message string, err error, residue *traceevent.Residue) {
+	_, detail := c.recordDiagnostic(stage, err)
+	c.emitTrace(traceevent.Event{
+		Generation: generation, Level: traceevent.LevelError, Component: component, Stage: stage,
+		Event: traceevent.EventState, Message: message, Detail: detail, Residue: residue,
+	})
+}
+
+func (c *Controller) traceTerminal(generation uint64, level, component, stage, event string, startedAt time.Time, message, detail string, residue *traceevent.Residue) {
+	elapsed := c.deps.Now().Sub(startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	c.emitTrace(traceevent.Event{
+		Generation: generation, Level: level, Component: component, Stage: stage, Event: event,
+		ElapsedMS: &elapsed, Message: message, Detail: detail, Residue: residue,
+	})
+}
+
+func (c *Controller) emitTrace(event traceevent.Event) {
+	if c.deps.Trace == nil {
+		return
+	}
+	event.Message, _ = traceevent.SanitizeDetail(event.Message)
+	event.Detail, event.DetailTruncated = traceevent.SanitizeDetail(event.Detail)
+	c.deps.Trace.Record(event)
+}
+
+func (c *Controller) stopInstance(ctx context.Context, generation uint64, instance ProcessInstance) ProcessTermination {
+	startedAt := c.traceStart(generation, traceevent.ComponentCore, traceevent.StageCoreStop, "停止访问核心")
+	termination := instance.Stop(ctx)
+	if !termination.Proven {
+		err := termination.Err
+		if err == nil {
+			err = errors.New("core process tree termination is not proven")
+		}
+		c.traceFailure(generation, traceevent.ComponentCore, traceevent.StageCoreStop, startedAt, "访问核心停止失败", err, nil)
+		return termination
+	}
+	detail := ""
+	if termination.Err != nil {
+		detail = "核心返回退出错误，但进程树已确认停止"
+	}
+	c.traceSuccess(generation, traceevent.ComponentCore, traceevent.StageCoreStop, startedAt, "访问核心已停止", detail, nil)
+	return termination
+}
+
+func normalizeDiagnosticStage(stage, fallback string) string {
+	switch stage {
+	case traceevent.StageRequestReceived,
+		traceevent.StagePolicyValidation,
+		traceevent.StageBinaryVerification,
+		traceevent.StageCredentialLoad,
+		traceevent.StageNetworkCapture,
+		traceevent.StageAdapterScan,
+		traceevent.StageFirewallPublish,
+		traceevent.StageActiveStoreVerify,
+		traceevent.StageEmergencyProtection,
+		traceevent.StageConfigRender,
+		traceevent.StageCoreStart,
+		traceevent.StageCoreReady,
+		traceevent.StageTUNReady,
+		traceevent.StageRouteActivation,
+		traceevent.StageConnected,
+		traceevent.StageCoreStop,
+		traceevent.StageNetworkRestore,
+		traceevent.StageResidueVerify,
+		traceevent.StageServiceRecovery,
+		traceevent.StageLoggingDegraded:
+		return stage
+	case "ip_interface_scan", "adapter_identity_join":
+		return traceevent.StageAdapterScan
+	default:
+		return fallback
+	}
 }
 
 func (c *Controller) stopLifecycleMonitor() {
@@ -470,22 +688,32 @@ func (c *Controller) stopLifecycleMonitor() {
 func (c *Controller) monitorLifecycle(ctx context.Context, generation uint64, instance ProcessInstance, failures <-chan error, done chan struct{}) {
 	defer close(done)
 	var termination ProcessTermination
+	var failureReason error
 	select {
 	case termination = <-instance.Done():
-	case <-failures:
-		termination = instance.Stop(context.Background())
+		failureReason = termination.Err
+		if failureReason == nil {
+			failureReason = errors.New("core process exited unexpectedly")
+		}
+	case failureReason = <-failures:
+		if failureReason == nil {
+			failureReason = errors.New("network protection readiness was lost")
+		}
+		termination = c.stopInstance(context.Background(), generation, instance)
 	case <-ctx.Done():
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.generation != generation || c.status.State != accessmodel.StateConnected {
+		c.mu.Unlock()
 		return
 	}
 	c.status = failure(ErrorReadinessLost)
 	if termination.Proven {
 		c.processStarted = false
 	}
+	c.mu.Unlock()
+	c.traceStateFailure(generation, traceevent.ComponentCore, traceevent.StageConnected, "安全连接运行状态已丢失", failureReason, nil)
 }
 
 func (c *Controller) waitForTransition(ctx context.Context, done <-chan struct{}) Status {

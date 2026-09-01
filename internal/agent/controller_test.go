@@ -3,12 +3,170 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
+
+func TestControllerSuccessfulConnectEmitsOrderedStagePairs(t *testing.T) {
+	sink := &recordingTraceSink{}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	policy := accessmodel.Policy{
+		SchemaVersion: 2, Mode: "poc",
+		Nodes:          []accessmodel.Node{{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080}},
+		CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"},
+		BlockUDP: true, BlockQUIC: true,
+	}
+	controller := NewController(policy, newFakeNetwork(), newFakeProcess(), WithDependencies(deps))
+	if status := controller.Connect(context.Background()); status.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", status)
+	}
+	events := sink.eventsCopy()
+	want := []string{
+		"request_received:state",
+		"policy_validation:started", "policy_validation:succeeded",
+		"binary_verification:started", "binary_verification:succeeded",
+		"network_capture:started", "network_capture:succeeded",
+		"firewall_publish:started", "firewall_publish:succeeded",
+		"config_render:started", "config_render:succeeded",
+		"core_start:started", "core_start:succeeded",
+		"core_ready:started", "core_ready:succeeded",
+		"tun_ready:started", "tun_ready:succeeded",
+		"route_activation:started", "route_activation:succeeded",
+		"connected:state",
+	}
+	if got := traceKeys(events); !equalStrings(got, want) {
+		t.Fatalf("trace order = %v, want %v", got, want)
+	}
+	for _, event := range events {
+		if event.Generation != 1 {
+			t.Fatalf("event generation = %d: %#v", event.Generation, event)
+		}
+		if event.Event != traceevent.EventStarted && event.Event != traceevent.EventState && event.ElapsedMS == nil {
+			t.Fatalf("terminal event has no elapsed time: %#v", event)
+		}
+	}
+	controller.Disconnect(context.Background())
+}
+
+func TestControllerEmptyNetworkDetailStillEmitsDiagnosticFailure(t *testing.T) {
+	sink := &recordingTraceSink{}
+	network := newFakeNetwork()
+	network.blockErr = testDiagnosticError{stage: traceevent.StageFirewallPublish}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	controller := newTestController(network, newFakeProcess(), deps)
+
+	status := controller.Connect(context.Background())
+	diagnostics := controller.Diagnostics()
+	if status.ErrorCode != ErrorPublicTCPBlock || diagnostics.Stage != traceevent.StageFirewallPublish || diagnostics.Detail == "" {
+		t.Fatalf("status=%#v diagnostics=%#v", status, diagnostics)
+	}
+	last := sink.eventsCopy()[len(sink.eventsCopy())-1]
+	if last.Stage != traceevent.StageFirewallPublish || last.Event != traceevent.EventFailed || last.Detail == "" {
+		t.Fatalf("last trace = %#v", last)
+	}
+}
+
+func TestControllerDisconnectRequiresZeroResidue(t *testing.T) {
+	sink := &recordingTraceSink{}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	network := newFakeNetwork()
+	controller := newTestController(network, newFakeProcess(), deps)
+	if status := controller.Connect(context.Background()); status.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", status)
+	}
+	network.mu.Lock()
+	network.residue = traceevent.Residue{ManagedRules: 1}
+	network.mu.Unlock()
+	if status := controller.Disconnect(context.Background()); status.ErrorCode != ErrorRestoreFailed {
+		t.Fatalf("Disconnect() = %#v", status)
+	}
+	events := sink.eventsCopy()
+	last := events[len(events)-1]
+	if last.Stage != traceevent.StageResidueVerify || last.Event != traceevent.EventFailed || last.Residue == nil || last.Residue.ManagedRules != 1 {
+		t.Fatalf("last trace = %#v", last)
+	}
+}
+
+func TestControllerRecoveryEmitsRecoveryAndZeroResidue(t *testing.T) {
+	sink := &recordingTraceSink{}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	network := newFakeNetwork()
+	network.blocked = true
+	controller := newTestController(network, newFakeProcess(), deps)
+	if status := controller.Recover(context.Background()); status.State != accessmodel.StateDisconnected {
+		t.Fatalf("Recover() = %#v", status)
+	}
+	keys := traceKeys(sink.eventsCopy())
+	for _, want := range []string{"service_recovery:started", "network_restore:started", "network_restore:succeeded", "residue_verify:started", "residue_verify:succeeded", "service_recovery:succeeded"} {
+		if !containsString(keys, want) {
+			t.Fatalf("trace %q missing from %v", want, keys)
+		}
+	}
+}
+
+func TestControllerTraceGenerationsAreIsolatedAndPaired(t *testing.T) {
+	sink := &recordingTraceSink{}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	controller := newTestController(newFakeNetwork(), newFakeProcess(), deps)
+	if status := controller.Connect(context.Background()); status.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", status)
+	}
+	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StateDisconnected {
+		t.Fatalf("Disconnect() = %#v", status)
+	}
+	events := sink.eventsCopy()
+	seenSecond := false
+	for _, event := range events {
+		if event.Generation == 2 {
+			seenSecond = true
+		}
+		if event.Generation == 0 || event.Generation > 2 || (seenSecond && event.Generation == 1) {
+			t.Fatalf("generation order is invalid: %#v", events)
+		}
+	}
+	assertTracePairs(t, events)
+}
+
+func TestControllerCanceledBeforeWorkHasOnlyStateEvent(t *testing.T) {
+	sink := &recordingTraceSink{}
+	deps := testDependencies(nil)
+	deps.Trace = sink
+	controller := newTestController(newFakeNetwork(), newFakeProcess(), deps)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if status := controller.Connect(ctx); status.ErrorCode != ErrorCanceled {
+		t.Fatalf("Connect() = %#v", status)
+	}
+	assertTracePairs(t, sink.eventsCopy())
+}
+
+func TestControllerSuccessfulRestoreClearsPreviousDiagnostic(t *testing.T) {
+	network := newFakeNetwork()
+	network.blockErr = testDiagnosticError{stage: traceevent.StageFirewallPublish, detail: "publish failed"}
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+	if status := controller.Connect(context.Background()); status.ErrorCode != ErrorPublicTCPBlock {
+		t.Fatalf("Connect() = %#v", status)
+	}
+	network.mu.Lock()
+	network.blockErr = nil
+	network.mu.Unlock()
+	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StateDisconnected {
+		t.Fatalf("Disconnect() = %#v", status)
+	}
+	if diagnostics := controller.Diagnostics(); diagnostics.Stage != "" || diagnostics.Detail != "" {
+		t.Fatalf("stale diagnostics = %#v", diagnostics)
+	}
+}
 
 func TestControllerConnectFailureRemainsFailClosed(t *testing.T) {
 	trace := &callTrace{}
@@ -49,7 +207,7 @@ func TestControllerPublishesTypedNetworkDiagnosticWithoutChangingStatus(t *testi
 	}
 }
 
-func TestControllerDropsIncompleteNetworkDiagnostic(t *testing.T) {
+func TestControllerSynthesizesIncompleteNetworkDiagnostic(t *testing.T) {
 	network := newFakeNetwork()
 	network.blockErr = testDiagnosticError{detail: "unclassified native failure"}
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
@@ -57,8 +215,8 @@ func TestControllerDropsIncompleteNetworkDiagnostic(t *testing.T) {
 	_ = controller.Connect(context.Background())
 	diagnostics := controller.Diagnostics()
 
-	if diagnostics.Stage != "" || diagnostics.Detail != "" {
-		t.Fatalf("incomplete diagnostics were published: %#v", diagnostics)
+	if diagnostics.Stage != traceevent.StageFirewallPublish || diagnostics.Detail == "" {
+		t.Fatalf("incomplete diagnostics were not synthesized: %#v", diagnostics)
 	}
 }
 
@@ -604,6 +762,8 @@ type fakeNetwork struct {
 	log            []string
 	trace          *callTrace
 	failures       chan error
+	residue        traceevent.Residue
+	residueErr     error
 }
 
 func newFakeNetwork() *fakeNetwork { return &fakeNetwork{failures: make(chan error, 1)} }
@@ -682,6 +842,12 @@ func (f *fakeNetwork) Reconcile(context.Context) error {
 	f.blocked = false
 	f.active = false
 	return nil
+}
+
+func (f *fakeNetwork) Residue(context.Context) (traceevent.Residue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.residue, f.residueErr
 }
 
 func (f *fakeNetwork) isBlocked() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.blocked }
@@ -846,4 +1012,60 @@ func allZero(data []byte) bool {
 		}
 	}
 	return true
+}
+
+type recordingTraceSink struct {
+	mu     sync.Mutex
+	events []traceevent.Event
+}
+
+func (r *recordingTraceSink) Record(event traceevent.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *recordingTraceSink) eventsCopy() []traceevent.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]traceevent.Event(nil), r.events...)
+}
+
+func traceKeys(events []traceevent.Event) []string {
+	keys := make([]string, 0, len(events))
+	for _, event := range events {
+		keys = append(keys, event.Stage+":"+event.Event)
+	}
+	return keys
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func assertTracePairs(t *testing.T, events []traceevent.Event) {
+	t.Helper()
+	balances := map[string]int{}
+	for _, event := range events {
+		key := fmt.Sprintf("%d/%s", event.Generation, event.Stage)
+		switch event.Event {
+		case traceevent.EventStarted:
+			balances[key]++
+		case traceevent.EventSucceeded, traceevent.EventFailed:
+			balances[key]--
+			if balances[key] < 0 {
+				t.Fatalf("terminal event without start for %s: %#v", key, events)
+			}
+		}
+	}
+	for key, balance := range balances {
+		if balance != 0 {
+			t.Fatalf("unpaired trace stage %s balance=%d: %#v", key, balance, events)
+		}
+	}
 }
