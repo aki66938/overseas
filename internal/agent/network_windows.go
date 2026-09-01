@@ -1148,7 +1148,7 @@ foreach ($node in @($i.NodeAddresses)) {
 
 const scanNetworkPowerShell = `$ErrorActionPreference = 'Stop'
 $null = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
-$adapters = @(Get-NetAdapter -IncludeHidden | ForEach-Object {
+$adapters = @(Get-NetAdapter -IncludeHidden | Where-Object Status -ne 'Not Present' | ForEach-Object {
   [pscustomobject]@{
     InterfaceIndex = [int]$_.InterfaceIndex
     InterfaceGuid = [string]$_.InterfaceGuid

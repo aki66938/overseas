@@ -549,6 +549,9 @@ func TestWindowsNetworkProtectionCoversRASAndHotPluggedAdaptersByIdentity(t *tes
 	if !strings.Contains(scanNetworkPowerShell, "ConvertTo-Json -InputObject $adapters") {
 		t.Fatal("single-adapter scans are not encoded as a JSON array")
 	}
+	if !strings.Contains(scanNetworkPowerShell, "Status -ne 'Not Present'") {
+		t.Fatal("adapter scan does not exclude Windows ghost adapters")
+	}
 }
 
 func TestWindowsNetworkProtectionExplicitlyExcludesOnlyOwnedTUNIdentity(t *testing.T) {
