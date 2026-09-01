@@ -9,13 +9,16 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
 const (
@@ -36,6 +40,7 @@ const (
 	networkOperationReady     = "ready"
 	networkOperationActivate  = "activate"
 	networkOperationRestore   = "restore"
+	networkOperationResidue   = "residue"
 
 	windowsTUNInterface           = "RegenBioOverseasAccess"
 	windowsTUNAddress             = "172.19.0.1/30"
@@ -47,13 +52,16 @@ const (
 	windowsDNSTCPBlockRule        = "RegenBioOverseasAccess.BlockUnapprovedDNSTCP"
 	windowsEmergencyBlockRule     = "RegenBioOverseasAccess.BlockPublicEmergency"
 	windowsFirewallGroup          = "RegenBioOverseasAccess.Managed"
+	windowsCoreExecutable         = `C:\Program Files\RegenBio\OverseasAccess\sing-box.exe`
 	windowsOwnedRouteMetric       = 4096
 	windowsSnapshotPhaseCaptured  = "captured"
 	windowsSnapshotPhaseProtected = "protected"
 	windowsSnapshotPhaseTUNOwned  = "tun-owned"
-	maxNetworkDiagnosticBytes     = 512
+	maxNetworkDiagnosticBytes     = traceevent.MaxDetailBytes
 	windowsEmergencyTimeout       = 30 * time.Second
 )
+
+var powerShellEscapePattern = regexp.MustCompile(`(?i)_x[0-9a-f]{4}_`)
 
 type fixedNetworkOperationError struct {
 	operation string
@@ -63,16 +71,22 @@ type fixedNetworkOperationError struct {
 }
 
 func newFixedNetworkOperationError(operation string, err error, stderr []byte) *fixedNetworkOperationError {
-	detail := sanitizePowerShellDetail(stderr)
-	stage := map[string]string{
-		networkOperationScan:      "ip_interface_scan",
-		networkOperationBlock:     "firewall_publish",
-		networkOperationVerify:    "active_store_verify",
-		networkOperationEmergency: "emergency_protection",
-	}[operation]
-	if operation == networkOperationScan && strings.Contains(detail, "adapter_identity_join:") {
-		stage = "adapter_identity_join"
+	return newFixedNetworkOperationErrorWithContext(context.Background(), operation, err, stderr)
+}
+
+func newFixedNetworkOperationErrorWithContext(ctx context.Context, operation string, err error, stderr []byte) *fixedNetworkOperationError {
+	detail := extractPowerShellErrorDetail(stderr)
+	if detail == "" && ctx != nil && ctx.Err() != nil {
+		detail = ctx.Err().Error()
 	}
+	if detail == "" && err != nil {
+		detail = err.Error()
+	}
+	if detail == "" {
+		detail = fmt.Sprintf("operation %s failed without stderr", operation)
+	}
+	detail, _ = traceevent.SanitizeDetail(detail)
+	stage := networkStage(operation)
 	return &fixedNetworkOperationError{operation: operation, stage: stage, detail: detail, err: err}
 }
 
@@ -108,6 +122,97 @@ func sanitizePowerShellDetail(raw []byte) string {
 		limit += size
 	}
 	return normalized[:limit]
+}
+
+func extractPowerShellErrorDetail(raw []byte) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	text := string(trimmed)
+	if strings.HasPrefix(text, "#< CLIXML") {
+		if start := strings.Index(text, "<Objs"); start >= 0 {
+			decoder := xml.NewDecoder(strings.NewReader(text[start:]))
+			progressDepth := 0
+			captureError := false
+			var extracted strings.Builder
+			for {
+				token, err := decoder.Token()
+				if err != nil {
+					break
+				}
+				switch value := token.(type) {
+				case xml.StartElement:
+					if value.Name.Local == "Obj" && xmlAttribute(value.Attr, "S") == "progress" {
+						progressDepth++
+					}
+					if progressDepth == 0 && value.Name.Local == "S" && strings.EqualFold(xmlAttribute(value.Attr, "S"), "Error") {
+						captureError = true
+					}
+				case xml.CharData:
+					if captureError && progressDepth == 0 {
+						extracted.Write([]byte(value))
+						extracted.WriteByte(' ')
+					}
+				case xml.EndElement:
+					if value.Name.Local == "S" && captureError {
+						captureError = false
+					}
+					if value.Name.Local == "Obj" && progressDepth > 0 {
+						progressDepth--
+					}
+				}
+			}
+			decoded := decodePowerShellEscapes(extracted.String())
+			return sanitizePowerShellDetail([]byte(decoded))
+		}
+		return ""
+	}
+	return sanitizePowerShellDetail(trimmed)
+}
+
+func xmlAttribute(attributes []xml.Attr, name string) string {
+	for _, attribute := range attributes {
+		if attribute.Name.Local == name {
+			return attribute.Value
+		}
+	}
+	return ""
+}
+
+func decodePowerShellEscapes(value string) string {
+	return powerShellEscapePattern.ReplaceAllStringFunc(value, func(match string) string {
+		code, err := strconv.ParseUint(match[2:6], 16, 16)
+		if err != nil {
+			return " "
+		}
+		return string(rune(code))
+	})
+}
+
+func networkStage(operation string) string {
+	switch operation {
+	case networkOperationCapture:
+		return traceevent.StageNetworkCapture
+	case networkOperationScan:
+		return traceevent.StageAdapterScan
+	case networkOperationBlock:
+		return traceevent.StageFirewallPublish
+	case networkOperationVerify:
+		return traceevent.StageActiveStoreVerify
+	case networkOperationEmergency:
+		return traceevent.StageEmergencyProtection
+	case networkOperationReady:
+		return traceevent.StageTUNReady
+	case networkOperationActivate:
+		return traceevent.StageRouteActivation
+	case networkOperationRestore:
+		return traceevent.StageNetworkRestore
+	case networkOperationResidue:
+		return traceevent.StageResidueVerify
+	default:
+		return traceevent.StageLoggingDegraded
+	}
 }
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
@@ -196,6 +301,14 @@ type windowsNetworkInput struct {
 	OwnedTUN                  *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
 	OwnedRoutes               []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
 	GuardRoutes               []WindowsOwnedRoute        `json:"GuardRoutes,omitempty"`
+	CoreExecutable            string                     `json:"CoreExecutable,omitempty"`
+}
+
+type windowsResidueCounts struct {
+	ManagedRules  int `json:"ManagedRules"`
+	ProductRoutes int `json:"ProductRoutes"`
+	ProductTUNs   int `json:"ProductTUNs"`
+	CoreProcesses int `json:"CoreProcesses"`
 }
 
 type networkRunner interface {
@@ -222,13 +335,22 @@ type WindowsNetworkManager struct {
 	protectionInterval time.Duration
 	protectionCancel   context.CancelFunc
 	protectionDone     chan struct{}
+	trace              traceevent.Sink
+	lastOwnedTUN       *WindowsTUNIdentity
+	lastOwnedRoutes    []WindowsOwnedRoute
 }
 
-func NewWindowsNetworkManager(policy accessmodel.Policy, statePath string) (*WindowsNetworkManager, error) {
-	return newWindowsNetworkManager(policy, statePath, powerShellNetworkRunner{}, fileSnapshotStore{})
+type WindowsNetworkOption func(*WindowsNetworkManager)
+
+func WithWindowsTraceSink(sink traceevent.Sink) WindowsNetworkOption {
+	return func(manager *WindowsNetworkManager) { manager.trace = sink }
 }
 
-func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runner networkRunner, store snapshotStore) (*WindowsNetworkManager, error) {
+func NewWindowsNetworkManager(policy accessmodel.Policy, statePath string, options ...WindowsNetworkOption) (*WindowsNetworkManager, error) {
+	return newWindowsNetworkManager(policy, statePath, powerShellNetworkRunner{}, fileSnapshotStore{}, options...)
+}
+
+func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runner networkRunner, store snapshotStore, options ...WindowsNetworkOption) (*WindowsNetworkManager, error) {
 	if err := accessmodel.Validate(policy); err != nil {
 		return nil, err
 	}
@@ -283,7 +405,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		complementIPv4Prefixes(dnsExcluded4),
 		complementIPv6From(netip.MustParsePrefix("::/0"), nil)...,
 	))
-	return &WindowsNetworkManager{
+	manager := &WindowsNetworkManager{
 		policy:             clonePolicy(policy),
 		statePath:          statePath,
 		runner:             runner,
@@ -292,7 +414,13 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		blockedPrefixes:    blocked,
 		dnsBlockedPrefixes: dnsBlocked,
 		protectionInterval: 250 * time.Millisecond,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(manager)
+		}
+	}
+	return manager, nil
 }
 
 func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
@@ -612,6 +740,7 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	m.mu.Lock()
+	m.rememberOwnershipLocked(snapshot)
 	m.current = nil
 	m.mu.Unlock()
 	return nil
@@ -640,17 +769,151 @@ func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	m.mu.Lock()
+	m.rememberOwnershipLocked(snapshot)
 	m.current = nil
 	m.mu.Unlock()
 	return nil
 }
 
+func (m *WindowsNetworkManager) Residue(ctx context.Context) (traceevent.Residue, error) {
+	m.mu.Lock()
+	ownedRoutes := append([]WindowsOwnedRoute(nil), m.lastOwnedRoutes...)
+	ownedTUN := cloneTUNIdentity(m.lastOwnedTUN)
+	current := m.current
+	if current != nil {
+		ownedRoutes = append([]WindowsOwnedRoute(nil), current.OwnedRoutes...)
+		ownedTUN = cloneTUNIdentity(current.OwnedTUN)
+	}
+	m.mu.Unlock()
+
+	residue := traceevent.Residue{}
+	if current != nil {
+		residue.Snapshot = true
+		residue.SnapshotPhase = current.OwnershipPhase
+	} else {
+		snapshot, err := m.store.Load(m.statePath)
+		if err == nil {
+			residue.Snapshot = true
+			residue.SnapshotPhase = snapshot.OwnershipPhase
+			if len(ownedRoutes) == 0 {
+				ownedRoutes = append([]WindowsOwnedRoute(nil), snapshot.OwnedRoutes...)
+			}
+			if ownedTUN == nil {
+				ownedTUN = cloneTUNIdentity(snapshot.OwnedTUN)
+			}
+		} else if !errors.Is(err, errSnapshotNotFound) {
+			return traceevent.Residue{}, err
+		}
+	}
+	output, err := m.run(ctx, networkOperationResidue, windowsNetworkInput{
+		FirewallGroup:  windowsFirewallGroup,
+		TUNInterface:   windowsTUNInterface,
+		OwnedTUN:       ownedTUN,
+		OwnedRoutes:    ownedRoutes,
+		CoreExecutable: windowsCoreExecutable,
+	})
+	if err != nil {
+		return traceevent.Residue{}, err
+	}
+	var counts windowsResidueCounts
+	if err := json.Unmarshal(output, &counts); err != nil {
+		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, fmt.Errorf("decode residue counts: %w", err), nil)
+	}
+	if counts.ManagedRules < 0 || counts.ProductRoutes < 0 || counts.ProductTUNs < 0 || counts.CoreProcesses < 0 {
+		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, errors.New("negative residue count"), nil)
+	}
+	residue.ManagedRules = counts.ManagedRules
+	residue.ProductRoutes = counts.ProductRoutes
+	residue.ProductTUNs = counts.ProductTUNs
+	residue.CoreProcesses = counts.CoreProcesses
+	if residue.IsZero() {
+		m.mu.Lock()
+		m.lastOwnedRoutes = nil
+		m.lastOwnedTUN = nil
+		m.mu.Unlock()
+	}
+	return residue, nil
+}
+
+func (m *WindowsNetworkManager) rememberOwnershipLocked(snapshot WindowsNetworkSnapshot) {
+	m.lastOwnedRoutes = append([]WindowsOwnedRoute(nil), snapshot.OwnedRoutes...)
+	m.lastOwnedTUN = cloneTUNIdentity(snapshot.OwnedTUN)
+}
+
+func cloneTUNIdentity(identity *WindowsTUNIdentity) *WindowsTUNIdentity {
+	if identity == nil {
+		return nil
+	}
+	clone := *identity
+	clone.Addresses = append([]string(nil), identity.Addresses...)
+	return &clone
+}
+
 func (m *WindowsNetworkManager) run(ctx context.Context, operation string, input windowsNetworkInput) ([]byte, error) {
+	startedAt := time.Now()
+	stage := networkStage(operation)
+	generation := traceevent.GenerationFromContext(ctx)
+	summary := networkInputSummary(operation, input)
+	m.emitNetworkTrace(traceevent.Event{
+		Generation: generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentPowerShell,
+		Stage: stage, Event: traceevent.EventStarted, Message: "开始执行固定网络操作", Detail: summary,
+	})
 	payload, err := json.Marshal(input)
 	if err != nil {
+		wrapped := newFixedNetworkOperationErrorWithContext(ctx, operation, err, nil)
+		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, "固定网络操作输入编码失败", wrapped.DiagnosticDetail(), traceevent.LevelError)
+		return nil, wrapped
+	}
+	output, err := m.runner.Run(ctx, operation, payload)
+	if err != nil {
+		var diagnostic stagedDiagnosticError
+		if !errors.As(err, &diagnostic) || diagnostic.DiagnosticDetail() == "" || diagnostic.DiagnosticStage() == "" {
+			err = newFixedNetworkOperationErrorWithContext(ctx, operation, err, nil)
+		}
+		detail := err.Error()
+		if errors.As(err, &diagnostic) && diagnostic.DiagnosticDetail() != "" {
+			detail = diagnostic.DiagnosticDetail()
+		}
+		detail, _ = traceevent.SanitizeDetail(detail)
+		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, "固定网络操作失败", detail, traceevent.LevelError)
 		return nil, err
 	}
-	return m.runner.Run(ctx, operation, payload)
+	m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventSucceeded, "固定网络操作完成", summary, traceevent.LevelInfo)
+	return output, nil
+}
+
+func (m *WindowsNetworkManager) emitNetworkTerminal(generation uint64, stage string, startedAt time.Time, event, message, detail, level string) {
+	elapsed := time.Since(startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	m.emitNetworkTrace(traceevent.Event{
+		Generation: generation, Level: level, Component: traceevent.ComponentPowerShell,
+		Stage: stage, Event: event, ElapsedMS: &elapsed, Message: message, Detail: detail,
+	})
+}
+
+func (m *WindowsNetworkManager) emitNetworkTrace(event traceevent.Event) {
+	if m.trace == nil {
+		return
+	}
+	event.Message, _ = traceevent.SanitizeDetail(event.Message)
+	event.Detail, event.DetailTruncated = traceevent.SanitizeDetail(event.Detail)
+	m.trace.Record(event)
+}
+
+func networkInputSummary(operation string, input windowsNetworkInput) string {
+	return fmt.Sprintf(
+		"operation=%s interfaces=%d protected_adapters=%d firewall_rules=%d blocked_prefixes=%d dns_prefixes=%d owned_routes=%d node_addresses=%d",
+		operation,
+		len(input.Interfaces),
+		len(input.ProtectedAdapters),
+		len(input.FirewallRuleNames),
+		len(input.BlockedRemoteAddresses),
+		len(input.DNSBlockedRemoteAddresses),
+		len(input.OwnedRoutes),
+		len(input.NodeAddresses),
+	)
 }
 
 func activationInput(snapshot WindowsNetworkSnapshot) windowsNetworkInput {
@@ -1009,14 +1272,14 @@ func (powerShellNetworkRunner) Run(ctx context.Context, operation string, input 
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		return nil, newFixedNetworkOperationError(operation, err, nil)
+		return nil, newFixedNetworkOperationErrorWithContext(ctx, operation, err, nil)
 	}
 	if err := command.Wait(); err != nil {
-		return nil, newFixedNetworkOperationError(operation, err, stderr.Bytes())
+		return nil, newFixedNetworkOperationErrorWithContext(ctx, operation, err, stderr.Bytes())
 	}
 	if !utf8.Valid(stdout.Bytes()) {
 		const detail = "invalid PowerShell UTF-8 output"
-		return nil, newFixedNetworkOperationError(operation, errors.New(detail), []byte(detail))
+		return nil, newFixedNetworkOperationErrorWithContext(ctx, operation, errors.New(detail), []byte(detail))
 	}
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
@@ -1195,7 +1458,42 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationReady:     readyNetworkPowerShell,
 	networkOperationActivate:  activateNetworkPowerShell,
 	networkOperationRestore:   restoreNetworkPowerShell,
+	networkOperationResidue:   residueNetworkPowerShell,
 }
+
+const residueNetworkPowerShell = `$managedRules = @(Get-NetFirewallRule -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue).Count
+$routeKeys = @{}
+foreach ($owned in @($i.OwnedRoutes)) {
+  $family = [string]$owned.AddressFamily
+  if ([string]::IsNullOrWhiteSpace($family)) { $family = 'IPv4' }
+  $matches = @(Get-NetRoute -AddressFamily $family -DestinationPrefix ([string]$owned.DestinationPrefix) -ErrorAction SilentlyContinue | Where-Object {
+    [int]$_.InterfaceIndex -eq [int]$owned.InterfaceIndex -and
+    [string]$_.NextHop -eq [string]$owned.NextHop -and
+    [int]$_.RouteMetric -eq [int]$owned.RouteMetric
+  })
+  foreach ($match in $matches) {
+    $key = $family + '|' + [string]$match.DestinationPrefix + '|' + [string]$match.InterfaceIndex + '|' + [string]$match.NextHop + '|' + [string]$match.RouteMetric
+    $routeKeys[$key] = $true
+  }
+}
+$tunKeys = @{}
+$fixedAliases = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { [string]$_.InterfaceAlias -eq [string]$i.TUNInterface })
+foreach ($adapter in $fixedAliases) { $tunKeys[[string]$adapter.InterfaceGuid] = $true }
+if ($null -ne $i.OwnedTUN) {
+  $ownedAdapters = @(Get-NetAdapter -IncludeHidden -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -ErrorAction SilentlyContinue | Where-Object {
+    [string]$_.InterfaceGuid -eq [string]$i.OwnedTUN.InterfaceGuid -and [string]$_.InterfaceAlias -eq [string]$i.OwnedTUN.InterfaceAlias
+  })
+  foreach ($adapter in $ownedAdapters) { $tunKeys[[string]$adapter.InterfaceGuid] = $true }
+}
+$coreProcesses = @(Get-CimInstance Win32_Process -Filter "Name='sing-box.exe'" -ErrorAction SilentlyContinue | Where-Object {
+  [string]$_.ExecutablePath -eq [string]$i.CoreExecutable
+}).Count
+[pscustomobject]@{
+  ManagedRules = [int]$managedRules
+  ProductRoutes = [int]$routeKeys.Count
+  ProductTUNs = [int]$tunKeys.Count
+  CoreProcesses = [int]$coreProcesses
+} | ConvertTo-Json -Compress`
 
 const captureNetworkPowerShell = `$defaults = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric)
 if ($defaults.Count -eq 0) { throw 'No IPv4 default route exists.' }

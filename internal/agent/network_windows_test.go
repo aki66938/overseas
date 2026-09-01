@@ -17,7 +17,191 @@ import (
 	"unicode/utf8"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/traceevent"
 )
+
+func TestPowerShellDiagnosticExtractsCLIXMLErrorAndDropsProgress(t *testing.T) {
+	raw := []byte(`#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress"><MS><S N="StatusDescription">progress_marker</S></MS></Obj><S S="Error">firewall_marker_x000D__x000A_At line:1 char:1</S></Objs>`)
+	err := newFixedNetworkOperationError(networkOperationBlock, errors.New("exit status 1"), raw)
+	if err.DiagnosticStage() != traceevent.StageFirewallPublish || !strings.Contains(err.DiagnosticDetail(), "firewall_marker") {
+		t.Fatalf("diagnostic = stage=%q detail=%q", err.DiagnosticStage(), err.DiagnosticDetail())
+	}
+	if strings.Contains(err.DiagnosticDetail(), "progress_marker") || strings.Contains(err.DiagnosticDetail(), "CLIXML") || strings.Contains(err.DiagnosticDetail(), `S="progress"`) {
+		t.Fatalf("progress leaked into diagnostic: %q", err.DiagnosticDetail())
+	}
+}
+
+func TestPowerShellDiagnosticSynthesizesDetailForEmptyStderr(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		context   context.Context
+		err       error
+		contains  string
+		stage     string
+	}{
+		{"capture exit", networkOperationCapture, context.Background(), errors.New("exit status 7"), "exit status 7", traceevent.StageNetworkCapture},
+		{"scan canceled", networkOperationScan, canceledContext(), errors.New("signal: killed"), "context canceled", traceevent.StageAdapterScan},
+		{"restore deadline", networkOperationRestore, expiredContext(), errors.New("signal: killed"), "context deadline exceeded", traceevent.StageNetworkRestore},
+		{"activate start", networkOperationActivate, context.Background(), errors.New("executable not found"), "executable not found", traceevent.StageRouteActivation},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			diagnostic := newFixedNetworkOperationErrorWithContext(test.context, test.operation, test.err, nil)
+			if diagnostic.DiagnosticStage() != test.stage || diagnostic.DiagnosticDetail() == "" || !strings.Contains(diagnostic.DiagnosticDetail(), test.contains) {
+				t.Fatalf("diagnostic = stage=%q detail=%q", diagnostic.DiagnosticStage(), diagnostic.DiagnosticDetail())
+			}
+		})
+	}
+}
+
+func TestPowerShellRunnerSynthesizesEmptyStderrExit(t *testing.T) {
+	original := networkPowerShellScripts[networkOperationActivate]
+	networkPowerShellScripts[networkOperationActivate] = `exit 7`
+	defer func() { networkPowerShellScripts[networkOperationActivate] = original }()
+	_, err := (powerShellNetworkRunner{}).Run(context.Background(), networkOperationActivate, []byte(`{}`))
+	diagnostic, ok := err.(stagedDiagnosticError)
+	if !ok || diagnostic.DiagnosticStage() != traceevent.StageRouteActivation || !strings.Contains(diagnostic.DiagnosticDetail(), "exit status 7") {
+		t.Fatalf("diagnostic = %#v", err)
+	}
+}
+
+func TestPowerShellRunnerReportsDeadlineWithoutStderr(t *testing.T) {
+	original := networkPowerShellScripts[networkOperationRestore]
+	networkPowerShellScripts[networkOperationRestore] = `Start-Sleep -Seconds 5`
+	defer func() { networkPowerShellScripts[networkOperationRestore] = original }()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := (powerShellNetworkRunner{}).Run(ctx, networkOperationRestore, []byte(`{}`))
+	diagnostic, ok := err.(stagedDiagnosticError)
+	if !ok || diagnostic.DiagnosticStage() != traceevent.StageNetworkRestore || !strings.Contains(diagnostic.DiagnosticDetail(), "context deadline exceeded") {
+		t.Fatalf("diagnostic = %#v", err)
+	}
+}
+
+func TestPowerShellRunnerRedactsCredentialShapedStderr(t *testing.T) {
+	original := networkPowerShellScripts[networkOperationBlock]
+	networkPowerShellScripts[networkOperationBlock] = `throw 'password=Sup3rSecret!'`
+	defer func() { networkPowerShellScripts[networkOperationBlock] = original }()
+	_, err := (powerShellNetworkRunner{}).Run(context.Background(), networkOperationBlock, []byte(`{}`))
+	diagnostic, ok := err.(stagedDiagnosticError)
+	if !ok || strings.Contains(diagnostic.DiagnosticDetail(), "Sup3rSecret") || !strings.Contains(diagnostic.DiagnosticDetail(), "[REDACTED]") {
+		t.Fatalf("diagnostic = %#v", err)
+	}
+}
+
+func TestWindowsNetworkManagerTracesFixedOperationsWithoutInputDisclosure(t *testing.T) {
+	sink := &recordingTraceSink{}
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store, WithWindowsTraceSink(sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := traceevent.WithGeneration(context.Background(), 42)
+	snapshot, err := manager.Capture(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallPublicTCPBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.eventsCopy()
+	for _, stage := range []string{
+		traceevent.StageNetworkCapture, traceevent.StageAdapterScan, traceevent.StageFirewallPublish,
+		traceevent.StageActiveStoreVerify, traceevent.StageNetworkRestore,
+	} {
+		if !containsString(traceKeys(events), stage+":"+traceevent.EventStarted) || !containsString(traceKeys(events), stage+":"+traceevent.EventSucceeded) {
+			t.Fatalf("stage %q is incomplete: %v", stage, traceKeys(events))
+		}
+	}
+	for _, event := range events {
+		if event.Generation != 42 {
+			t.Fatalf("generation = %d: %#v", event.Generation, event)
+		}
+		for _, forbidden := range []string{"172.20.9.15", "0.0.0.0/1", "128.0.0.0/1", "BlockedRemoteAddresses"} {
+			if strings.Contains(event.Detail, forbidden) {
+				t.Fatalf("trace leaked %q: %#v", forbidden, event)
+			}
+		}
+	}
+	assertTracePairs(t, events)
+}
+
+func TestWindowsNetworkResidueReportsCountsAndSnapshot(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), residue: windowsResidueCounts{ManagedRules: 23, ProductRoutes: 2, ProductTUNs: 1, CoreProcesses: 1}}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Capture(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	residue, err := manager.Residue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if residue.ManagedRules != 23 || residue.ProductRoutes != 2 || residue.ProductTUNs != 1 || residue.CoreProcesses != 1 || !residue.Snapshot || residue.SnapshotPhase != windowsSnapshotPhaseCaptured {
+		t.Fatalf("residue = %#v", residue)
+	}
+}
+
+func TestWindowsNetworkResidueRetainsExactOwnershipAfterRestore(t *testing.T) {
+	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := manager.Capture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WaitTUNReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Residue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	input := runner.lastInputFor(t, networkOperationResidue)
+	if input.OwnedTUN == nil || input.OwnedTUN.InterfaceGuid != validTUNIdentity().InterfaceGuid || len(input.OwnedRoutes) == 0 {
+		t.Fatalf("residue ownership input = %#v", input)
+	}
+	if input.CoreExecutable != windowsCoreExecutable || input.FirewallGroup != windowsFirewallGroup {
+		t.Fatalf("residue fixed identity = %#v", input)
+	}
+}
+
+func TestResiduePowerShellUsesOnlyFixedProductIdentities(t *testing.T) {
+	for _, marker := range []string{
+		"Get-NetFirewallRule -Group", "Get-NetRoute -AddressFamily", "Get-NetAdapter -IncludeHidden",
+		"Get-CimInstance Win32_Process", "OwnedRoutes", "OwnedTUN", "CoreExecutable",
+	} {
+		if !strings.Contains(residueNetworkPowerShell, marker) {
+			t.Fatalf("residue script missing %q", marker)
+		}
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func expiredContext() context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	cancel()
+	return ctx
+}
 
 func TestPowerShellInputEnvelopeIsASCIIAndRoundTripsUnicodeJSON(t *testing.T) {
 	input := []byte(`{"InterfaceAlias":"以太网","Secondary":"本地连接"}`)
@@ -126,7 +310,7 @@ func TestPowerShellNetworkDiagnosticIsBoundedAndDoesNotIncludeInput(t *testing.T
 		t.Fatalf("unsafe diagnostic %q", detail)
 	}
 	err := newFixedNetworkOperationError(networkOperationScan, errors.New("exit status 1"), raw)
-	if err.DiagnosticStage() != "adapter_identity_join" || err.DiagnosticDetail() != detail || strings.Contains(err.Error(), string(input)) {
+	if err.DiagnosticStage() != traceevent.StageAdapterScan || err.DiagnosticDetail() != detail || strings.Contains(err.Error(), string(input)) {
 		t.Fatalf("typed diagnostic = stage=%q detail=%q error=%q", err.DiagnosticStage(), err.DiagnosticDetail(), err.Error())
 	}
 }
@@ -1210,6 +1394,7 @@ type fakeNetworkRunner struct {
 	scanStarted         chan struct{}
 	scanStartOnce       sync.Once
 	emergencyContextErr error
+	residue             windowsResidueCounts
 }
 
 func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []byte) ([]byte, error) {
@@ -1240,6 +1425,9 @@ func (f *fakeNetworkRunner) Run(ctx context.Context, operation string, input []b
 	}
 	if operation == networkOperationReady {
 		return json.Marshal(f.ready)
+	}
+	if operation == networkOperationResidue {
+		return json.Marshal(f.residue)
 	}
 	if operation == networkOperationScan {
 		f.scanCalls++

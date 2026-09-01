@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"corp.example/overseas-access-gateway/internal/traceevent"
 	"golang.org/x/sys/windows"
 )
 
@@ -27,11 +28,12 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	}
 
 	statePath := filepath.Join(t.TempDir(), "network-state.json")
-	manager, err := newWindowsNetworkManager(validPolicy(), statePath, powerShellNetworkRunner{}, fileSnapshotStore{})
+	sink := &recordingTraceSink{}
+	manager, err := newWindowsNetworkManager(validPolicy(), statePath, powerShellNetworkRunner{}, fileSnapshotStore{}, WithWindowsTraceSink(sink))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(traceevent.WithGeneration(context.Background(), 1), 120*time.Second)
 	defer cancel()
 	snapshot, err := manager.Capture(ctx)
 	if err != nil {
@@ -59,4 +61,25 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state residue: %v", err)
 	}
+	residue, err := manager.Residue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !residue.IsZero() {
+		t.Fatalf("network residue = %#v", residue)
+	}
+	events := sink.eventsCopy()
+	for _, stage := range []string{
+		traceevent.StageNetworkCapture,
+		traceevent.StageAdapterScan,
+		traceevent.StageFirewallPublish,
+		traceevent.StageActiveStoreVerify,
+		traceevent.StageNetworkRestore,
+		traceevent.StageResidueVerify,
+	} {
+		if !containsString(traceKeys(events), stage+":"+traceevent.EventStarted) || !containsString(traceKeys(events), stage+":"+traceevent.EventSucceeded) {
+			t.Fatalf("live trace stage %q is incomplete: %v", stage, traceKeys(events))
+		}
+	}
+	assertTracePairs(t, events)
 }
