@@ -1308,7 +1308,28 @@ const verifyNetworkPowerShell = `function Assert-EqualSet([string]$label, $actua
 }
 function Normalize-AddressToken($value) {
   $text = ([string]$value).Trim().ToLowerInvariant()
-  if ($text -match '^(?<address>.+)/(32|128)$') { return [string]$Matches.address }
+  if ($text -match '^(?<address>\d{1,3}(?:\.\d{1,3}){3})/(?<mask>\d{1,3}(?:\.\d{1,3}){3})$') {
+    $address = [string]$Matches.address
+    $addressOctets = @($address.Split('.') | ForEach-Object { [int]$_ })
+    $maskOctets = @(([string]$Matches.mask).Split('.') | ForEach-Object { [int]$_ })
+    if (@($addressOctets | Where-Object { $_ -lt 0 -or $_ -gt 255 }).Count -ne 0 -or @($maskOctets | Where-Object { $_ -lt 0 -or $_ -gt 255 }).Count -ne 0) { return $text }
+    $prefixLength = 0
+    $seenZero = $false
+    foreach ($octet in $maskOctets) {
+      for ($bit = 7; $bit -ge 0; $bit--) {
+        if (($octet -band (1 -shl $bit)) -ne 0) {
+          if ($seenZero) { return $text }
+          $prefixLength++
+        } else {
+          $seenZero = $true
+        }
+      }
+    }
+    if ($prefixLength -eq 32) { return $address }
+    return ($address + '/' + [string]$prefixLength)
+  }
+  if ($text -match '^(?<address>\d{1,3}(?:\.\d{1,3}){3})/32$') { return [string]$Matches.address }
+  if ($text -match '^(?<address>[^/]*:[^/]*)/128$') { return [string]$Matches.address }
   return $text
 }
 function Assert-EqualAddressSet([string]$label, $actual, $expected) {
@@ -1417,7 +1438,7 @@ foreach ($physical in @($i.Interfaces)) {
   Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $currentIndex -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric
 }
 }
-foreach ($route in @($i.OwnedRoutes)) {
+foreach ($route in @($i.OwnedRoutes | Where-Object { $null -ne $_ })) {
   Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
 }
 Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop

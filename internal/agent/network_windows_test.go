@@ -84,6 +84,37 @@ func TestPowerShellTransportSuppressesProgressBeforeFailure(t *testing.T) {
 	}
 }
 
+func TestWindowsPowerShellNormalizesActiveStoreIPv4SubnetMasks(t *testing.T) {
+	const operation = "normalize_active_store_address_test"
+	marker := "function Assert-EqualAddressSet"
+	functionEnd := strings.Index(verifyNetworkPowerShell, marker)
+	if functionEnd < 0 {
+		t.Fatalf("Normalize-AddressToken function boundary %q is missing", marker)
+	}
+	normalizeFunction := verifyNetworkPowerShell[strings.Index(verifyNetworkPowerShell, "function Normalize-AddressToken"):functionEnd]
+	networkPowerShellScripts[operation] = normalizeFunction + `
+@(
+  (Normalize-AddressToken '1.0.0.0/255.0.0.0'),
+  (Normalize-AddressToken '198.51.100.7/255.255.255.255'),
+  (Normalize-AddressToken '203.0.112.0/255.255.240.0'),
+  (Normalize-AddressToken '2001:db8::/32')
+) | ConvertTo-Json -Compress`
+	defer delete(networkPowerShellScripts, operation)
+
+	output, err := (powerShellNetworkRunner{}).Run(context.Background(), operation, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1.0.0.0/8", "198.51.100.7", "203.0.112.0/20", "2001:db8::/32"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("normalized addresses = %#v, want %#v", got, want)
+	}
+}
+
 func TestPowerShellNetworkDiagnosticIsBoundedAndDoesNotIncludeInput(t *testing.T) {
 	input := []byte(`{"credential":"never-copy-this-input"}`)
 	raw := []byte("adapter_identity_join:\r\n" + strings.Repeat("x", 1000) + "\x00")
@@ -222,6 +253,12 @@ func TestWindowsNetworkCapturedOnlyRestoreDoesNotRewriteInterfaces(t *testing.T)
 	}
 	if !strings.Contains(restoreNetworkPowerShell, "if ([bool]$i.RestoreInterfaces)") {
 		t.Fatal("restore script does not gate interface mutation by ownership phase")
+	}
+}
+
+func TestWindowsPowerShellRestoreSkipsMissingOwnedRoutes(t *testing.T) {
+	if !strings.Contains(restoreNetworkPowerShell, `foreach ($route in @($i.OwnedRoutes | Where-Object { $null -ne $_ }))`) {
+		t.Fatal("restore script treats a missing OwnedRoutes property as one null route")
 	}
 }
 
