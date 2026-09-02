@@ -64,6 +64,7 @@ const (
 	windowsSnapshotPhaseTUNOwned  = "tun-owned"
 	maxNetworkDiagnosticBytes     = traceevent.MaxDetailBytes
 	windowsEmergencyTimeout       = 30 * time.Second
+	windowsPreparationTimeout     = 60 * time.Second
 )
 
 var powerShellEscapePattern = regexp.MustCompile(`(?i)_x[0-9a-f]{4}_`)
@@ -293,31 +294,37 @@ type WindowsNetworkSnapshot struct {
 	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses"`
 	RouteMetric               int                        `json:"RouteMetric"`
 	OwnershipPhase            string                     `json:"OwnershipPhase"`
+	PreparedGeneration        uint64                     `json:"PreparedGeneration,omitempty"`
 	IntegritySHA256           string                     `json:"IntegritySHA256"`
 }
 
 type windowsNetworkInput struct {
-	Interfaces                []WindowsInterfaceSnapshot `json:"Interfaces,omitempty"`
-	RestoreInterfaces         bool                       `json:"RestoreInterfaces,omitempty"`
-	FirewallRuleNames         []string                   `json:"FirewallRuleNames,omitempty"`
-	FirewallGroup             string                     `json:"FirewallGroup,omitempty"`
-	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses,omitempty"`
-	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses,omitempty"`
-	ProtectedAdapters         []WindowsAdapterIdentity   `json:"ProtectedAdapters,omitempty"`
-	PreparedRules             []WindowsPreparedRule      `json:"PreparedRules,omitempty"`
-	PreparedGeneration        uint64                     `json:"PreparedGeneration,omitempty"`
-	RuleDefinitionVersion     int                        `json:"RuleDefinitionVersion,omitempty"`
-	TUNInterface              string                     `json:"TUNInterface,omitempty"`
-	TUNAddress                string                     `json:"TUNAddress,omitempty"`
-	TUNDNS                    string                     `json:"TUNDNS,omitempty"`
-	TUNRoutePrefixes          []string                   `json:"TUNRoutePrefixes,omitempty"`
-	RouteMetric               int                        `json:"RouteMetric,omitempty"`
-	NodeAddresses             []string                   `json:"NodeAddresses,omitempty"`
-	BaselineAdapterGuids      []string                   `json:"BaselineAdapterGuids,omitempty"`
-	OwnedTUN                  *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
-	OwnedRoutes               []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
-	GuardRoutes               []WindowsOwnedRoute        `json:"GuardRoutes,omitempty"`
-	CoreExecutable            string                     `json:"CoreExecutable,omitempty"`
+	Interfaces                        []WindowsInterfaceSnapshot `json:"Interfaces,omitempty"`
+	RestoreInterfaces                 bool                       `json:"RestoreInterfaces,omitempty"`
+	FirewallRuleNames                 []string                   `json:"FirewallRuleNames,omitempty"`
+	FirewallGroup                     string                     `json:"FirewallGroup,omitempty"`
+	BlockedRemoteAddresses            []string                   `json:"BlockedRemoteAddresses,omitempty"`
+	DNSBlockedRemoteAddresses         []string                   `json:"DNSBlockedRemoteAddresses,omitempty"`
+	ProtectedAdapters                 []WindowsAdapterIdentity   `json:"ProtectedAdapters,omitempty"`
+	PreparedRules                     []WindowsPreparedRule      `json:"PreparedRules,omitempty"`
+	PreparedGeneration                uint64                     `json:"PreparedGeneration,omitempty"`
+	RuleDefinitionVersion             int                        `json:"RuleDefinitionVersion,omitempty"`
+	PreviousPreparedRules             []WindowsPreparedRule      `json:"PreviousPreparedRules,omitempty"`
+	PreviousPreparedGeneration        uint64                     `json:"PreviousPreparedGeneration,omitempty"`
+	PreviousRuleDefinitionVersion     int                        `json:"PreviousRuleDefinitionVersion,omitempty"`
+	PreviousBlockedRemoteAddresses    []string                   `json:"PreviousBlockedRemoteAddresses,omitempty"`
+	PreviousDNSBlockedRemoteAddresses []string                   `json:"PreviousDNSBlockedRemoteAddresses,omitempty"`
+	TUNInterface                      string                     `json:"TUNInterface,omitempty"`
+	TUNAddress                        string                     `json:"TUNAddress,omitempty"`
+	TUNDNS                            string                     `json:"TUNDNS,omitempty"`
+	TUNRoutePrefixes                  []string                   `json:"TUNRoutePrefixes,omitempty"`
+	RouteMetric                       int                        `json:"RouteMetric,omitempty"`
+	NodeAddresses                     []string                   `json:"NodeAddresses,omitempty"`
+	BaselineAdapterGuids              []string                   `json:"BaselineAdapterGuids,omitempty"`
+	OwnedTUN                          *WindowsTUNIdentity        `json:"OwnedTUN,omitempty"`
+	OwnedRoutes                       []WindowsOwnedRoute        `json:"OwnedRoutes,omitempty"`
+	GuardRoutes                       []WindowsOwnedRoute        `json:"GuardRoutes,omitempty"`
+	CoreExecutable                    string                     `json:"CoreExecutable,omitempty"`
 }
 
 type windowsResidueCounts struct {
@@ -339,12 +346,17 @@ type snapshotStore interface {
 
 type WindowsNetworkManager struct {
 	mu                 sync.Mutex
+	prepareMu          sync.Mutex
+	prepareFlight      *prepareFlight
 	protectionRunMu    sync.Mutex
 	policy             accessmodel.Policy
 	statePath          string
 	runner             networkRunner
 	native             nativeNetworkReader
 	store              snapshotStore
+	preparedStore      preparedStateStore
+	preparedPath       string
+	prepared           *WindowsPreparedState
 	nodeAddresses      []string
 	blockedPrefixes    []string
 	dnsBlockedPrefixes []string
@@ -432,6 +444,8 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		runner:             runner,
 		native:             newWindowsNativeNetworkReader(),
 		store:              store,
+		preparedStore:      filePreparedStateStore{},
+		preparedPath:       filepath.Join(filepath.Dir(statePath), windowsPreparedStateFile),
 		nodeAddresses:      nodeAddresses,
 		blockedPrefixes:    blocked,
 		dnsBlockedPrefixes: dnsBlocked,
@@ -445,7 +459,13 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 	return manager, nil
 }
 
-func (m *WindowsNetworkManager) Capture(ctx context.Context) (any, error) {
+func (m *WindowsNetworkManager) Capture(ctx context.Context, prepared ...PreparedNetwork) (any, error) {
+	if len(prepared) > 1 {
+		return nil, errors.New("capture accepts at most one prepared generation")
+	}
+	if len(prepared) == 1 {
+		return m.capturePrepared(ctx, prepared[0])
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {
@@ -727,7 +747,7 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 		return err
 	}
 	m.mu.Unlock()
-	return m.reconcileProtection(ctx)
+	return nil
 }
 
 func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {

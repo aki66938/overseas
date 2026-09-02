@@ -68,14 +68,16 @@ type WindowsPreparedRule struct {
 }
 
 type WindowsPreparedState struct {
-	Version               int                    `json:"Version"`
-	Generation            uint64                 `json:"Generation"`
-	PolicySHA256          string                 `json:"PolicySHA256"`
-	RuleDefinitionVersion int                    `json:"RuleDefinitionVersion"`
-	FingerprintSHA256     string                 `json:"FingerprintSHA256"`
-	Baseline              WindowsNetworkBaseline `json:"Baseline"`
-	Rules                 []WindowsPreparedRule  `json:"Rules"`
-	IntegritySHA256       string                 `json:"IntegritySHA256"`
+	Version                   int                    `json:"Version"`
+	Generation                uint64                 `json:"Generation"`
+	PolicySHA256              string                 `json:"PolicySHA256"`
+	RuleDefinitionVersion     int                    `json:"RuleDefinitionVersion"`
+	FingerprintSHA256         string                 `json:"FingerprintSHA256"`
+	Baseline                  WindowsNetworkBaseline `json:"Baseline"`
+	BlockedRemoteAddresses    []string               `json:"BlockedRemoteAddresses"`
+	DNSBlockedRemoteAddresses []string               `json:"DNSBlockedRemoteAddresses"`
+	Rules                     []WindowsPreparedRule  `json:"Rules"`
+	IntegritySHA256           string                 `json:"IntegritySHA256"`
 }
 
 func validatePreparedNetwork(prepared PreparedNetwork) error {
@@ -123,8 +125,16 @@ func validateWindowsPreparedState(state WindowsPreparedState) error {
 	if !lowercaseSHA256Pattern.MatchString(state.PolicySHA256) || !lowercaseSHA256Pattern.MatchString(state.FingerprintSHA256) {
 		return errors.New("prepared state hashes are invalid")
 	}
-	if len(state.Baseline.Adapters) == 0 || len(state.Rules) == 0 {
+	if len(state.Baseline.Adapters) == 0 || len(state.Rules) == 0 || len(state.BlockedRemoteAddresses) == 0 || len(state.DNSBlockedRemoteAddresses) == 0 {
 		return errors.New("prepared baseline and rules are required")
+	}
+	blockedHash, err := hashCanonicalPrefixes(state.BlockedRemoteAddresses)
+	if err != nil {
+		return errors.New("prepared blocked prefix set is invalid")
+	}
+	dnsHash, err := hashCanonicalPrefixes(state.DNSBlockedRemoteAddresses)
+	if err != nil {
+		return errors.New("prepared DNS prefix set is invalid")
 	}
 	seen := make(map[string]bool, len(state.Rules))
 	for _, rule := range state.Rules {
@@ -136,11 +146,22 @@ func validateWindowsPreparedState(state WindowsPreparedState) error {
 		if strings.TrimSpace(rule.Protocol) == "" || !lowercaseSHA256Pattern.MatchString(rule.RemoteAddressesSHA) {
 			return errors.New("prepared rule definition is invalid")
 		}
+		expectedHash := dnsHash
+		if rule.Emergency || rule.Protocol == "Any" {
+			expectedHash = blockedHash
+		}
+		if rule.RemoteAddressesSHA != expectedHash {
+			return errors.New("prepared rule address hash does not match its sealed prefix set")
+		}
 	}
 	return nil
 }
 
 func canonicalizeWindowsPreparedState(state *WindowsPreparedState) {
+	state.BlockedRemoteAddresses = append([]string(nil), state.BlockedRemoteAddresses...)
+	sort.Strings(state.BlockedRemoteAddresses)
+	state.DNSBlockedRemoteAddresses = append([]string(nil), state.DNSBlockedRemoteAddresses...)
+	sort.Strings(state.DNSBlockedRemoteAddresses)
 	state.Baseline.Adapters = append([]WindowsNativeAdapter(nil), state.Baseline.Adapters...)
 	for index := range state.Baseline.Adapters {
 		state.Baseline.Adapters[index].DNSServers = append([]string(nil), state.Baseline.Adapters[index].DNSServers...)

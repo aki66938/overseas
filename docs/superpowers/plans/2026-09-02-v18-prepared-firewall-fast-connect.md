@@ -63,6 +63,8 @@ type WindowsPreparedState struct {
     RuleDefinitionVersion int                    `json:"RuleDefinitionVersion"`
     FingerprintSHA256     string                 `json:"FingerprintSHA256"`
     Baseline              WindowsNetworkBaseline `json:"Baseline"`
+    BlockedRemoteAddresses    []string           `json:"BlockedRemoteAddresses"`
+    DNSBlockedRemoteAddresses []string           `json:"DNSBlockedRemoteAddresses"`
     Rules                 []WindowsPreparedRule  `json:"Rules"`
     IntegritySHA256       string                 `json:"IntegritySHA256"`
 }
@@ -285,7 +287,7 @@ type NetworkManager interface {
 }
 ```
 
-Use `C:\ProgramData\RegenBio\OverseasAccess\prepared-network.json` for the sealed prepared state and retain `network-state.json` only for an active transaction. `Prepare` reads a native baseline, computes the policy/rule/fingerprint tuple, reuses an exact valid Disabled pool, or builds a new generation and atomically publishes it. `Capture` rechecks the lightweight fingerprint and writes the active snapshot without PowerShell.
+Use `C:\ProgramData\RegenBio\OverseasAccess\prepared-network.json` for the sealed prepared state and retain `network-state.json` only for an active transaction. The sealed state retains both canonical remote-prefix sets as well as their per-rule hashes so a policy-changing generation can prove the previous generation against its own definition before exact-name replacement. `Prepare` reads a native baseline, computes the policy/rule/fingerprint tuple, reuses an exact valid Disabled pool, or builds a new generation and atomically publishes it. `Capture` rechecks the lightweight fingerprint and writes the active snapshot without PowerShell.
 
 - [ ] **Step 1: Update fakes and write failing prepared-generation tests.** Cover first preparation, unchanged reuse without firewall writes, topology/policy/rule-version invalidation, concurrent callers coalescing to one build, canceled waiter isolation, active-transaction exclusion, atomic write failure, and stale generation refusal.
 - [ ] **Step 2: Write the v17 regression tests before implementation.** A successful `WaitTUNReady` must return without `scan`, `block`, `verify`, or `protectionRunMu`; connection startup must not start any monitor; the operation sequence before core start is exactly fingerprint → active snapshot → enable → verify.

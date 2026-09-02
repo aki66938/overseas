@@ -794,7 +794,7 @@ type fakeNetwork struct {
 
 func newFakeNetwork() *fakeNetwork { return &fakeNetwork{failures: make(chan error, 1)} }
 
-func (f *fakeNetwork) Capture(context.Context) (any, error) {
+func (f *fakeNetwork) Capture(context.Context, ...PreparedNetwork) (any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.captureCalls++

@@ -68,7 +68,7 @@ type Credential struct {
 // must make block, restore, and reconcile idempotent and persist enough state to
 // reconcile residue after a service restart.
 type NetworkManager interface {
-	Capture(context.Context) (any, error)
+	Capture(context.Context, ...PreparedNetwork) (any, error)
 	InstallPublicTCPBlock(context.Context) (<-chan error, error)
 	WaitTUNReady(context.Context) error
 	ActivateTUNRoutes(context.Context) error

@@ -24,20 +24,43 @@ func (m *WindowsNetworkManager) preparedFirewallInput(state WindowsPreparedState
 		names = append(names, rule.Name)
 	}
 	sort.Strings(names)
+	blocked := state.BlockedRemoteAddresses
+	if len(blocked) == 0 {
+		blocked = m.blockedPrefixes
+	}
+	dnsBlocked := state.DNSBlockedRemoteAddresses
+	if len(dnsBlocked) == 0 {
+		dnsBlocked = m.dnsBlockedPrefixes
+	}
 	return windowsNetworkInput{
 		FirewallRuleNames: names, FirewallGroup: windowsFirewallGroup,
-		BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
-		DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
+		BlockedRemoteAddresses:    append([]string(nil), blocked...),
+		DNSBlockedRemoteAddresses: append([]string(nil), dnsBlocked...),
 		PreparedRules:             rules, PreparedGeneration: state.Generation,
 		RuleDefinitionVersion: state.RuleDefinitionVersion,
 	}
 }
 
-func (m *WindowsNetworkManager) prepareFirewallPool(ctx context.Context, state WindowsPreparedState) error {
+func (m *WindowsNetworkManager) prepareFirewallPool(ctx context.Context, state WindowsPreparedState, previous ...WindowsPreparedState) error {
 	input := m.preparedFirewallInput(state, true)
+	if len(previous) > 1 {
+		return errors.New("at most one previous prepared firewall generation is allowed")
+	}
+	if len(previous) == 1 {
+		input.PreviousPreparedRules = canonicalPreparedRules(previous[0].Rules)
+		input.PreviousPreparedGeneration = previous[0].Generation
+		input.PreviousRuleDefinitionVersion = previous[0].RuleDefinitionVersion
+		input.PreviousBlockedRemoteAddresses = append([]string(nil), previous[0].BlockedRemoteAddresses...)
+		input.PreviousDNSBlockedRemoteAddresses = append([]string(nil), previous[0].DNSBlockedRemoteAddresses...)
+	}
 	if _, err := m.run(ctx, networkOperationFirewallPrepare, input); err != nil {
 		emergencyContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowsEmergencyTimeout)
 		defer cancel()
+		if len(previous) == 1 {
+			if previousEmergencyErr := m.installPreparedEmergencyProtection(emergencyContext, previous[0]); previousEmergencyErr == nil {
+				return err
+			}
+		}
 		return errors.Join(err, m.installPreparedEmergencyProtection(emergencyContext, state))
 	}
 	return nil
@@ -103,22 +126,28 @@ function Assert-PreparedSet([string]$label, $actual, $expected, [bool]$addresses
   }
   if ($left.Count -ne $right.Count -or [string]::Join('|',$left) -ne [string]::Join('|',$right)) { throw ('prepared_firewall: ' + $label + ' mismatch.') }
 }
+function Get-PreparedDescriptionFor($expected, [uint64]$generation, [int]$version) {
+  return ('RegenBioOwned;v=' + [string]$version + ';g=' + [string]$generation + ';sha=' + [string]$expected.RemoteAddressesSHA + ';emergency=' + ([bool]$expected.Emergency).ToString().ToLowerInvariant())
+}
 function Get-PreparedDescription($expected) {
-  return ('RegenBioOwned;v=' + [string]$i.RuleDefinitionVersion + ';g=' + [string]$i.PreparedGeneration + ';sha=' + [string]$expected.RemoteAddressesSHA + ';emergency=' + ([bool]$expected.Emergency).ToString().ToLowerInvariant())
+  return (Get-PreparedDescriptionFor $expected ([uint64]$i.PreparedGeneration) ([int]$i.RuleDefinitionVersion))
+}
+function Get-PreparedRemoteFor($expected, $blocked, $dnsBlocked) {
+  if ([bool]$expected.Emergency -or [string]$expected.Protocol -eq 'Any') { return @($blocked) }
+  return @($dnsBlocked)
 }
 function Get-PreparedRemote($expected) {
-  if ([bool]$expected.Emergency -or [string]$expected.Protocol -eq 'Any') { return @($i.BlockedRemoteAddresses) }
-  return @($i.DNSBlockedRemoteAddresses)
+  return @(Get-PreparedRemoteFor $expected @($i.BlockedRemoteAddresses) @($i.DNSBlockedRemoteAddresses))
 }
 function Get-PreparedAliases($expected) {
   if (-not [string]::IsNullOrWhiteSpace([string]$expected.InterfaceAlias)) { return @([string]$expected.InterfaceAlias) }
   return @($expected.InterfaceAliases)
 }
-function Assert-PreparedRule($expected, [string]$policyStore, [string]$enabled) {
+function Assert-PreparedRuleFor($expected, [string]$policyStore, [string]$enabled, [uint64]$generation, [int]$version, $blocked, $dnsBlocked) {
   $rules = @(Get-NetFirewallRule -PolicyStore $policyStore -Name ([string]$expected.Name) -ErrorAction SilentlyContinue)
   if ($rules.Count -ne 1) { throw ('prepared_firewall: expected exactly one rule named ' + [string]$expected.Name + '.') }
   $rule = $rules[0]
-  if ([string]$rule.Group -ne [string]$i.FirewallGroup -or [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Block' -or [string]$rule.Enabled -ne $enabled -or [string]$rule.Description -ne (Get-PreparedDescription $expected)) { throw ('prepared_firewall: metadata mismatch for ' + [string]$expected.Name + '.') }
+  if ([string]$rule.Group -ne [string]$i.FirewallGroup -or [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Block' -or [string]$rule.Enabled -ne $enabled -or [string]$rule.Description -ne (Get-PreparedDescriptionFor $expected $generation $version)) { throw ('prepared_firewall: metadata mismatch for ' + [string]$expected.Name + '.') }
   $port = @($rule | Get-NetFirewallPortFilter)
   if ($port.Count -ne 1 -or [string]$port[0].Protocol -ne [string]$expected.Protocol) { throw ('prepared_firewall: protocol mismatch for ' + [string]$expected.Name + '.') }
   $expectedPorts = @($expected.RemotePorts)
@@ -126,10 +155,13 @@ function Assert-PreparedRule($expected, [string]$policyStore, [string]$enabled) 
   Assert-PreparedSet (([string]$expected.Name) + ' remote ports') @($port[0].RemotePort) $expectedPorts $false
   $address = @($rule | Get-NetFirewallAddressFilter)
   if ($address.Count -ne 1) { throw ('prepared_firewall: address filter is ambiguous for ' + [string]$expected.Name + '.') }
-  Assert-PreparedSet (([string]$expected.Name) + ' remote addresses') @($address[0].RemoteAddress) @(Get-PreparedRemote $expected) $true
+  Assert-PreparedSet (([string]$expected.Name) + ' remote addresses') @($address[0].RemoteAddress) @(Get-PreparedRemoteFor $expected $blocked $dnsBlocked) $true
   $interface = @($rule | Get-NetFirewallInterfaceFilter)
   if ($interface.Count -ne 1) { throw ('prepared_firewall: interface filter is ambiguous for ' + [string]$expected.Name + '.') }
   Assert-PreparedSet (([string]$expected.Name) + ' interface aliases') @($interface[0].InterfaceAlias) @(Get-PreparedAliases $expected) $false
+}
+function Assert-PreparedRule($expected, [string]$policyStore, [string]$enabled) {
+  Assert-PreparedRuleFor $expected $policyStore $enabled ([uint64]$i.PreparedGeneration) ([int]$i.RuleDefinitionVersion) @($i.BlockedRemoteAddresses) @($i.DNSBlockedRemoteAddresses)
 }`
 
 const preparedFirewallPreparePowerShell = preparedFirewallPowerShellHelpers + `
@@ -138,10 +170,27 @@ $expectedRules = @($i.PreparedRules)
 if ($expectedRules.Count -lt 4) { throw 'prepared_firewall: rule plan is incomplete.' }
 $expectedNames = @($expectedRules | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
 if ($expectedNames.Count -ne $expectedRules.Count) { throw 'prepared_firewall: duplicate desired rule name.' }
+$previousRules = @($i.PreviousPreparedRules)
+$previousNames = @($previousRules | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
+if ($previousRules.Count -ne 0 -and ($previousNames.Count -ne $previousRules.Count -or [uint64]$i.PreviousPreparedGeneration -eq 0 -or [int]$i.PreviousRuleDefinitionVersion -le 0)) { throw 'prepared_firewall: previous ledger is invalid.' }
+$allowedNames = @($expectedNames + $previousNames | Sort-Object -Unique)
 $rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
-$unknown = @($rules | Where-Object { $expectedNames -notcontains [string]$_.Name })
+$unknown = @($rules | Where-Object { $allowedNames -notcontains [string]$_.Name })
 if ($unknown.Count -ne 0) { throw 'prepared_firewall: unknown product-group rule exists.' }
-foreach ($expected in $expectedRules) {
+if ($previousRules.Count -ne 0) {
+  foreach ($previous in $previousRules) { Assert-PreparedRuleFor $previous 'PersistentStore' 'False' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses) @($i.PreviousDNSBlockedRemoteAddresses) }
+  $previousEmergency = @($previousRules | Where-Object { [bool]$_.Emergency })
+  if ($previousEmergency.Count -ne 1) { throw 'prepared_firewall: previous emergency rule is ambiguous.' }
+  Enable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$previousEmergency[0].Name) -ErrorAction Stop
+  Assert-PreparedRuleFor $previousEmergency[0] 'ActiveStore' 'True' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses) @($i.PreviousDNSBlockedRemoteAddresses)
+  $previousNormalNames = @($previousRules | Where-Object { -not [bool]$_.Emergency } | ForEach-Object { [string]$_.Name })
+  foreach ($name in $previousNormalNames) {
+    $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop)
+    if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule became ambiguous: ' + $name) }
+    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop
+  }
+}
+foreach ($expected in @($expectedRules | Where-Object { -not [bool]$_.Emergency })) {
   $name = [string]$expected.Name
   $existing = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
   if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw ('prepared_firewall: rule-name collision for ' + $name + '.') }
@@ -157,6 +206,22 @@ foreach ($expected in $expectedRules) {
   New-NetFirewallRule @parameters | Out-Null
   Assert-PreparedRule $expected 'PersistentStore' 'False'
 }
+$expectedEmergency = @($expectedRules | Where-Object { [bool]$_.Emergency })
+if ($expectedEmergency.Count -ne 1) { throw 'prepared_firewall: desired emergency rule is ambiguous.' }
+if ($previousRules.Count -ne 0) {
+  $oldEmergencyName = [string]$previousEmergency[0].Name
+  $ownedEmergency = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction Stop)
+  if ($ownedEmergency.Count -ne 1) { throw 'prepared_firewall: previous emergency rule became ambiguous.' }
+  Remove-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction Stop
+}
+$expected = $expectedEmergency[0]
+$name = [string]$expected.Name
+$existingEmergency = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+if ($existingEmergency.Count -gt 1 -or ($existingEmergency.Count -eq 1 -and [string]$existingEmergency[0].Group -ne [string]$i.FirewallGroup)) { throw ('prepared_firewall: emergency rule-name collision for ' + $name + '.') }
+if ($existingEmergency.Count -eq 0) {
+  New-NetFirewallRule -PolicyStore PersistentStore -Name $name -DisplayName $name -Group ([string]$i.FirewallGroup) -Description (Get-PreparedDescription $expected) -Direction Outbound -Action Block -Enabled False -Protocol Any -RemoteAddress @(Get-PreparedRemote $expected) -InterfaceAlias @(Get-PreparedAliases $expected) -Profile Any | Out-Null
+}
+Assert-PreparedRule $expected 'PersistentStore' 'False'
 [pscustomobject]@{RuleCount=[int]$expectedRules.Count;DisabledCount=[int]$expectedRules.Count}|ConvertTo-Json -Compress`
 
 const preparedFirewallEnablePowerShell = preparedFirewallPowerShellHelpers + `
