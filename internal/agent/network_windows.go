@@ -1446,7 +1446,7 @@ $enabledRules = @($allRules | Where-Object { [string]$_.Enabled -eq 'True' })
 $managedRules = $enabledRules.Count
 $disabledPreparedRules = $allRules.Count - $enabledRules.Count
 $routeKeys = @{}
-foreach ($owned in @($i.OwnedRoutes)) {
+foreach ($owned in @($i.OwnedRoutes | Where-Object { $null -ne $_ })) {
   $family = [string]$owned.AddressFamily
   if ([string]::IsNullOrWhiteSpace($family)) { $family = 'IPv4' }
   $matches = @(Get-NetRoute -AddressFamily $family -DestinationPrefix ([string]$owned.DestinationPrefix) -ErrorAction SilentlyContinue | Where-Object {
@@ -1650,7 +1650,7 @@ Assert-Rule ([string]$i.FirewallRuleNames[3]) 'UDP' @('53') @($i.DNSBlockedRemot
 Assert-Rule ([string]$i.FirewallRuleNames[4]) 'TCP' @('53') @($i.DNSBlockedRemoteAddresses) ''`
 
 const emergencyNetworkPowerShell = preparedFirewallPowerShellHelpers + `$remote = @($i.BlockedRemoteAddresses)
-$prepared = @($i.PreparedRules)
+$prepared = @($i.PreparedRules | Where-Object { $null -ne $_ })
 if ($prepared.Count -ne 0) {
   if ([int]$i.RuleDefinitionVersion -ne 2 -or [uint64]$i.PreparedGeneration -eq 0) { throw 'prepared_firewall: invalid emergency generation.' }
   $candidates = @($prepared | Where-Object { [bool]$_.Emergency })
