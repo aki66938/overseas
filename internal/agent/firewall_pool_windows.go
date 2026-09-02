@@ -170,7 +170,7 @@ $expectedRules = @($i.PreparedRules)
 if ($expectedRules.Count -lt 4) { throw 'prepared_firewall: rule plan is incomplete.' }
 $expectedNames = @($expectedRules | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
 if ($expectedNames.Count -ne $expectedRules.Count) { throw 'prepared_firewall: duplicate desired rule name.' }
-$previousRules = @($i.PreviousPreparedRules)
+$previousRules = @($i.PreviousPreparedRules | Where-Object { $null -ne $_ })
 $previousNames = @($previousRules | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
 if ($previousRules.Count -ne 0 -and ($previousNames.Count -ne $previousRules.Count -or [uint64]$i.PreviousPreparedGeneration -eq 0 -or [int]$i.PreviousRuleDefinitionVersion -le 0)) { throw 'prepared_firewall: previous ledger is invalid.' }
 $allowedNames = @($expectedNames + $previousNames | Sort-Object -Unique)
