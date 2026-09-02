@@ -385,18 +385,3 @@ func (m *WindowsNetworkManager) EnableProtection(ctx context.Context, prepared P
 	}
 	return nil
 }
-
-// StartMonitor occupies the runtime monitor slot for a connected generation.
-// The fingerprint/deep-audit monitor body lands with the dedicated monitor
-// task; until then it must never reconcile or write while connected, so it
-// only observes context cancellation.
-func (m *WindowsNetworkManager) StartMonitor(ctx context.Context, prepared PreparedNetwork) (<-chan error, error) {
-	if err := validatePreparedNetwork(prepared); err != nil {
-		return nil, err
-	}
-	failures := make(chan error, 1)
-	go func() {
-		<-ctx.Done()
-	}()
-	return failures, nil
-}

@@ -365,6 +365,9 @@ type WindowsNetworkManager struct {
 	trace              traceevent.Sink
 	lastOwnedTUN       *WindowsTUNIdentity
 	lastOwnedRoutes    []WindowsOwnedRoute
+	monitorClock       monitorClock
+	monitorConfig      networkMonitorConfig
+	monitorFlights     int
 }
 
 type WindowsNetworkOption func(*WindowsNetworkManager)

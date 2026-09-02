@@ -53,12 +53,13 @@ func (s *fakePreparedStateStore) Delete(string) error {
 }
 
 type scriptedNativeReader struct {
-	mu        sync.Mutex
-	baselines []WindowsNetworkBaseline
-	calls     int
-	started   chan struct{}
-	release   chan struct{}
-	once      sync.Once
+	mu               sync.Mutex
+	baselines        []WindowsNetworkBaseline
+	calls            int
+	started          chan struct{}
+	release          chan struct{}
+	once             sync.Once
+	failFingerprints int
 }
 
 func (r *scriptedNativeReader) Baseline(ctx context.Context, _ []string) (WindowsNetworkBaseline, error) {
@@ -86,6 +87,15 @@ func (r *scriptedNativeReader) Baseline(ctx context.Context, _ []string) (Window
 }
 
 func (r *scriptedNativeReader) Fingerprint(ctx context.Context, nodes []string) (string, error) {
+	r.mu.Lock()
+	failing := r.failFingerprints > 0
+	if failing {
+		r.failFingerprints--
+	}
+	r.mu.Unlock()
+	if failing {
+		return "", errors.New("transient native read failure")
+	}
 	baseline, err := r.Baseline(ctx, nodes)
 	if err != nil {
 		return "", err
