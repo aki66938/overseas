@@ -15,6 +15,12 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
+func TestBuildCoreVerifierRejectsInvalidTrustPolicy(t *testing.T) {
+	if _, err := buildCoreVerifier(bootstrapConfig{CoreSHA256: "invalid"}); err == nil {
+		t.Fatal("invalid core trust policy was accepted")
+	}
+}
+
 func TestRenderClientConfigUsesDirectTelecomHTTPOutbound(t *testing.T) {
 	policy := accessmodel.Policy{
 		SchemaVersion: 2, Mode: "poc",

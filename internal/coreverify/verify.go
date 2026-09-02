@@ -47,54 +47,74 @@ var (
 // pinned hash, rejects unsafe ownership/ACLs, and enforces the expected
 // Authenticode state for the pinned sing-box binary.
 func Verify(path string, expectedSHA256 string, signerAllowlist []string) error {
+	_, err := VerifyEvidence(path, expectedSHA256, signerAllowlist)
+	return err
+}
+
+// VerifyEvidence performs the complete verification and returns the exact
+// immutable file and trust evidence suitable for an in-process cache.
+func VerifyEvidence(path string, expectedSHA256 string, signerAllowlist []string) (Evidence, error) {
 	normalizedExpected, err := normalizeSHA256(expectedSHA256)
 	if err != nil {
-		return err
+		return Evidence{}, err
 	}
 
 	file, err := openRegularFileNoReparse(path)
 	if err != nil {
-		return err
+		return Evidence{}, err
 	}
 	defer file.Close()
+	identity, err := fileIdentityFromOpenFile(file)
+	if err != nil {
+		return Evidence{}, fmt.Errorf("inspect executable identity: %w", err)
+	}
 
 	if err := ensurePortableExecutable(file); err != nil {
-		return err
+		return Evidence{}, err
 	}
 
 	actualHash, err := hashOpenFile(file)
 	if err != nil {
-		return err
+		return Evidence{}, err
 	}
 	if subtle.ConstantTimeCompare([]byte(actualHash), []byte(normalizedExpected)) != 1 {
-		return fmt.Errorf("sha256 mismatch: got %s", actualHash)
+		return Evidence{}, fmt.Errorf("sha256 mismatch: got %s", actualHash)
 	}
 
 	metadata, err := inspectSecurity(path)
 	if err != nil {
-		return fmt.Errorf("inspect file security: %w", err)
+		return Evidence{}, fmt.Errorf("inspect file security: %w", err)
 	}
 	ownerSID := strings.ToUpper(strings.TrimSpace(metadata.OwnerSID))
 	if ownerSID != adminsSID && ownerSID != systemSID {
-		return fmt.Errorf("owner SID %q is not Administrators or SYSTEM", metadata.OwnerSID)
+		return Evidence{}, fmt.Errorf("owner SID %q is not Administrators or SYSTEM", metadata.OwnerSID)
 	}
 	if len(metadata.UnsafeWriteSIDs) > 0 {
 		names := metadata.UnsafeWriteNames
 		if len(names) == 0 {
 			names = metadata.UnsafeWriteSIDs
 		}
-		return fmt.Errorf("file is writable by standard users: %s", strings.Join(names, ", "))
+		return Evidence{}, fmt.Errorf("file is writable by standard users: %s", strings.Join(names, ", "))
 	}
 
 	signature, err := inspectAuthenticode(path)
 	if err != nil {
-		return fmt.Errorf("inspect Authenticode signature: %w", err)
+		return Evidence{}, fmt.Errorf("inspect Authenticode signature: %w", err)
 	}
 	if err := validateSignature(signature, signerAllowlist); err != nil {
-		return err
+		return Evidence{}, err
 	}
-
-	return nil
+	endingIdentity, err := fileIdentityFromOpenFile(file)
+	if err != nil {
+		return Evidence{}, fmt.Errorf("reinspect executable identity: %w", err)
+	}
+	if endingIdentity != identity {
+		return Evidence{}, fmt.Errorf("executable identity changed during verification")
+	}
+	return Evidence{
+		Identity: identity, SHA256: actualHash, AuthenticodeStatus: signature.Status,
+		AuthenticodeSubject: signature.Subject, AuthenticodeThumbprint: signature.Thumbprint,
+	}, nil
 }
 
 func openRegularFileNoReparse(path string) (*os.File, error) {

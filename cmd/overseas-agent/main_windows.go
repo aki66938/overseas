@@ -203,9 +203,11 @@ func buildService() (*serviceHandler, error) {
 			_ = recorder.Close()
 		}
 	}()
-	verify := func(path string) error {
-		return coreverify.Verify(path, bootstrap.CoreSHA256, bootstrap.SignerAllowlist)
+	verifier, err := buildCoreVerifier(bootstrap)
+	if err != nil {
+		return nil, err
 	}
+	verify := verifier.Verify
 	process := &supervisedCore{verifyExecutable: verify}
 	network, err := agent.NewWindowsNetworkManager(bootstrap.Policy, networkStatePath, agent.WithWindowsTraceSink(recorder))
 	if err != nil {
@@ -230,6 +232,10 @@ func buildService() (*serviceHandler, error) {
 	}
 	keepRecorder = true
 	return handler, nil
+}
+
+func buildCoreVerifier(bootstrap bootstrapConfig) (*coreverify.CachedVerifier, error) {
+	return coreverify.NewCachedVerifier(bootstrap.CoreSHA256, bootstrap.SignerAllowlist)
 }
 
 func loadCredential(ctx context.Context, reference accessmodel.CredentialRef) (agent.Credential, error) {
