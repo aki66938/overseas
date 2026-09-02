@@ -227,7 +227,7 @@ type WindowsPreparedRule struct {
     InterfaceGuid      string   `json:"InterfaceGuid,omitempty"`
     InterfaceAlias     string   `json:"InterfaceAlias,omitempty"`
     Protocol           string   `json:"Protocol"`
-    LocalPorts         []string `json:"LocalPorts,omitempty"`
+    RemotePorts        []string `json:"RemotePorts,omitempty"`
     RemoteAddressesSHA string   `json:"RemoteAddressesSHA"`
     Emergency          bool     `json:"Emergency"`
     ExpectedEnabled    bool     `json:"ExpectedEnabled"`

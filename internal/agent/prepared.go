@@ -59,8 +59,9 @@ type WindowsPreparedRule struct {
 	Name               string   `json:"Name"`
 	InterfaceGuid      string   `json:"InterfaceGuid,omitempty"`
 	InterfaceAlias     string   `json:"InterfaceAlias,omitempty"`
+	InterfaceAliases   []string `json:"InterfaceAliases,omitempty"`
 	Protocol           string   `json:"Protocol"`
-	LocalPorts         []string `json:"LocalPorts,omitempty"`
+	RemotePorts        []string `json:"RemotePorts,omitempty"`
 	RemoteAddressesSHA string   `json:"RemoteAddressesSHA"`
 	Emergency          bool     `json:"Emergency"`
 	ExpectedEnabled    bool     `json:"ExpectedEnabled"`
@@ -169,8 +170,10 @@ func canonicalizeWindowsPreparedState(state *WindowsPreparedState) {
 	})
 	state.Rules = append([]WindowsPreparedRule(nil), state.Rules...)
 	for index := range state.Rules {
-		state.Rules[index].LocalPorts = append([]string(nil), state.Rules[index].LocalPorts...)
-		sort.Strings(state.Rules[index].LocalPorts)
+		state.Rules[index].RemotePorts = append([]string(nil), state.Rules[index].RemotePorts...)
+		sort.Strings(state.Rules[index].RemotePorts)
+		state.Rules[index].InterfaceAliases = append([]string(nil), state.Rules[index].InterfaceAliases...)
+		sort.Strings(state.Rules[index].InterfaceAliases)
 	}
 	sort.Slice(state.Rules, func(i, j int) bool { return state.Rules[i].Name < state.Rules[j].Name })
 }

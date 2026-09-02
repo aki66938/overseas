@@ -1,8 +1,31 @@
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repo 'scripts\windows\verify-client-network-transaction.ps1'
 $integrationPath = Join-Path $repo 'internal\agent\network_windows_integration_test.go'
+$firewallPoolPath = Join-Path $repo 'internal\agent\firewall_pool_windows.go'
 
 Describe 'Client LocalSystem network transaction gate' {
+    It 'defines materialized exact-name prepared firewall operations' {
+        Test-Path -LiteralPath $firewallPoolPath -PathType Leaf | Should Be $true
+        $source = Get-Content -LiteralPath $firewallPoolPath -Raw
+        foreach ($literal in @(
+            'firewall_prepare',
+            'firewall_enable',
+            'firewall_verify',
+            'firewall_disable',
+            'firewall_audit',
+            'Get-NetFirewallAddressFilter',
+            'Get-NetFirewallPortFilter',
+            'Get-NetFirewallInterfaceFilter',
+            '-PolicyStore ActiveStore',
+            '$rules = @(Get-NetFirewallRule',
+            'foreach ($name in @($i.FirewallRuleNames))'
+        )) {
+            $source | Should Match ([regex]::Escape($literal))
+        }
+        $source | Should Not Match 'Get-NetFirewallRule[^\r\n]*\|[^\r\n]*Remove-NetFirewallRule'
+        $source | Should Not Match 'Get-NetFirewallRule[^\r\n]*\|[^\r\n]*Disable-NetFirewallRule'
+    }
+
     It 'exists and parses in Windows PowerShell 5.1' {
         Test-Path -LiteralPath $scriptPath -PathType Leaf | Should Be $true
         $tokens = $null

@@ -32,15 +32,20 @@ import (
 )
 
 const (
-	networkOperationCapture   = "capture"
-	networkOperationScan      = "scan"
-	networkOperationBlock     = "block"
-	networkOperationVerify    = "verify"
-	networkOperationEmergency = "emergency"
-	networkOperationReady     = "ready"
-	networkOperationActivate  = "activate"
-	networkOperationRestore   = "restore"
-	networkOperationResidue   = "residue"
+	networkOperationCapture         = "capture"
+	networkOperationScan            = "scan"
+	networkOperationBlock           = "block"
+	networkOperationVerify          = "verify"
+	networkOperationEmergency       = "emergency"
+	networkOperationReady           = "ready"
+	networkOperationActivate        = "activate"
+	networkOperationRestore         = "restore"
+	networkOperationResidue         = "residue"
+	networkOperationFirewallPrepare = "firewall_prepare"
+	networkOperationFirewallEnable  = "firewall_enable"
+	networkOperationFirewallVerify  = "firewall_verify"
+	networkOperationFirewallDisable = "firewall_disable"
+	networkOperationFirewallAudit   = "firewall_audit"
 
 	windowsTUNInterface           = "RegenBioOverseasAccess"
 	windowsTUNAddress             = "172.19.0.1/30"
@@ -210,6 +215,14 @@ func networkStage(operation string) string {
 		return traceevent.StageNetworkRestore
 	case networkOperationResidue:
 		return traceevent.StageResidueVerify
+	case networkOperationFirewallPrepare:
+		return traceevent.StageFirewallPrepare
+	case networkOperationFirewallEnable:
+		return traceevent.StageFirewallEnable
+	case networkOperationFirewallVerify, networkOperationFirewallAudit:
+		return traceevent.StageFirewallVerify
+	case networkOperationFirewallDisable:
+		return traceevent.StageNetworkRestore
 	default:
 		return traceevent.StageLoggingDegraded
 	}
@@ -291,6 +304,9 @@ type windowsNetworkInput struct {
 	BlockedRemoteAddresses    []string                   `json:"BlockedRemoteAddresses,omitempty"`
 	DNSBlockedRemoteAddresses []string                   `json:"DNSBlockedRemoteAddresses,omitempty"`
 	ProtectedAdapters         []WindowsAdapterIdentity   `json:"ProtectedAdapters,omitempty"`
+	PreparedRules             []WindowsPreparedRule      `json:"PreparedRules,omitempty"`
+	PreparedGeneration        uint64                     `json:"PreparedGeneration,omitempty"`
+	RuleDefinitionVersion     int                        `json:"RuleDefinitionVersion,omitempty"`
 	TUNInterface              string                     `json:"TUNInterface,omitempty"`
 	TUNAddress                string                     `json:"TUNAddress,omitempty"`
 	TUNDNS                    string                     `json:"TUNDNS,omitempty"`
@@ -1462,15 +1478,20 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 }
 
 var networkPowerShellScripts = map[string]string{
-	networkOperationCapture:   captureNetworkPowerShell,
-	networkOperationScan:      scanNetworkPowerShell,
-	networkOperationBlock:     blockNetworkPowerShell,
-	networkOperationVerify:    verifyNetworkPowerShell,
-	networkOperationEmergency: emergencyNetworkPowerShell,
-	networkOperationReady:     readyNetworkPowerShell,
-	networkOperationActivate:  activateNetworkPowerShell,
-	networkOperationRestore:   restoreNetworkPowerShell,
-	networkOperationResidue:   residueNetworkPowerShell,
+	networkOperationCapture:         captureNetworkPowerShell,
+	networkOperationScan:            scanNetworkPowerShell,
+	networkOperationBlock:           blockNetworkPowerShell,
+	networkOperationVerify:          verifyNetworkPowerShell,
+	networkOperationEmergency:       emergencyNetworkPowerShell,
+	networkOperationReady:           readyNetworkPowerShell,
+	networkOperationActivate:        activateNetworkPowerShell,
+	networkOperationRestore:         restoreNetworkPowerShell,
+	networkOperationResidue:         residueNetworkPowerShell,
+	networkOperationFirewallPrepare: preparedFirewallPreparePowerShell,
+	networkOperationFirewallEnable:  preparedFirewallEnablePowerShell,
+	networkOperationFirewallVerify:  preparedFirewallVerifyPowerShell,
+	networkOperationFirewallDisable: preparedFirewallDisablePowerShell,
+	networkOperationFirewallAudit:   preparedFirewallAuditPowerShell,
 }
 
 const residueNetworkPowerShell = `$managedRules = @(Get-NetFirewallRule -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue).Count
@@ -1677,16 +1698,39 @@ foreach ($adapter in @($i.ProtectedAdapters)) {
 Assert-Rule ([string]$i.FirewallRuleNames[3]) 'UDP' @('53') @($i.DNSBlockedRemoteAddresses) ''
 Assert-Rule ([string]$i.FirewallRuleNames[4]) 'TCP' @('53') @($i.DNSBlockedRemoteAddresses) ''`
 
-const emergencyNetworkPowerShell = `$remote = @($i.BlockedRemoteAddresses)
-$dnsRemote = @($i.DNSBlockedRemoteAddresses)
-function Test-ManagedRule([string]$name) {
-  $existing = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
+const emergencyNetworkPowerShell = preparedFirewallPowerShellHelpers + `$remote = @($i.BlockedRemoteAddresses)
+$prepared = @($i.PreparedRules)
+if ($prepared.Count -ne 0) {
+  if ([int]$i.RuleDefinitionVersion -ne 2 -or [uint64]$i.PreparedGeneration -eq 0) { throw 'prepared_firewall: invalid emergency generation.' }
+  $candidates = @($prepared | Where-Object { [bool]$_.Emergency })
+  if ($candidates.Count -ne 1) { throw 'prepared_firewall: emergency rule is ambiguous.' }
+  $expected = $candidates[0]
+  $name = [string]$expected.Name
+  $existing = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
   if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
-  return ($existing.Count -eq 1)
+  if ($existing.Count -eq 0) {
+    New-NetFirewallRule -PolicyStore PersistentStore -Name $name -DisplayName $name -Group $i.FirewallGroup -Description (Get-PreparedDescription $expected) -Direction Outbound -Action Block -Protocol Any -RemoteAddress @(Get-PreparedRemote $expected) -InterfaceAlias @(Get-PreparedAliases $expected) -Profile Any -Enabled True | Out-Null
+  } else {
+    $currentEnabled = [string]$existing[0].Enabled
+    if ($currentEnabled -ne 'True' -and $currentEnabled -ne 'False') { throw 'prepared_firewall: invalid emergency enabled state.' }
+    Assert-PreparedRule $expected 'PersistentStore' $currentEnabled
+    if ($currentEnabled -eq 'False') { Enable-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop }
+  }
+  Assert-PreparedRule $expected 'ActiveStore' 'True'
+  [pscustomobject]@{EmergencyEnabled=$true;PreparedGeneration=[uint64]$i.PreparedGeneration}|ConvertTo-Json -Compress
+  return
 }
-if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[5]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[5] -DisplayName $i.FirewallRuleNames[5] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol Any -RemoteAddress $remote -Profile Any | Out-Null }
-if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[3]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[3] -DisplayName $i.FirewallRuleNames[3] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }
-if (-not (Test-ManagedRule ([string]$i.FirewallRuleNames[4]))) { New-NetFirewallRule -Name $i.FirewallRuleNames[4] -DisplayName $i.FirewallRuleNames[4] -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol TCP -RemotePort 53 -RemoteAddress $dnsRemote -Profile Any | Out-Null }`
+$name = [string]$i.FirewallRuleNames[5]
+$existing = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and [string]$existing[0].Group -ne [string]$i.FirewallGroup)) { throw 'Firewall rule name collision.' }
+if ($existing.Count -eq 0) {
+  New-NetFirewallRule -PolicyStore PersistentStore -Name $name -DisplayName $name -Group $i.FirewallGroup -Direction Outbound -Action Block -Protocol Any -RemoteAddress $remote -Profile Any -Enabled True | Out-Null
+} else {
+  Enable-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop
+}
+$active = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $name -ErrorAction SilentlyContinue)
+if ($active.Count -ne 1 -or [string]$active[0].Enabled -ne 'True' -or [string]$active[0].Group -ne [string]$i.FirewallGroup) { throw 'Emergency firewall rule did not become active.' }
+[pscustomobject]@{EmergencyEnabled=$true}|ConvertTo-Json -Compress`
 
 const readyNetworkPowerShell = `$deadline = [DateTime]::UtcNow.AddSeconds(2)
 do {
