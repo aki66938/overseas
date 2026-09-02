@@ -359,7 +359,9 @@ func rawPipeTransaction(t *testing.T, server *PipeServer, frame string) (Respons
 		_, _ = io.WriteString(clientSide, frame)
 		close(writeDone)
 	}()
-	_ = clientSide.SetReadDeadline(time.Now().Add(time.Second))
+	// The race detector slows JSON sanitize/serialize well past one second
+	// for maximum-size trace batches; keep a generous budget.
+	_ = clientSide.SetReadDeadline(time.Now().Add(5 * time.Second))
 	line, err := bufio.NewReader(clientSide).ReadBytes('\n')
 	_ = clientSide.Close()
 	<-writeDone
@@ -391,7 +393,9 @@ func rawPipeLine(t *testing.T, server *PipeServer, request Request) ([]byte, boo
 		_, _ = clientSide.Write(append(data, '\n'))
 		close(writeDone)
 	}()
-	_ = clientSide.SetReadDeadline(time.Now().Add(time.Second))
+	// The race detector slows JSON sanitize/serialize well past one second
+	// for maximum-size trace batches; keep a generous budget.
+	_ = clientSide.SetReadDeadline(time.Now().Add(5 * time.Second))
 	line, err := bufio.NewReader(clientSide).ReadBytes('\n')
 	_ = clientSide.Close()
 	<-writeDone
