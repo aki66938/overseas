@@ -14,6 +14,17 @@ const windowsPreparedStateVersion = 1
 
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// Typed boundary errors let the controller report tun_not_found only when the
+// deadline truly expired without the adapter, tun_identity_mismatch when a
+// candidate adapter exists but fails ownership validation, and distinguish
+// runtime monitor causes without recasting them as TUN errors.
+var (
+	errTUNNotFound         = errors.New("fixed TUN adapter did not appear before the deadline")
+	errTUNIdentityMismatch = errors.New("fixed TUN adapter identity does not match the owned definition")
+	errNetworkChanged      = errors.New("network fingerprint changed while connected")
+	errFirewallAudit       = errors.New("prepared firewall audit failed")
+)
+
 type PreparedNetwork struct {
 	Generation   uint64 `json:"generation"`
 	Fingerprint  string `json:"fingerprint"`

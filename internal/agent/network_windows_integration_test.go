@@ -59,8 +59,15 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	defer writeLiveTraceEvidence(t, os.Getenv(liveTraceEvidenceEnvironment), manager, recorder, evidence)
 	ctx, cancel := context.WithTimeout(traceevent.WithGeneration(context.Background(), 1), 120*time.Second)
 	defer cancel()
-	snapshot, err := manager.Capture(ctx)
+	prepared, err := manager.Prepare(ctx)
 	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := manager.Capture(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.EnableProtection(ctx, prepared); err != nil {
 		t.Fatal(err)
 	}
 	evidence.BeforePublish = recorder.Batch(0, 128).Events
@@ -76,9 +83,6 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 		}
 	}()
 
-	if _, err := manager.InstallPublicTCPBlock(ctx); err != nil {
-		t.Fatal(err)
-	}
 	evidence.AfterPublish = recorder.Batch(0, 128).Events
 	if err := manager.Restore(ctx, snapshot); err != nil {
 		t.Fatal(err)
@@ -98,10 +102,9 @@ func TestLiveWindowsPowerShellProtectionTransaction(t *testing.T) {
 	evidence.AfterRestore = recorder.Batch(0, 128).Events
 	events := recorder.Batch(0, 128).Events
 	for _, stage := range []string{
-		traceevent.StageNetworkCapture,
-		traceevent.StageAdapterScan,
-		traceevent.StageFirewallPublish,
-		traceevent.StageActiveStoreVerify,
+		traceevent.StageNetworkPrepare,
+		traceevent.StageFirewallEnable,
+		traceevent.StageFirewallVerify,
 		traceevent.StageNetworkRestore,
 		traceevent.StageResidueVerify,
 	} {

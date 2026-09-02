@@ -40,6 +40,7 @@ const (
 	networkOperationReady           = "ready"
 	networkOperationActivate        = "activate"
 	networkOperationRestore         = "restore"
+	networkOperationPreparedRestore = "prepared_restore"
 	networkOperationResidue         = "residue"
 	networkOperationFirewallPrepare = "firewall_prepare"
 	networkOperationFirewallEnable  = "firewall_enable"
@@ -212,7 +213,7 @@ func networkStage(operation string) string {
 		return traceevent.StageTUNReady
 	case networkOperationActivate:
 		return traceevent.StageRouteActivation
-	case networkOperationRestore:
+	case networkOperationRestore, networkOperationPreparedRestore:
 		return traceevent.StageNetworkRestore
 	case networkOperationResidue:
 		return traceevent.StageResidueVerify
@@ -328,10 +329,11 @@ type windowsNetworkInput struct {
 }
 
 type windowsResidueCounts struct {
-	ManagedRules  int `json:"ManagedRules"`
-	ProductRoutes int `json:"ProductRoutes"`
-	ProductTUNs   int `json:"ProductTUNs"`
-	CoreProcesses int `json:"CoreProcesses"`
+	ManagedRules          int `json:"ManagedRules"`
+	DisabledPreparedRules int `json:"DisabledPreparedRules"`
+	ProductRoutes         int `json:"ProductRoutes"`
+	ProductTUNs           int `json:"ProductTUNs"`
+	CoreProcesses         int `json:"CoreProcesses"`
 }
 
 type networkRunner interface {
@@ -348,7 +350,6 @@ type WindowsNetworkManager struct {
 	mu                 sync.Mutex
 	prepareMu          sync.Mutex
 	prepareFlight      *prepareFlight
-	protectionRunMu    sync.Mutex
 	policy             accessmodel.Policy
 	statePath          string
 	runner             networkRunner
@@ -361,9 +362,6 @@ type WindowsNetworkManager struct {
 	blockedPrefixes    []string
 	dnsBlockedPrefixes []string
 	current            *WindowsNetworkSnapshot
-	protectionInterval time.Duration
-	protectionCancel   context.CancelFunc
-	protectionDone     chan struct{}
 	trace              traceevent.Sink
 	lastOwnedTUN       *WindowsTUNIdentity
 	lastOwnedRoutes    []WindowsOwnedRoute
@@ -449,7 +447,6 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		nodeAddresses:      nodeAddresses,
 		blockedPrefixes:    blocked,
 		dnsBlockedPrefixes: dnsBlocked,
-		protectionInterval: 250 * time.Millisecond,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -459,176 +456,11 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 	return manager, nil
 }
 
-func (m *WindowsNetworkManager) Capture(ctx context.Context, prepared ...PreparedNetwork) (any, error) {
-	if len(prepared) > 1 {
-		return nil, errors.New("capture accepts at most one prepared generation")
-	}
-	if len(prepared) == 1 {
-		return m.capturePrepared(ctx, prepared[0])
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current != nil {
-		return nil, errors.New("network state is already captured")
-	}
-	if _, err := m.store.Load(m.statePath); err == nil {
-		return nil, errors.New("unreconciled network snapshot exists")
-	} else if !errors.Is(err, errSnapshotNotFound) {
-		return nil, err
-	}
-	input := windowsNetworkInput{
-		FirewallRuleNames: windowsFirewallRuleNames(),
-		FirewallGroup:     windowsFirewallGroup,
-		TUNRoutePrefixes:  []string{"0.0.0.0/1", "128.0.0.0/1"},
-		TUNInterface:      windowsTUNInterface,
-		TUNAddress:        windowsTUNAddress,
-		NodeAddresses:     append([]string(nil), m.nodeAddresses...),
-	}
-	output, err := m.run(ctx, networkOperationCapture, input)
-	if err != nil {
-		return nil, err
-	}
-	var snapshot WindowsNetworkSnapshot
-	if err := json.Unmarshal(output, &snapshot); err != nil {
-		return nil, fmt.Errorf("decode captured network state: %w", err)
-	}
-	snapshot.Version = 1
-	snapshot.RouteMetric = windowsOwnedRouteMetric
-	snapshot.OwnershipPhase = windowsSnapshotPhaseCaptured
-	snapshot.BlockedRemoteAddresses = append([]string(nil), m.blockedPrefixes...)
-	snapshot.DNSBlockedRemoteAddresses = append([]string(nil), m.dnsBlockedPrefixes...)
-	if err := sealWindowsSnapshot(&snapshot); err != nil {
-		return nil, err
-	}
-	if err := m.validateWindowsSnapshot(snapshot); err != nil {
-		return nil, err
-	}
-	if len(snapshot.OwnedFirewallRulesPresent) != 0 {
-		return nil, errors.New("owned firewall rule names already exist")
-	}
-	if len(snapshot.ConflictingTUNRoutes) != 0 {
-		return nil, errors.New("managed TUN route prefixes already exist")
-	}
-	if snapshot.TUNAliasPresent || snapshot.TUNAddressPresent {
-		return nil, errors.New("fixed TUN alias or address already exists before core launch")
-	}
-	if err := m.store.Save(m.statePath, snapshot); err != nil {
-		return nil, err
-	}
-	m.current = &snapshot
-	return snapshot, nil
-}
-
-func (m *WindowsNetworkManager) InstallPublicTCPBlock(ctx context.Context) (<-chan error, error) {
-	m.mu.Lock()
-	if m.current == nil {
-		m.mu.Unlock()
-		return nil, errors.New("network state was not captured")
-	}
-	if m.protectionCancel != nil {
-		m.mu.Unlock()
-		return nil, errors.New("network protection monitor is already running")
-	}
-	failures := make(chan error, 1)
-	m.current.OwnershipPhase = windowsSnapshotPhaseProtected
-	if err := sealWindowsSnapshot(m.current); err != nil {
-		m.mu.Unlock()
-		return nil, err
-	}
-	if err := m.store.Save(m.statePath, *m.current); err != nil {
-		m.mu.Unlock()
-		return nil, err
-	}
-	m.mu.Unlock()
-	if err := m.reconcileProtection(ctx); err != nil {
-		emergencyContext, cancelEmergency := context.WithTimeout(context.WithoutCancel(ctx), windowsEmergencyTimeout)
-		defer cancelEmergency()
-		return nil, errors.Join(err, m.installEmergencyProtection(emergencyContext))
-	}
-	monitorContext, cancel := context.WithCancel(traceevent.WithGeneration(context.Background(), traceevent.GenerationFromContext(ctx)))
-	done := make(chan struct{})
-	m.mu.Lock()
-	m.protectionCancel = cancel
-	m.protectionDone = done
-	interval := m.protectionInterval
-	m.mu.Unlock()
-	go m.monitorProtection(monitorContext, done, interval, failures)
-	return failures, nil
-}
-
-func (m *WindowsNetworkManager) monitorProtection(ctx context.Context, done chan struct{}, interval time.Duration, failures chan<- error) {
-	defer close(done)
-	if interval <= 0 {
-		interval = 250 * time.Millisecond
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := m.reconcileProtection(ctx); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				err = errors.Join(err, m.installEmergencyProtection(ctx))
-				select {
-				case failures <- err:
-				default:
-				}
-				return
-			}
-		}
-	}
-}
-
-func (m *WindowsNetworkManager) reconcileProtection(ctx context.Context) error {
-	m.protectionRunMu.Lock()
-	defer m.protectionRunMu.Unlock()
-	output, err := m.run(ctx, networkOperationScan, windowsNetworkInput{})
-	if err != nil {
-		return err
-	}
-	var adapters []WindowsAdapterIdentity
-	if err := json.Unmarshal(output, &adapters); err != nil {
-		return fmt.Errorf("decode adapter scan: %w", err)
-	}
-	if len(adapters) == 0 {
-		return errors.New("adapter scan returned no protectable adapters")
-	}
-	m.mu.Lock()
-	if m.current == nil {
-		m.mu.Unlock()
-		return errors.New("network state was not captured")
-	}
-	ownedTUN := m.current.OwnedTUN
-	interfaces := append([]WindowsInterfaceSnapshot(nil), m.current.Interfaces...)
-	m.mu.Unlock()
-	protected := make([]WindowsAdapterIdentity, 0, len(adapters))
-	for _, adapter := range adapters {
-		if adapter.InterfaceIndex <= 0 || strings.TrimSpace(adapter.InterfaceGuid) == "" || strings.TrimSpace(adapter.InterfaceAlias) == "" {
-			return errors.New("adapter scan returned an invalid identity")
-		}
-		if ownedTUN != nil && adapter.InterfaceIndex == ownedTUN.InterfaceIndex && strings.EqualFold(adapter.InterfaceGuid, ownedTUN.InterfaceGuid) && adapter.InterfaceAlias == ownedTUN.InterfaceAlias {
-			continue
-		}
-		protected = append(protected, adapter)
-	}
-	sort.Slice(protected, func(left, right int) bool { return protected[left].InterfaceGuid < protected[right].InterfaceGuid })
-	input := windowsNetworkInput{
-		Interfaces:                interfaces,
-		FirewallRuleNames:         windowsFirewallRuleNames(),
-		FirewallGroup:             windowsFirewallGroup,
-		BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
-		DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
-		ProtectedAdapters:         protected,
-	}
-	if _, err = m.run(ctx, networkOperationBlock, input); err != nil {
-		return err
-	}
-	_, err = m.run(ctx, networkOperationVerify, input)
-	return err
+// Capture validates the prepared generation, re-reads the lightweight native
+// fingerprint, and atomically persists the active snapshot without touching
+// the firewall.
+func (m *WindowsNetworkManager) Capture(ctx context.Context, prepared PreparedNetwork) (any, error) {
+	return m.capturePrepared(ctx, prepared)
 }
 
 func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) error {
@@ -642,55 +474,17 @@ func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) 
 	return err
 }
 
+// armEmergencyProtection installs the legacy fail-closed emergency block once.
+// The prepared pool arms its own emergency rule through the prepared path;
+// this remains for legacy snapshots without a prepared generation.
 func (m *WindowsNetworkManager) armEmergencyProtection(ctx context.Context) error {
-	installErr := m.installEmergencyProtection(context.WithoutCancel(ctx))
-	// The ordinary adapter monitor and emergency monitor share one lifecycle.
-	// Install first, then transition monitors; the ordinary reconciliation
-	// explicitly preserves an emergency rule installed during this handoff.
-	m.stopProtection()
-	m.mu.Lock()
-	monitorContext, cancel := context.WithCancel(traceevent.WithGeneration(context.Background(), traceevent.GenerationFromContext(ctx)))
-	done := make(chan struct{})
-	m.protectionCancel = cancel
-	m.protectionDone = done
-	interval := m.protectionInterval
-	m.mu.Unlock()
-	go func() {
-		defer close(done)
-		if interval <= 0 {
-			interval = 250 * time.Millisecond
-		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-monitorContext.Done():
-				return
-			case <-ticker.C:
-				_ = m.installEmergencyProtection(monitorContext)
-			}
-		}
-	}()
-	return installErr
+	emergencyContext, cancelEmergency := context.WithTimeout(context.WithoutCancel(ctx), windowsEmergencyTimeout)
+	defer cancelEmergency()
+	return m.installEmergencyProtection(emergencyContext)
 }
 
 func windowsFirewallRuleNames() []string {
 	return []string{windowsTCPBlockRule, windowsQUICBlockRule, windowsUDPBlockRule, windowsDNSUDPBlockRule, windowsDNSTCPBlockRule, windowsEmergencyBlockRule}
-}
-
-func (m *WindowsNetworkManager) stopProtection() {
-	m.mu.Lock()
-	cancel := m.protectionCancel
-	done := m.protectionDone
-	m.protectionCancel = nil
-	m.protectionDone = nil
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
-		<-done
-	}
 }
 
 func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
@@ -707,16 +501,27 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	output, err := m.run(ctx, networkOperationReady, input)
 	if err != nil {
 		m.mu.Unlock()
-		return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		var diagnostic stagedDiagnosticError
+		detail := ""
+		if errors.As(err, &diagnostic) {
+			detail = diagnostic.DiagnosticDetail()
+		}
+		if strings.Contains(detail, "More than one fixed TUN adapter") {
+			return fmt.Errorf("%w: %s", errTUNIdentityMismatch, detail)
+		}
+		return fmt.Errorf("%w: %s", errTUNNotFound, err.Error())
 	}
 	var identity WindowsTUNIdentity
 	if err := json.Unmarshal(output, &identity); err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("decode TUN identity: %w", err)
+		return fmt.Errorf("%w: decode TUN identity: %v", errTUNIdentityMismatch, err)
 	}
 	if err := validateTUNIdentity(identity, m.current.BaselineAdapterGuids); err != nil {
 		m.mu.Unlock()
-		return err
+		return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
 	}
 	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes))
 	for _, value := range m.blockedPrefixes {
@@ -761,6 +566,36 @@ func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 	return err
 }
 
+// preparedStateForSnapshot resolves the sealed prepared state matching the
+// snapshot generation from memory or the durable store.
+func (m *WindowsNetworkManager) preparedStateForSnapshot(snapshot WindowsNetworkSnapshot) (WindowsPreparedState, bool) {
+	m.mu.Lock()
+	cached := m.prepared
+	m.mu.Unlock()
+	if cached != nil && cached.Generation == snapshot.PreparedGeneration {
+		return *cached, true
+	}
+	return m.loadSealedPreparedState(func(state WindowsPreparedState) bool {
+		return state.Generation == snapshot.PreparedGeneration
+	})
+}
+
+// loadSealedPreparedState loads and validates the durable prepared state and
+// accepts it when the predicate matches.
+func (m *WindowsNetworkManager) loadSealedPreparedState(accept func(WindowsPreparedState) bool) (WindowsPreparedState, bool) {
+	state, err := m.preparedStore.Load(m.preparedPath)
+	if err != nil {
+		return WindowsPreparedState{}, false
+	}
+	if err := validateWindowsPreparedState(state); err != nil {
+		return WindowsPreparedState{}, false
+	}
+	if !accept(state) {
+		return WindowsPreparedState{}, false
+	}
+	return state, true
+}
+
 func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	snapshot, err := asWindowsSnapshot(value)
 	if err != nil {
@@ -774,8 +609,17 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	if err := m.validateWindowsSnapshot(snapshot); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
-	m.stopProtection()
-	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
+	if snapshot.PreparedGeneration != 0 {
+		state, ok := m.preparedStateForSnapshot(snapshot)
+		if ok {
+			if err := m.restorePreparedTransaction(ctx, snapshot, state); err != nil {
+				return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
+			}
+		} else {
+			err := errors.New("prepared generation for the active snapshot is unavailable")
+			return errors.Join(err, m.armEmergencyProtection(ctx))
+		}
+	} else if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	if err := m.store.Delete(m.statePath); err != nil {
@@ -788,11 +632,27 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	return nil
 }
 
+// restorePreparedTransaction reverses one prepared connection: DNS, interface
+// metrics, and owned routes return to the captured baseline; the prepared
+// pool is disabled (never deleted) inside the same PowerShell transaction.
+func (m *WindowsNetworkManager) restorePreparedTransaction(ctx context.Context, snapshot WindowsNetworkSnapshot, state WindowsPreparedState) error {
+	input := m.restorationInput(snapshot)
+	input.PreparedRules = append([]WindowsPreparedRule(nil), state.Rules...)
+	input.PreparedGeneration = state.Generation
+	input.RuleDefinitionVersion = state.RuleDefinitionVersion
+	input.RestoreInterfaces = snapshot.OwnershipPhase == windowsSnapshotPhaseTUNOwned || snapshot.OwnershipPhase == windowsSnapshotPhaseProtected
+	_, err := m.run(ctx, networkOperationPreparedRestore, input)
+	return err
+}
+
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 	m.mu.Lock()
 	snapshot, err := m.store.Load(m.statePath)
 	if errors.Is(err, errSnapshotNotFound) {
 		m.mu.Unlock()
+		if state, ok := m.loadSealedPreparedState(func(WindowsPreparedState) bool { return true }); ok {
+			return m.disablePreparedFirewall(ctx, state)
+		}
 		input := windowsNetworkInput{
 			FirewallRuleNames:         windowsFirewallRuleNames(),
 			FirewallGroup:             windowsFirewallGroup,
@@ -812,8 +672,16 @@ func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
 	if err := m.validateWindowsSnapshot(snapshot); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
-	m.stopProtection()
-	if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
+	if snapshot.PreparedGeneration != 0 {
+		if state, ok := m.preparedStateForSnapshot(snapshot); ok {
+			if err := m.restorePreparedTransaction(ctx, snapshot, state); err != nil {
+				return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
+			}
+		} else {
+			err := errors.New("prepared generation for the leftover snapshot is unavailable")
+			return errors.Join(err, m.armEmergencyProtection(ctx))
+		}
+	} else if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
 		return errors.Join(err, m.armEmergencyProtection(ctx))
 	}
 	if err := m.store.Delete(m.statePath); err != nil {
@@ -870,10 +738,11 @@ func (m *WindowsNetworkManager) Residue(ctx context.Context) (traceevent.Residue
 	if err := json.Unmarshal(output, &counts); err != nil {
 		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, fmt.Errorf("decode residue counts: %w", err), nil)
 	}
-	if counts.ManagedRules < 0 || counts.ProductRoutes < 0 || counts.ProductTUNs < 0 || counts.CoreProcesses < 0 {
+	if counts.ManagedRules < 0 || counts.DisabledPreparedRules < 0 || counts.ProductRoutes < 0 || counts.ProductTUNs < 0 || counts.CoreProcesses < 0 {
 		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, errors.New("negative residue count"), nil)
 	}
 	residue.ManagedRules = counts.ManagedRules
+	residue.DisabledPreparedRules = counts.DisabledPreparedRules
 	residue.ProductRoutes = counts.ProductRoutes
 	residue.ProductTUNs = counts.ProductTUNs
 	residue.CoreProcesses = counts.CoreProcesses
@@ -1506,6 +1375,7 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationReady:           readyNetworkPowerShell,
 	networkOperationActivate:        activateNetworkPowerShell,
 	networkOperationRestore:         restoreNetworkPowerShell,
+	networkOperationPreparedRestore: preparedRestoreNetworkPowerShell,
 	networkOperationResidue:         residueNetworkPowerShell,
 	networkOperationFirewallPrepare: preparedFirewallPreparePowerShell,
 	networkOperationFirewallEnable:  preparedFirewallEnablePowerShell,
@@ -1514,7 +1384,10 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationFirewallAudit:   preparedFirewallAuditPowerShell,
 }
 
-const residueNetworkPowerShell = `$managedRules = @(Get-NetFirewallRule -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue).Count
+const residueNetworkPowerShell = `$allRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
+$enabledRules = @($allRules | Where-Object { [string]$_.Enabled -eq 'True' })
+$managedRules = $enabledRules.Count
+$disabledPreparedRules = $allRules.Count - $enabledRules.Count
 $routeKeys = @{}
 foreach ($owned in @($i.OwnedRoutes)) {
   $family = [string]$owned.AddressFamily
@@ -1543,6 +1416,7 @@ $coreProcesses = @(Get-CimInstance Win32_Process -Filter "Name='sing-box.exe'" -
 }).Count
 [pscustomobject]@{
   ManagedRules = [int]$managedRules
+  DisabledPreparedRules = [int]$disabledPreparedRules
   ProductRoutes = [int]$routeKeys.Count
   ProductTUNs = [int]$tunKeys.Count
   CoreProcesses = [int]$coreProcesses
@@ -1821,5 +1695,54 @@ foreach ($route in @($i.OwnedRoutes | Where-Object { $null -ne $_ })) {
 Get-NetFirewallRule -Group $i.FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 } catch {
   Install-Emergency
+  throw
+}`
+
+// preparedRestoreNetworkPowerShell reverses one prepared connection in a
+// single transaction: baseline DNS/metrics/routes return first, then the
+// exact-name prepared pool is disabled (never deleted). Any failure enables
+// the pool's own emergency rule before rethrowing, so the machine stays
+// fail-closed.
+const preparedRestoreNetworkPowerShell = `function Enable-PreparedEmergency {
+  $emergency = @($i.PreparedRules | Where-Object { [bool]$_.Emergency })
+  if ($emergency.Count -ne 1) { throw 'prepared_restore: emergency rule is ambiguous.' }
+  $name = [string]$emergency[0].Name
+  $rule = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+  if ($rule.Count -eq 1 -and [string]$rule[0].Group -eq [string]$i.FirewallGroup) { Enable-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop }
+}
+try {
+if ([bool]$i.RestoreInterfaces) {
+$allAdapters = @(Get-NetAdapter -IncludeHidden)
+foreach ($physical in @($i.Interfaces)) {
+  $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
+  if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
+  if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
+  $currentIndex = [int]$matches[0].InterfaceIndex
+  if ([bool]$physical.DNSAutomatic) {
+    Set-DnsClientServerAddress -InterfaceIndex $currentIndex -ResetServerAddresses
+  } else {
+    Set-DnsClientServerAddress -InterfaceIndex $currentIndex -ServerAddresses @($physical.DNSServers)
+  }
+  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $currentIndex -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric
+}
+}
+foreach ($route in @($i.OwnedRoutes | Where-Object { $null -ne $_ })) {
+  Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+}
+$rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
+$ownedNames = @($i.PreparedRules | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
+$unknown = @($rules | Where-Object { $ownedNames -notcontains [string]$_.Name })
+if ($unknown.Count -ne 0) { throw 'prepared_restore: refusing to disable unknown product-group rule.' }
+foreach ($name in @($ownedNames)) {
+  $rule = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$name) -ErrorAction SilentlyContinue)
+  if ($rule.Count -eq 0) { continue }
+  if ($rule.Count -ne 1 -or [string]$rule[0].Group -ne [string]$i.FirewallGroup) { throw ('prepared_restore: cannot disable unowned rule ' + [string]$name + '.') }
+  Disable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$name) -ErrorAction Stop
+}
+$enabled = @($ownedNames | ForEach-Object { @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $_ -ErrorAction SilentlyContinue) } | Where-Object { [string]$_.Enabled -eq 'True' })
+if ($enabled.Count -ne 0) { throw 'prepared_restore: an owned rule remains enabled.' }
+[pscustomobject]@{DisabledCount=[int]$ownedNames.Count}|ConvertTo-Json -Compress
+} catch {
+  Enable-PreparedEmergency
   throw
 }`

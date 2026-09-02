@@ -323,13 +323,12 @@ func TestWindowsNetworkFastPathUsesNativeCaptureThenExactEnableAndVerify(t *test
 
 func TestWindowsNetworkWaitTUNReadyDoesNotReconcileFirewall(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
-	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, &fakeSnapshotStore{})
+	store := &fakeSnapshotStore{}
+	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Capture(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -307,7 +307,8 @@ func newRequestID() (string, error) {
 
 func isApprovedState(state string) bool {
 	switch accessmodel.ConnectionState(state) {
-	case accessmodel.StateDisconnected, accessmodel.StateConnecting, accessmodel.StateConnected, accessmodel.StateFailed:
+	case accessmodel.StatePreparing, accessmodel.StatePrepared, accessmodel.StateConnecting,
+		accessmodel.StateConnected, accessmodel.StateRestoring, accessmodel.StateFailedSafe:
 		return true
 	default:
 		return false
@@ -323,14 +324,21 @@ func isApprovedErrorCode(code string) bool {
 		agent.ErrorInvalidBinary,
 		agent.ErrorCredential,
 		agent.ErrorExpiredCredential,
+		agent.ErrorPreparedUnavailable,
+		agent.ErrorNetworkChanged,
 		agent.ErrorNetworkCapture,
+		agent.ErrorFirewallEnable,
+		agent.ErrorFirewallVerify,
 		agent.ErrorPublicTCPBlock,
 		agent.ErrorRender,
 		agent.ErrorCoreStart,
 		agent.ErrorCoreNotReady,
+		agent.ErrorTUNNotFound,
+		agent.ErrorTUNIdentityMismatch,
 		agent.ErrorRouteActivationFailed,
 		agent.ErrorReadinessLost,
 		agent.ErrorRestoreFailed,
+		agent.ErrorAutomaticRestore,
 		agent.ErrorCanceled,
 		ErrorUnauthorized:
 		return true

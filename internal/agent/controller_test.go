@@ -57,14 +57,16 @@ func TestControllerSuccessfulConnectEmitsOrderedStagePairs(t *testing.T) {
 		"request_received:state",
 		"policy_validation:started", "policy_validation:succeeded",
 		"binary_verification:started", "binary_verification:succeeded",
+		"network_prepare:started", "network_prepare:succeeded",
 		"network_capture:started", "network_capture:succeeded",
-		"firewall_publish:started", "firewall_publish:succeeded",
+		"firewall_enable:started", "firewall_enable:succeeded",
 		"config_render:started", "config_render:succeeded",
 		"core_start:started", "core_start:succeeded",
 		"core_ready:started", "core_ready:succeeded",
 		"tun_ready:started", "tun_ready:succeeded",
 		"route_activation:started", "route_activation:succeeded",
 		"connected:state",
+		"monitor_start:started", "monitor_start:succeeded",
 	}
 	if got := traceKeys(events); !equalStrings(got, want) {
 		t.Fatalf("trace order = %v, want %v", got, want)
@@ -80,22 +82,55 @@ func TestControllerSuccessfulConnectEmitsOrderedStagePairs(t *testing.T) {
 	controller.Disconnect(context.Background())
 }
 
+func TestControllerConnectRunsStepsInFailClosedOrder(t *testing.T) {
+	trace := &callTrace{}
+	network := newFakeNetwork()
+	network.trace = trace
+	process := newFakeProcess()
+	process.trace = trace
+	controller := newTestController(network, process, testDependencies(trace))
+
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+	want := []string{"validate", "verify", "credential", "prepare", "capture", "enable", "render", "write", "start", "ready", "tun", "activate", "monitor"}
+	if calls := trace.calls(); !equalStrings(calls, want) {
+		t.Fatalf("call order = %v, want %v", calls, want)
+	}
+	controller.Disconnect(context.Background())
+}
+
+func TestControllerConnectedStatusCarriesPhaseStepsAndElapsed(t *testing.T) {
+	network := newFakeNetwork()
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+
+	got := controller.Connect(context.Background())
+
+	if got.State != accessmodel.StateConnected || got.Phase != PhaseConnected || got.Step != 6 || got.TotalSteps != connectionTotalSteps {
+		t.Fatalf("connected status = %#v", got)
+	}
+	if got.ElapsedMS < 0 {
+		t.Fatalf("negative elapsed time: %#v", got)
+	}
+	controller.Disconnect(context.Background())
+}
+
 func TestControllerEmptyNetworkDetailStillEmitsDiagnosticFailure(t *testing.T) {
 	sink := &recordingTraceSink{}
 	network := newFakeNetwork()
-	network.blockErr = testDiagnosticError{stage: traceevent.StageFirewallPublish}
+	network.enableErr = testDiagnosticError{stage: traceevent.StageFirewallEnable}
 	deps := testDependencies(nil)
 	deps.Trace = sink
 	controller := newTestController(network, newFakeProcess(), deps)
 
 	status := controller.Connect(context.Background())
 	diagnostics := controller.Diagnostics()
-	if status.ErrorCode != ErrorPublicTCPBlock || diagnostics.Stage != traceevent.StageFirewallPublish || diagnostics.Detail == "" {
+	if status.ErrorCode != ErrorFirewallEnable || diagnostics.Stage != traceevent.StageFirewallEnable || diagnostics.Detail == "" {
 		t.Fatalf("status=%#v diagnostics=%#v", status, diagnostics)
 	}
 	last := sink.eventsCopy()[len(sink.eventsCopy())-1]
-	if last.Stage != traceevent.StageFirewallPublish || last.Event != traceevent.EventFailed || last.Detail == "" {
-		t.Fatalf("last trace = %#v", last)
+	if last.Stage != traceevent.StageAutomaticRestore || last.Event != traceevent.EventSucceeded {
+		t.Fatalf("last trace = %#v, want automatic restore success", last)
 	}
 }
 
@@ -111,7 +146,7 @@ func TestControllerDisconnectRequiresZeroResidue(t *testing.T) {
 	network.mu.Lock()
 	network.residue = traceevent.Residue{ManagedRules: 1}
 	network.mu.Unlock()
-	if status := controller.Disconnect(context.Background()); status.ErrorCode != ErrorRestoreFailed {
+	if status := controller.Disconnect(context.Background()); status.ErrorCode != ErrorAutomaticRestore || status.State != accessmodel.StateFailedSafe {
 		t.Fatalf("Disconnect() = %#v", status)
 	}
 	events := sink.eventsCopy()
@@ -128,7 +163,7 @@ func TestControllerRecoveryEmitsRecoveryAndZeroResidue(t *testing.T) {
 	network := newFakeNetwork()
 	network.blocked = true
 	controller := newTestController(network, newFakeProcess(), deps)
-	if status := controller.Recover(context.Background()); status.State != accessmodel.StateDisconnected {
+	if status := controller.Recover(context.Background()); status.State != accessmodel.StatePrepared {
 		t.Fatalf("Recover() = %#v", status)
 	}
 	keys := traceKeys(sink.eventsCopy())
@@ -147,7 +182,7 @@ func TestControllerTraceGenerationsAreIsolatedAndPaired(t *testing.T) {
 	if status := controller.Connect(context.Background()); status.State != accessmodel.StateConnected {
 		t.Fatalf("Connect() = %#v", status)
 	}
-	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StateDisconnected {
+	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StatePrepared {
 		t.Fatalf("Disconnect() = %#v", status)
 	}
 	events := sink.eventsCopy()
@@ -178,15 +213,15 @@ func TestControllerCanceledBeforeWorkHasOnlyStateEvent(t *testing.T) {
 
 func TestControllerSuccessfulRestoreClearsPreviousDiagnostic(t *testing.T) {
 	network := newFakeNetwork()
-	network.blockErr = testDiagnosticError{stage: traceevent.StageFirewallPublish, detail: "publish failed"}
+	network.enableErr = testDiagnosticError{stage: traceevent.StageFirewallEnable, detail: "enable failed"}
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
-	if status := controller.Connect(context.Background()); status.ErrorCode != ErrorPublicTCPBlock {
+	if status := controller.Connect(context.Background()); status.ErrorCode != ErrorFirewallEnable {
 		t.Fatalf("Connect() = %#v", status)
 	}
 	network.mu.Lock()
-	network.blockErr = nil
+	network.enableErr = nil
 	network.mu.Unlock()
-	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StateDisconnected {
+	if status := controller.Disconnect(context.Background()); status.State != accessmodel.StatePrepared {
 		t.Fatalf("Disconnect() = %#v", status)
 	}
 	if diagnostics := controller.Diagnostics(); diagnostics.Stage != "" || diagnostics.Detail != "" {
@@ -194,7 +229,7 @@ func TestControllerSuccessfulRestoreClearsPreviousDiagnostic(t *testing.T) {
 	}
 }
 
-func TestControllerConnectFailureRemainsFailClosed(t *testing.T) {
+func TestControllerConnectFailureRunsAutomaticRestore(t *testing.T) {
 	trace := &callTrace{}
 	network := newFakeNetwork()
 	network.trace = trace
@@ -205,43 +240,148 @@ func TestControllerConnectFailureRemainsFailClosed(t *testing.T) {
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || !network.isBlocked() {
-		t.Fatalf("Connect() = %#v, blocked = %v", got, network.isBlocked())
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorCoreStart {
+		t.Fatalf("Connect() = %#v", got)
 	}
-	if network.restoreCalls != 0 {
+	if network.isBlocked() || network.isActive() {
+		t.Fatalf("failed connect left network mutated: blocked = %v", network.isBlocked())
+	}
+	if network.restoreCalls != 1 {
 		t.Fatalf("failed connect restored the network %d times", network.restoreCalls)
 	}
-	want := []string{"validate", "verify", "credential", "capture", "block", "render", "write", "start"}
+	want := []string{"validate", "verify", "credential", "prepare", "capture", "enable", "render", "write", "start", "restore"}
 	if calls := trace.calls(); !equalStrings(calls, want) {
 		t.Fatalf("call order = %v, want %v", calls, want)
 	}
 }
 
+func TestControllerConnectFailureMatrixReturnsPreparedWithOriginalCode(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*fakeNetwork, *fakeProcess, *Dependencies)
+		code string
+	}{
+		{
+			name: "prepare failure",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.prepareErr = errors.New("baseline unreadable") },
+			code: ErrorPreparedUnavailable,
+		},
+		{
+			name: "capture failure",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.captureErr = errors.New("fingerprint drifted") },
+			code: ErrorNetworkCapture,
+		},
+		{
+			name: "firewall enable failure",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.enableErr = errors.New("enable rejected") },
+			code: ErrorFirewallEnable,
+		},
+		{
+			name: "firewall verify failure",
+			mut: func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) {
+				n.enableErr = testDiagnosticError{stage: traceevent.StageFirewallVerify, detail: "definition drifted"}
+			},
+			code: ErrorFirewallVerify,
+		},
+		{
+			name: "config render failure",
+			mut: func(_ *fakeNetwork, _ *fakeProcess, d *Dependencies) {
+				d.RenderConfig = func(accessmodel.Policy, Credential) ([]byte, error) { return nil, errors.New("render failed") }
+			},
+			code: ErrorRender,
+		},
+		{
+			name: "core start failure",
+			mut:  func(_ *fakeNetwork, p *fakeProcess, _ *Dependencies) { p.startErr = errors.New("launch failed") },
+			code: ErrorCoreStart,
+		},
+		{
+			name: "core ready failure",
+			mut:  func(_ *fakeNetwork, p *fakeProcess, _ *Dependencies) { p.readyErr = errors.New("core never ready") },
+			code: ErrorCoreNotReady,
+		},
+		{
+			name: "tun not found",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.readyErr = fmt.Errorf("%w: deadline", errTUNNotFound) },
+			code: ErrorTUNNotFound,
+		},
+		{
+			name: "tun identity mismatch",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.readyErr = fmt.Errorf("%w: wrong guid", errTUNIdentityMismatch) },
+			code: ErrorTUNIdentityMismatch,
+		},
+		{
+			name: "route activation failure",
+			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.activateErr = errors.New("route failed") },
+			code: ErrorRouteActivationFailed,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			network := newFakeNetwork()
+			process := newFakeProcess()
+			deps := testDependencies(nil)
+			testCase.mut(network, process, &deps)
+			controller := newTestController(network, process, deps)
+
+			got := controller.Connect(context.Background())
+
+			if got.State != accessmodel.StatePrepared || got.ErrorCode != testCase.code {
+				t.Fatalf("Connect() = %#v, want prepared/%s", got, testCase.code)
+			}
+			if network.isBlocked() || network.isActive() {
+				t.Fatalf("network left mutated: blocked=%v active=%v", network.isBlocked(), network.isActive())
+			}
+			if !network.lastResidue().IsZero() {
+				t.Fatalf("active residue was not proven zero: %#v", network.lastResidue())
+			}
+			if testCase.code == ErrorPreparedUnavailable || testCase.code == ErrorNetworkCapture {
+				if network.restoreCalls != 0 {
+					t.Fatalf("pre-mutation failure ran Restore() %d times", network.restoreCalls)
+				}
+				if network.reconcileCalls != 1 {
+					t.Fatalf("pre-mutation failure must reconcile once, got %d", network.reconcileCalls)
+				}
+			} else if network.restoreCalls != 1 {
+				t.Fatalf("Restore() calls = %d, want 1", network.restoreCalls)
+			}
+			// A failed attempt returns to the connectable prepared state; a
+			// fresh controller must connect without a preliminary Disconnect.
+			fixed := newFakeNetwork()
+			fixedController := newTestController(fixed, newFakeProcess(), testDependencies(nil))
+			if retry := fixedController.Connect(context.Background()); retry.State != accessmodel.StateConnected {
+				t.Fatalf("retry after prepared failure = %#v", retry)
+			}
+			fixedController.Disconnect(context.Background())
+		})
+	}
+}
+
 func TestControllerPublishesTypedNetworkDiagnosticWithoutChangingStatus(t *testing.T) {
 	network := newFakeNetwork()
-	network.blockErr = testDiagnosticError{stage: "firewall_publish", detail: "The specified interface was not found."}
+	network.enableErr = testDiagnosticError{stage: "firewall_enable", detail: "The specified interface was not found."}
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
 
 	status := controller.Connect(context.Background())
 	diagnostics := controller.Diagnostics()
 
-	if status.ErrorCode != ErrorPublicTCPBlock || status.Message != "无法建立防泄漏保护" {
+	if status.ErrorCode != ErrorFirewallEnable || status.Message != "无法启用防泄漏保护" {
 		t.Fatalf("status = %#v", status)
 	}
-	if diagnostics.Stage != "firewall_publish" || diagnostics.Detail != "The specified interface was not found." {
+	if diagnostics.Stage != "firewall_enable" || diagnostics.Detail != "The specified interface was not found." {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 }
 
 func TestControllerSynthesizesIncompleteNetworkDiagnostic(t *testing.T) {
 	network := newFakeNetwork()
-	network.blockErr = testDiagnosticError{detail: "unclassified native failure"}
+	network.enableErr = testDiagnosticError{detail: "unclassified native failure"}
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
 
 	_ = controller.Connect(context.Background())
 	diagnostics := controller.Diagnostics()
 
-	if diagnostics.Stage != traceevent.StageFirewallPublish || diagnostics.Detail == "" {
+	if diagnostics.Stage != traceevent.StageFirewallEnable || diagnostics.Detail == "" {
 		t.Fatalf("incomplete diagnostics were not synthesized: %#v", diagnostics)
 	}
 }
@@ -262,7 +402,7 @@ func TestControllerDisconnectRestoresCapturedState(t *testing.T) {
 	}
 	got := controller.Disconnect(context.Background())
 
-	if got.State != accessmodel.StateDisconnected || network.isBlocked() || network.isActive() {
+	if got.State != accessmodel.StatePrepared || network.isBlocked() || network.isActive() {
 		t.Fatalf("Disconnect() = %#v, blocked = %v, active = %v", got, network.isBlocked(), network.isActive())
 	}
 	if network.restoreCalls != 1 {
@@ -306,7 +446,7 @@ func TestControllerDisconnectCancelsConnectAndRestores(t *testing.T) {
 	got := controller.Disconnect(context.Background())
 	connectStatus := <-connectDone
 
-	if got.State != accessmodel.StateDisconnected {
+	if got.State != accessmodel.StatePrepared {
 		t.Fatalf("Disconnect() = %#v", got)
 	}
 	if connectStatus.State == accessmodel.StateConnected {
@@ -322,10 +462,10 @@ func TestControllerRecoveryReconcilesServiceRestartOnce(t *testing.T) {
 	network.blocked = true
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
 
-	if got := controller.Recover(context.Background()); got.State != accessmodel.StateDisconnected {
+	if got := controller.Recover(context.Background()); got.State != accessmodel.StatePrepared {
 		t.Fatalf("Recover() = %#v", got)
 	}
-	if got := controller.Recover(context.Background()); got.State != accessmodel.StateDisconnected {
+	if got := controller.Recover(context.Background()); got.State != accessmodel.StatePrepared {
 		t.Fatalf("second Recover() = %#v", got)
 	}
 	if network.reconcileCalls != 1 || network.isBlocked() {
@@ -341,11 +481,11 @@ func TestControllerInvalidPolicyFailsBeforeNetworkMutation(t *testing.T) {
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorInvalidPolicy {
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorInvalidPolicy {
 		t.Fatalf("Connect() = %#v", got)
 	}
-	if network.captureCalls != 0 || network.blockCalls != 0 {
-		t.Fatalf("network mutated after invalid policy: capture=%d block=%d", network.captureCalls, network.blockCalls)
+	if network.captureCalls != 0 || network.enableCalls != 0 {
+		t.Fatalf("network mutated after invalid policy: capture=%d enable=%d", network.captureCalls, network.enableCalls)
 	}
 }
 
@@ -357,11 +497,11 @@ func TestControllerBadBinaryFailsBeforeNetworkMutation(t *testing.T) {
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorInvalidBinary {
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorInvalidBinary {
 		t.Fatalf("Connect() = %#v", got)
 	}
-	if network.captureCalls != 0 || network.blockCalls != 0 {
-		t.Fatalf("network mutated after invalid binary: capture=%d block=%d", network.captureCalls, network.blockCalls)
+	if network.captureCalls != 0 || network.enableCalls != 0 {
+		t.Fatalf("network mutated after invalid binary: capture=%d enable=%d", network.captureCalls, network.enableCalls)
 	}
 }
 
@@ -375,11 +515,11 @@ func TestControllerExpiredCredentialFailsBeforeNetworkMutation(t *testing.T) {
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorExpiredCredential {
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorExpiredCredential {
 		t.Fatalf("Connect() = %#v", got)
 	}
-	if network.captureCalls != 0 || network.blockCalls != 0 {
-		t.Fatalf("network mutated after expired credential: capture=%d block=%d", network.captureCalls, network.blockCalls)
+	if network.captureCalls != 0 || network.enableCalls != 0 {
+		t.Fatalf("network mutated after expired credential: capture=%d enable=%d", network.captureCalls, network.enableCalls)
 	}
 }
 
@@ -409,7 +549,7 @@ func TestControllerSchemaTwoConnectDoesNotLoadCredential(t *testing.T) {
 	controller.Disconnect(context.Background())
 }
 
-func TestControllerReadinessLossTransitionsToFailedAndKeepsBlock(t *testing.T) {
+func TestControllerReadinessLossAutoRestoresToPrepared(t *testing.T) {
 	network := newFakeNetwork()
 	process := newFakeProcess()
 	controller := newTestController(network, process, testDependencies(nil))
@@ -418,13 +558,16 @@ func TestControllerReadinessLossTransitionsToFailedAndKeepsBlock(t *testing.T) {
 	}
 
 	process.exit(errors.New("core exited"))
-	waitForState(t, controller, accessmodel.StateFailed)
+	waitForState(t, controller, accessmodel.StatePrepared)
 
-	if !network.isBlocked() {
-		t.Fatal("public TCP block was removed after readiness loss")
+	if network.isBlocked() || network.isActive() {
+		t.Fatalf("readiness loss left network mutated: blocked=%v active=%v", network.isBlocked(), network.isActive())
 	}
 	if got := controller.Status(); got.ErrorCode != ErrorReadinessLost {
 		t.Fatalf("Status() = %#v", got)
+	}
+	if network.restoreCalls != 1 {
+		t.Fatalf("Restore() calls = %d, want 1", network.restoreCalls)
 	}
 }
 
@@ -453,16 +596,16 @@ func TestControllerRecoveryRetriesRestorationIdempotently(t *testing.T) {
 	}
 	network.restoreErrors = []error{errors.New("temporary restore failure"), nil}
 
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("first Disconnect() = %#v", got)
 	}
 	if !network.isBlocked() {
 		t.Fatal("failed restore unexpectedly removed the public TCP block")
 	}
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateDisconnected {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StatePrepared {
 		t.Fatalf("second Disconnect() = %#v", got)
 	}
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateDisconnected {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StatePrepared {
 		t.Fatalf("third Disconnect() = %#v", got)
 	}
 	if network.restoreCalls != 2 {
@@ -482,7 +625,7 @@ func TestControllerStopFailureRetainsLeakBlockAndSkipsRestore(t *testing.T) {
 
 	got := controller.Disconnect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Disconnect() = %#v", got)
 	}
 	if network.restoreCalls != 0 {
@@ -491,7 +634,7 @@ func TestControllerStopFailureRetainsLeakBlockAndSkipsRestore(t *testing.T) {
 	if !network.isBlocked() {
 		t.Fatal("process stop failure removed the public leak block")
 	}
-	if retry := controller.Connect(context.Background()); retry.State != accessmodel.StateFailed || retry.ErrorCode != ErrorRestoreFailed {
+	if retry := controller.Connect(context.Background()); retry.State != accessmodel.StateFailedSafe || retry.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Connect() after unproven stop = %#v", retry)
 	}
 	if process.startCalls != 1 {
@@ -507,12 +650,12 @@ func TestControllerStartupFailureWithUnprovenStopRetainsLeakBlock(t *testing.T) 
 	process.stopProven = false
 	controller := newTestController(network, process, testDependencies(nil))
 
-	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRouteActivationFailed {
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Connect() = %#v", got)
 	}
 	got := controller.Disconnect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Disconnect() = %#v", got)
 	}
 	if network.restoreCalls != 0 || !network.isBlocked() {
@@ -532,16 +675,16 @@ func TestControllerStartCleanupFailureRetainsProtectionAndDeniesRelaunch(t *test
 	process.stopProven = false
 	controller := newTestController(network, process, testDependencies(nil))
 
-	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorCoreStart {
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Connect() = %#v", got)
 	}
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Disconnect() = %#v", got)
 	}
 	if network.restoreCalls != 0 || !network.isBlocked() {
 		t.Fatalf("start cleanup failure restored protection: restore=%d blocked=%v", network.restoreCalls, network.isBlocked())
 	}
-	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailedSafe {
 		t.Fatalf("relaunch after unproven start = %#v", got)
 	}
 	if process.startCalls != 1 {
@@ -557,12 +700,15 @@ func TestControllerRestoresAfterExitErrorWhenTreeTerminationIsProven(t *testing.
 		t.Fatalf("Connect() = %#v", got)
 	}
 	process.exit(errors.New("unexpected exit"))
-	waitForState(t, controller, accessmodel.StateFailed)
+	waitForState(t, controller, accessmodel.StatePrepared)
 
 	got := controller.Disconnect(context.Background())
 
-	if got.State != accessmodel.StateDisconnected || network.restoreCalls != 1 || network.isBlocked() {
-		t.Fatalf("Disconnect() = %#v restore=%d blocked=%v", got, network.restoreCalls, network.isBlocked())
+	if got.State != accessmodel.StatePrepared || network.isBlocked() {
+		t.Fatalf("Disconnect() = %#v blocked=%v", got, network.isBlocked())
+	}
+	if network.restoreCalls != 1 {
+		t.Fatalf("Restore() calls = %d, want exactly the automatic restore", network.restoreCalls)
 	}
 }
 
@@ -577,12 +723,12 @@ func TestControllerUnexpectedExitCleanupFailureDeniesReconnectAndRestore(t *test
 		t.Fatalf("Connect() = %#v", got)
 	}
 	process.exit(errors.New("unexpected exit with cleanup failure"))
-	waitForState(t, controller, accessmodel.StateFailed)
+	waitForState(t, controller, accessmodel.StateFailedSafe)
 
-	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("reconnect after unproven unexpected exit = %#v", got)
 	}
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRestoreFailed {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateFailedSafe || got.ErrorCode != ErrorAutomaticRestore {
 		t.Fatalf("Disconnect() = %#v", got)
 	}
 	if network.restoreCalls != 0 || !network.isBlocked() || process.startCalls != 1 {
@@ -606,9 +752,10 @@ func TestControllerDisconnectRaceWithUnexpectedExitHasOneTerminalOwner(t *testin
 		}()
 		close(start)
 		process.exit(errors.New("unexpected exit during disconnect"))
-		if got := <-result; got.State != accessmodel.StateDisconnected {
+		if got := <-result; got.State != accessmodel.StatePrepared {
 			t.Fatalf("Disconnect() = %#v", got)
 		}
+		waitForState(t, controller, accessmodel.StatePrepared)
 		if network.restoreCalls != 1 || network.isBlocked() {
 			t.Fatalf("terminal race restore=%d blocked=%v", network.restoreCalls, network.isBlocked())
 		}
@@ -627,7 +774,7 @@ func TestControllerDelayedGenerationACannotConsumeGenerationBTermination(t *test
 		t.Fatalf("Connect(A) = %#v", got)
 	}
 	oldFailures := network.failures
-	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StateDisconnected {
+	if got := controller.Disconnect(context.Background()); got.State != accessmodel.StatePrepared {
 		t.Fatalf("Disconnect(A) = %#v", got)
 	}
 	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
@@ -649,29 +796,41 @@ func TestControllerDelayedGenerationACannotConsumeGenerationBTermination(t *test
 		t.Fatalf("delayed generation A event stopped B %d times", bStops)
 	}
 	b.exit(errors.New("generation B exited"))
-	waitForState(t, controller, accessmodel.StateFailed)
+	waitForState(t, controller, accessmodel.StatePrepared)
 	if got := controller.Status(); got.ErrorCode != ErrorReadinessLost {
 		t.Fatalf("Status(B) = %#v", got)
 	}
 }
 
-func TestControllerTUNIdentityFailureRemainsFailClosed(t *testing.T) {
+func TestControllerTUNIdentityFailureAutoRestores(t *testing.T) {
 	network := newFakeNetwork()
-	network.readyErr = errors.New("new TUN identity was not proven")
+	network.readyErr = fmt.Errorf("%w: identity was not proven", errTUNIdentityMismatch)
 	process := newFakeProcess()
 	controller := newTestController(network, process, testDependencies(nil))
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorCoreNotReady {
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorTUNIdentityMismatch {
 		t.Fatalf("Connect() = %#v", got)
 	}
-	if !network.isBlocked() || network.activateCalls != 0 || process.stopCalls != 1 {
+	if network.isBlocked() || network.isActive() || network.activateCalls != 0 || process.stopCalls != 1 {
 		t.Fatalf("identity failure state: blocked=%v activate=%d stop=%d", network.isBlocked(), network.activateCalls, process.stopCalls)
 	}
 }
 
-func TestControllerProtectionReconciliationFailureStopsCoreAndRetainsBlock(t *testing.T) {
+func TestControllerTUNNotFoundMapsToDedicatedCode(t *testing.T) {
+	network := newFakeNetwork()
+	network.readyErr = fmt.Errorf("%w: deadline expired", errTUNNotFound)
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+
+	got := controller.Connect(context.Background())
+
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorTUNNotFound {
+		t.Fatalf("Connect() = %#v", got)
+	}
+}
+
+func TestControllerMonitorFailureAutoRestores(t *testing.T) {
 	network := newFakeNetwork()
 	process := newFakeProcess()
 	controller := newTestController(network, process, testDependencies(nil))
@@ -680,21 +839,39 @@ func TestControllerProtectionReconciliationFailureStopsCoreAndRetainsBlock(t *te
 	}
 
 	network.failures <- errors.New("adapter reconciliation failed")
-	waitForState(t, controller, accessmodel.StateFailed)
+	waitForState(t, controller, accessmodel.StatePrepared)
 
-	if !network.isBlocked() || network.restoreCalls != 0 || process.stopCalls != 1 {
-		t.Fatalf("protection failure state: blocked=%v restore=%d stop=%d", network.isBlocked(), network.restoreCalls, process.stopCalls)
+	if network.isBlocked() || network.isActive() || network.restoreCalls != 1 || process.stopCalls != 1 {
+		t.Fatalf("monitor failure state: blocked=%v restore=%d stop=%d", network.isBlocked(), network.restoreCalls, process.stopCalls)
+	}
+	if got := controller.Status(); got.ErrorCode != ErrorReadinessLost {
+		t.Fatalf("Status() = %#v", got)
 	}
 }
 
-func TestControllerRouteActivationFailureRemainsFailClosed(t *testing.T) {
+func TestControllerNetworkChangedMonitorFailureKeepsCausalCode(t *testing.T) {
+	network := newFakeNetwork()
+	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
+	if got := controller.Connect(context.Background()); got.State != accessmodel.StateConnected {
+		t.Fatalf("Connect() = %#v", got)
+	}
+
+	network.failures <- fmt.Errorf("%w: fingerprint drift", errNetworkChanged)
+	waitForState(t, controller, accessmodel.StatePrepared)
+
+	if got := controller.Status(); got.ErrorCode != ErrorNetworkChanged {
+		t.Fatalf("Status() = %#v", got)
+	}
+}
+
+func TestControllerRouteActivationFailureAutoRestores(t *testing.T) {
 	network := newFakeNetwork()
 	network.activateErr = errors.New("route failed")
 	controller := newTestController(network, newFakeProcess(), testDependencies(nil))
 
 	got := controller.Connect(context.Background())
 
-	if got.State != accessmodel.StateFailed || got.ErrorCode != ErrorRouteActivationFailed || !network.isBlocked() {
+	if got.State != accessmodel.StatePrepared || got.ErrorCode != ErrorRouteActivationFailed || network.isBlocked() {
 		t.Fatalf("Connect() = %#v, blocked = %v", got, network.isBlocked())
 	}
 }
@@ -777,24 +954,40 @@ type fakeNetwork struct {
 	blocked        bool
 	active         bool
 	captureCalls   int
-	blockCalls     int
+	enableCalls    int
+	monitorCalls   int
 	activateCalls  int
 	restoreCalls   int
 	reconcileCalls int
 	restoreErrors  []error
 	activateErr    error
 	readyErr       error
-	blockErr       error
+	prepareErr     error
+	captureErr     error
+	enableErr      error
 	log            []string
 	trace          *callTrace
 	failures       chan error
 	residue        traceevent.Residue
+	lastResidueVar traceevent.Residue
 	residueErr     error
 }
 
 func newFakeNetwork() *fakeNetwork { return &fakeNetwork{failures: make(chan error, 1)} }
 
-func (f *fakeNetwork) Capture(context.Context, ...PreparedNetwork) (any, error) {
+func (f *fakeNetwork) Prepare(context.Context) (PreparedNetwork, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.trace != nil {
+		f.trace.record("prepare")
+	}
+	if f.prepareErr != nil {
+		return PreparedNetwork{}, f.prepareErr
+	}
+	return PreparedNetwork{Generation: 1, Fingerprint: "fingerprint", AdapterCount: 7, RuleCount: 10}, nil
+}
+
+func (f *fakeNetwork) Capture(_ context.Context, _ PreparedNetwork) (any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.captureCalls++
@@ -802,21 +995,34 @@ func (f *fakeNetwork) Capture(context.Context, ...PreparedNetwork) (any, error) 
 	if f.trace != nil {
 		f.trace.record("capture")
 	}
+	if f.captureErr != nil {
+		return nil, f.captureErr
+	}
 	return "original", nil
 }
 
-func (f *fakeNetwork) InstallPublicTCPBlock(context.Context) (<-chan error, error) {
+func (f *fakeNetwork) EnableProtection(_ context.Context, _ PreparedNetwork) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.failures = make(chan error, 1)
-	f.blockCalls++
+	f.enableCalls++
 	f.blocked = true
-	f.log = append(f.log, "block")
+	f.log = append(f.log, "enable")
 	if f.trace != nil {
-		f.trace.record("block")
+		f.trace.record("enable")
 	}
-	if f.blockErr != nil {
-		return nil, f.blockErr
+	if f.enableErr != nil {
+		return f.enableErr
+	}
+	return nil
+}
+
+func (f *fakeNetwork) StartMonitor(_ context.Context, _ PreparedNetwork) (<-chan error, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.monitorCalls++
+	f.failures = make(chan error, 1)
+	if f.trace != nil {
+		f.trace.record("monitor")
 	}
 	return f.failures, nil
 }
@@ -838,6 +1044,9 @@ func (f *fakeNetwork) ActivateTUNRoutes(context.Context) error {
 func (f *fakeNetwork) WaitTUNReady(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.trace != nil {
+		f.trace.record("tun")
+	}
 	return f.readyErr
 }
 
@@ -873,11 +1082,17 @@ func (f *fakeNetwork) Reconcile(context.Context) error {
 func (f *fakeNetwork) Residue(context.Context) (traceevent.Residue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastResidueVar = f.residue
 	return f.residue, f.residueErr
 }
 
 func (f *fakeNetwork) isBlocked() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.blocked }
 func (f *fakeNetwork) isActive() bool  { f.mu.Lock(); defer f.mu.Unlock(); return f.active }
+func (f *fakeNetwork) lastResidue() traceevent.Residue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastResidueVar
+}
 
 type fakeProcess struct {
 	mu              sync.Mutex

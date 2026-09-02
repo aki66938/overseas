@@ -100,7 +100,7 @@ func TestTraceUsesExactIncrementalRequestAndAcceptsBatch(t *testing.T) {
 		}
 		message, _ := json.Marshal(batch)
 		_ = json.NewEncoder(serverConn).Encode(agent.Response{
-			ID: "request-fixed", State: string(accessmodel.StateFailed), Message: string(message),
+			ID: "request-fixed", State: string(accessmodel.StatePrepared), Message: string(message),
 		})
 	}()
 	client := New(
@@ -146,7 +146,7 @@ func TestTraceRejectsMalformedOrUnapprovedBatch(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: string(accessmodel.StateFailed), Message: test.message})
+			client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: string(accessmodel.StatePrepared), Message: test.message})
 			if _, err := client.Trace(context.Background(), 7, 12); !errors.Is(err, ErrInvalidResponseShape) {
 				t.Fatalf("Trace() error = %v", err)
 			}
@@ -209,7 +209,7 @@ func TestStatusRejectsUnknownStateAndErrorCode(t *testing.T) {
 		},
 		{
 			name:     "unknown error code",
-			response: agent.Response{ID: "request-fixed", State: string(accessmodel.StateFailed), ErrorCode: "not-approved"},
+			response: agent.Response{ID: "request-fixed", State: string(accessmodel.StatePrepared), ErrorCode: "not-approved"},
 			wantErr:  ErrInvalidResponseCode,
 		},
 	}
@@ -235,8 +235,8 @@ func TestDiagnosticsRejectsOversizedResponse(t *testing.T) {
 }
 
 func TestDiagnosticsAcceptsBoundedNetworkStageAndDetail(t *testing.T) {
-	message := `{"state":"failed","error_code":"public_tcp_block_failed","message":"无法建立防泄漏保护","generation":2,"stage":"firewall_publish","detail":"The specified interface was not found."}`
-	client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "failed", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
+	message := `{"state":"prepared","error_code":"public_tcp_block_failed","message":"无法建立防泄漏保护","generation":2,"stage":"firewall_publish","detail":"The specified interface was not found."}`
+	client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "prepared", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
 
 	diagnostics, err := client.Diagnostics(context.Background())
 	if err != nil {
@@ -249,8 +249,8 @@ func TestDiagnosticsAcceptsBoundedNetworkStageAndDetail(t *testing.T) {
 
 func TestDiagnosticsAcceptsEveryApprovedTraceStage(t *testing.T) {
 	for _, stage := range traceevent.ApprovedStages() {
-		message := `{"state":"failed","error_code":"public_tcp_block_failed","message":"失败","generation":2,"stage":"` + stage + `","detail":"bounded failure"}`
-		client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "failed", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
+		message := `{"state":"prepared","error_code":"public_tcp_block_failed","message":"失败","generation":2,"stage":"` + stage + `","detail":"bounded failure"}`
+		client := newTestClientWithResponse(t, agent.Response{ID: "request-fixed", State: "prepared", ErrorCode: agent.ErrorPublicTCPBlock, Message: message})
 		if _, err := client.Diagnostics(context.Background()); err != nil {
 			t.Fatalf("stage %q rejected: %v", stage, err)
 		}
@@ -259,9 +259,9 @@ func TestDiagnosticsAcceptsEveryApprovedTraceStage(t *testing.T) {
 
 func TestDiagnosticsRejectsSecretOrConfigFields(t *testing.T) {
 	tests := []string{
-		`{"id":"request-fixed","state":"failed","message":"{\"state\":\"failed\",\"generation\":1,\"secret\":\"abc\"}"}` + "\n",
-		`{"id":"request-fixed","state":"failed","message":"{\"state\":\"failed\",\"generation\":1,\"config\":{\"route\":\"direct\"}}"}` + "\n",
-		`{"id":"request-fixed","state":"failed","config":{"path":"C:\\evil.json"}}` + "\n",
+		`{"id":"request-fixed","state":"prepared","message":"{\"state\":\"failed\",\"generation\":1,\"secret\":\"abc\"}"}` + "\n",
+		`{"id":"request-fixed","state":"prepared","message":"{\"state\":\"failed\",\"generation\":1,\"config\":{\"route\":\"direct\"}}"}` + "\n",
+		`{"id":"request-fixed","state":"prepared","config":{"path":"C:\\evil.json"}}` + "\n",
 	}
 
 	for _, frame := range tests {
