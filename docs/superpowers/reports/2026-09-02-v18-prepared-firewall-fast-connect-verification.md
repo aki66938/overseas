@@ -78,6 +78,22 @@ Not executed in this session (require live LocalSystem / signing / user actions)
 - `cmd/overseas-client` is excluded from `-race` (walk library checkptr crash), noted above.
 - Pester 3.4 mock leakage forced the WhatIf preflight test to rely on the installer's wrapped manifest error; behavior is stricter than before (no locale-dependent exceptions).
 
+## Task 12 — Signed release, upgrade install, and on-box verification (executed)
+
+Automated portion completed on the designated test machine:
+
+1. **Publish:** `dist/OverseasAccessSetup-v18-RELEASE_SIGNED.msi` built from clean commit `f209f7b`; Authenticode signature `Valid`, signer `CN=RegenBio Overseas Access PoC Code Signing` (thumbprint `6A9D8BC4…EF83C15E`, expires 2026-09-30). Final SHA-256: `B46DF4F562F940E2B24FB510A9CB92051587229FBEFD35EB61793FC9AB37E4C6`.
+2. **Pre-install inventory:** one registered product (v17 0.1.0), service Stopped, empty `RegenBioOverseasAccess.Managed` group, no prepared/state files — no unknown group members.
+3. **Live upgrade findings and fixes:** the first install attempt exposed three real PowerShell 5.1 null-array bugs (JSON-omitted arrays become `$null`, and `@($null).Count` is 1): the emergency script took the prepared branch without a prepared generation, the prepare script saw a phantom "previous ledger", and rule creation passed a null `RemotePort`. All nullable JSON arrays in the firewall scripts are now `Where-Object { $null -ne $_ }`-guarded (`1cea685`, `250713c`, `f209f7b`). One Enabled orphan emergency rule left by the first failed attempt was removed after proving product-group ownership.
+4. **Final install:** `msiexec /qn` exit 0; service **Running**; recovery timeline 5.3 s (restore 2.2 s + residue proof 3.1 s) → SCM Running → background preparation completed in 23.8 s (prepare 14.1 s + deep audit 9.7 s), inside the 30 s cold budget without blocking SCM.
+5. **Post-install state:** pool = **10 rules, all Disabled** (7 per-adapter Any + 2 DNS + 1 Emergency), `prepared-network.json` present, no active snapshot, 0 product TUNs, 0 core processes — zero active residue.
+6. **Pipe protocol on-box:** raw named-pipe status query returned `{"state":"prepared","message":"普通网络已恢复"}` — the v18 state model is live end-to-end.
+
+## Remaining for the user (handoff checklist)
+
+1. Three service-side prepared preflight cycles (Connect→verify→Disconnect without overseas browsing) — intentionally not auto-run to avoid interrupting the interactive network session.
+2. Real acceptance per plan Task 12 steps 6–7: fully exit FlClash, click 连接 in the RegenBio client, verify approved overseas sites plus intranet + `172.20.9.15`, then 断开 and confirm ordinary networking returns; kill-the-core auto-restore check; three stable connects ≤ 15 s.
+
 ## Real browsing acceptance
 
-Not claimed. No real overseas-site access was performed in this session; per the plan, the user performs the Connect/Disconnect clicks and site checks after the signed MSI is installed.
+Not claimed. No real overseas-site access was performed in this session; per the plan, the user performs the Connect/Disconnect clicks and site checks.
