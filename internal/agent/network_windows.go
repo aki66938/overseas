@@ -1508,7 +1508,7 @@ $tunAliasPresent = [bool]($allAdapters | Where-Object { $_.InterfaceAlias -eq [s
 $tunAddressIP = ([string]$i.TUNAddress).Split('/')[0]
 $tunAddressPresent = [bool](Get-NetIPAddress -AddressFamily IPv4 -IPAddress $tunAddressIP -ErrorAction SilentlyContinue)
 $nodeRoutes = @()
-foreach ($node in @($i.NodeAddresses)) {
+foreach ($node in @($i.NodeAddresses | Where-Object { $null -ne $_ })) {
   $selection = @(Find-NetRoute -RemoteIPAddress ([string]$node))
   $route = @($selection | Where-Object { $_.PSObject.Properties.Name -contains 'DestinationPrefix' } | Select-Object -First 1)
   if ($route.Count -ne 1) { throw 'Could not resolve one best route for a configured node.' }
@@ -1711,10 +1711,10 @@ $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $tun.Interfa
 if ($addresses.Count -ne 1 -or $addresses[0] -ne [string]$i.TUNAddress) { throw 'Owned TUN address changed before activation.' }
 Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $i.OwnedTUN.InterfaceIndex -AutomaticMetric Disabled -InterfaceMetric 1
 Set-DnsClientServerAddress -InterfaceIndex $i.OwnedTUN.InterfaceIndex -ServerAddresses @([string]$i.TUNDNS)
-foreach ($physical in @($i.Interfaces)) {
+foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
   Set-DnsClientServerAddress -InterfaceIndex $physical.Index -ServerAddresses @([string]$i.TUNDNS)
 }
-foreach ($route in @($i.OwnedRoutes)) {
+foreach ($route in @($i.OwnedRoutes | Where-Object { $null -ne $_ })) {
   Get-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -eq [int]$route.InterfaceIndex -and $_.NextHop -eq [string]$route.NextHop -and $_.RouteMetric -eq [int]$route.RouteMetric } | Remove-NetRoute -Confirm:$false -ErrorAction Stop
   New-NetRoute -AddressFamily $route.AddressFamily -DestinationPrefix $route.DestinationPrefix -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore ActiveStore | Out-Null
 }`
@@ -1733,7 +1733,7 @@ const restoreNetworkPowerShell = `function Install-Emergency {
 try {
 if ([bool]$i.RestoreInterfaces) {
 $allAdapters = @(Get-NetAdapter -IncludeHidden)
-foreach ($physical in @($i.Interfaces)) {
+foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
   $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
   if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
   if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
@@ -1770,7 +1770,7 @@ const preparedRestoreNetworkPowerShell = `function Enable-PreparedEmergency {
 try {
 if ([bool]$i.RestoreInterfaces) {
 $allAdapters = @(Get-NetAdapter -IncludeHidden)
-foreach ($physical in @($i.Interfaces)) {
+foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
   $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
   if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
   if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
