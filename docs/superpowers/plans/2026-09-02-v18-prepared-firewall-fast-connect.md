@@ -126,7 +126,7 @@ type ipHelperAPI interface {
 }
 ```
 
-`windowsIPHelperAPI` must call `windows.GetAdaptersAddresses` with `GAA_FLAG_INCLUDE_GATEWAYS`, `windows.GetIpInterfaceTable(windows.AF_INET, ...)`, and `windows.GetIpForwardTable2(windows.AF_INET, ...)`, and must call `windows.FreeMibTable` on every successful table allocation. Convert linked-list socket addresses immediately into owned Go values.
+`windowsIPHelperAPI` must call `windows.GetAdaptersAddresses` with `GAA_FLAG_INCLUDE_GATEWAYS`, bind each returned adapter LUID through `windows.GetIpInterfaceEntry`, and call `windows.GetIpForwardTable2(windows.AF_INET, ...)`; it must call `windows.FreeMibTable` on every successful allocated route table. The LUID-bound entry call is required because the live host proved that treating the variable-length `MIB_IPINTERFACE_TABLE` as a Go slice produced conflicting duplicate indices. Convert linked-list socket addresses immediately into owned Go values.
 
 - [ ] **Step 1: Write failing pure normalization tests.** Cover shuffled API rows, duplicate DNS addresses, down/tunnel/loopback adapters, automatic/manual metrics, default routes, on-link next hops, multiple equal-cost routes, node `/32` bypass selection, stable sorting, and fingerprint change on every restore-relevant field.
 - [ ] **Step 2: Run the pure tests and observe RED.**

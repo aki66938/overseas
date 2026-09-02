@@ -23,22 +23,26 @@ type PreparedNetwork struct {
 
 type WindowsNativeAdapter struct {
 	InterfaceIndex int      `json:"InterfaceIndex"`
+	InterfaceLUID  uint64   `json:"InterfaceLUID"`
 	InterfaceGuid  string   `json:"InterfaceGuid"`
 	InterfaceAlias string   `json:"InterfaceAlias"`
 	Status         string   `json:"Status"`
 	DNSServers     []string `json:"DNSServers,omitempty"`
+	DNSAutomatic   bool     `json:"DNSAutomatic"`
 }
 
 type WindowsNativeInterface struct {
-	InterfaceIndex      int  `json:"InterfaceIndex"`
-	AutomaticMetric     bool `json:"AutomaticMetric"`
-	InterfaceMetric     int  `json:"InterfaceMetric"`
-	DisableDefaultRoute bool `json:"DisableDefaultRoute"`
+	InterfaceIndex      int    `json:"InterfaceIndex"`
+	InterfaceLUID       uint64 `json:"InterfaceLUID"`
+	AutomaticMetric     bool   `json:"AutomaticMetric"`
+	InterfaceMetric     int    `json:"InterfaceMetric"`
+	DisableDefaultRoute bool   `json:"DisableDefaultRoute"`
 }
 
 type WindowsNativeRoute struct {
 	DestinationPrefix string `json:"DestinationPrefix"`
 	InterfaceIndex    int    `json:"InterfaceIndex"`
+	InterfaceLUID     uint64 `json:"InterfaceLUID"`
 	NextHop           string `json:"NextHop"`
 	RouteMetric       int    `json:"RouteMetric"`
 	Protocol          int    `json:"Protocol"`

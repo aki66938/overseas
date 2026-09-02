@@ -327,6 +327,7 @@ type WindowsNetworkManager struct {
 	policy             accessmodel.Policy
 	statePath          string
 	runner             networkRunner
+	native             nativeNetworkReader
 	store              snapshotStore
 	nodeAddresses      []string
 	blockedPrefixes    []string
@@ -344,6 +345,10 @@ type WindowsNetworkOption func(*WindowsNetworkManager)
 
 func WithWindowsTraceSink(sink traceevent.Sink) WindowsNetworkOption {
 	return func(manager *WindowsNetworkManager) { manager.trace = sink }
+}
+
+func withWindowsNativeNetworkReader(reader nativeNetworkReader) WindowsNetworkOption {
+	return func(manager *WindowsNetworkManager) { manager.native = reader }
 }
 
 func NewWindowsNetworkManager(policy accessmodel.Policy, statePath string, options ...WindowsNetworkOption) (*WindowsNetworkManager, error) {
@@ -409,6 +414,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		policy:             clonePolicy(policy),
 		statePath:          statePath,
 		runner:             runner,
+		native:             newWindowsNativeNetworkReader(),
 		store:              store,
 		nodeAddresses:      nodeAddresses,
 		blockedPrefixes:    blocked,
