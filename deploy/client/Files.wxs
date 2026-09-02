@@ -16,7 +16,7 @@
               DisplayName="RegenBio Overseas Access Agent"
               Description="Fail-closed RegenBio overseas-access controller"
               Type="ownProcess"
-              Start="demand"
+              Start="auto"
               ErrorControl="normal"
               Account="LocalSystem"
               Vital="yes">
@@ -31,6 +31,7 @@
               Id="AgentServiceControl"
               Name="RegenBioOverseasAccessAgent"
               Stop="both"
+              Start="install"
               Remove="uninstall"
               Wait="yes" />
       </Component>

@@ -1,4 +1,4 @@
-$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repo 'scripts\windows\verify-client-firewall-interfaces.ps1'
 
 Describe 'LocalSystem client firewall interface gate' {
@@ -11,7 +11,7 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'requires absolute create-new evidence and LocalSystem identity' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('[IO.Path]::IsPathRooted($EvidencePath)'))
         $source | Should Match ([regex]::Escape('[IO.FileMode]::CreateNew'))
         $source | Should Match ([regex]::Escape('S-1-5-18'))
@@ -20,7 +20,7 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'uses the approved IP-stack join without driver or adapter-name blacklists' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match 'Get-NetIPInterface'
         $source | Should Match ([regex]::Escape('Get-NetAdapter -IncludeHidden -InterfaceIndex'))
         $source | Should Match 'Sort-Object -Unique'
@@ -28,7 +28,7 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'uses only fixed documentation addresses and owned diagnostic rule names' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('192.0.2.1/32'))
         $source | Should Match ([regex]::Escape('2001:db8::1/128'))
         $source | Should Match ([regex]::Escape('RegenBio.Diagnostic.Preflight.'))
@@ -37,7 +37,7 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'cleans every temporary rule in finally and proves zero product residue' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match 'finally'
         $source | Should Match ([regex]::Escape('Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name'))
         $source | Should Match ([regex]::Escape('RegenBioOverseasAccess.Managed'))
@@ -49,13 +49,13 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'materializes generic result lists before Windows PowerShell 5.1 serialization' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('$results.ToArray()'))
         $source | Should Not Match ([regex]::Escape('Results = @($results)'))
     }
 
     It 'materializes firewall filter properties as arrays in Windows PowerShell 5.1' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('@(($rule[0] | Get-NetFirewallInterfaceFilter).InterfaceAlias)'))
         $source | Should Match ([regex]::Escape('@(($rule[0] | Get-NetFirewallAddressFilter).RemoteAddress)'))
         $source | Should Not Match ([regex]::Escape('@($rule[0] | Get-NetFirewallInterfaceFilter).InterfaceAlias'))
@@ -63,7 +63,7 @@ Describe 'LocalSystem client firewall interface gate' {
     }
 
     It 'accepts the Windows Firewall canonical host-address rendering' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('$addresses -notcontains ''192.0.2.1'''))
         $source | Should Match ([regex]::Escape('$addresses -notcontains ''2001:db8::1'''))
     }

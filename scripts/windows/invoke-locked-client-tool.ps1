@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][ValidateSet('Go', 'Wix')][string] $Tool,
     [Parameter()][string] $GoOS,

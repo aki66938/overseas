@@ -1,4 +1,4 @@
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repoRoot 'deploy\server\install-server.ps1'
 $packageScriptPath = Join-Path $repoRoot 'scripts\windows\package-server-service.ps1'
 $makefilePath = Join-Path $repoRoot 'Makefile'
@@ -25,7 +25,7 @@ Describe 'Transactional sing-box server deployment' {
         [void] [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
         $errors.Count | Should Be 0
 
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $text | Should Match "ValidateSet\('Install',\s*'Status',\s*'Rollback'\)"
         $text | Should Match 'Mandatory\s*=\s*\$true[^\]]*\]\s*\[string\]\s*\$Mode'
     }
@@ -62,7 +62,7 @@ Describe 'Transactional sing-box server deployment' {
     It 'pins the VM, upstream, employee scope, port, service, paths, and exact firewall resources' {
         (Test-Path -LiteralPath $scriptPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return }
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
 
         foreach ($literal in @(
             '172.20.9.15',
@@ -85,7 +85,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'loads discovery modules outside WhatIf and filters listener ports in memory' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $text | Should Match '(?s)\$savedGlobalWhatIfPreference\s*=\s*\$global:WhatIfPreference.*?\$global:WhatIfPreference\s*=\s*\$false.*?Import-Module\s+Microsoft\.PowerShell\.Utility,CimCmdlets,NetTCPIP,NetSecurity.*?\$global:WhatIfPreference\s*=\s*\$savedGlobalWhatIfPreference'
         $text | Should Not Match 'Get-NetTCPConnection[^\r\n]*-LocalPort'
         $text | Should Match 'Get-NetTCPConnection\s+-State\s+Listen\s+-ErrorAction\s+Stop\s*\|\s*Where-Object'
@@ -96,7 +96,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'registers the pinned first-party SCM host with fixed runtime paths and no service argv' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $text | Should Match 'overseas-server-service\.exe'
         $text | Should Match 'ExpectedServerServiceSha256'
         $text | Should Match 'server_service_sha256'
@@ -115,7 +115,7 @@ Describe 'Transactional sing-box server deployment' {
     It 'contains every pre-mutation gate and the complete baseline evidence contract' {
         (Test-Path -LiteralPath $scriptPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return }
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
 
         foreach ($gate in @(
             'WindowsPrincipal',
@@ -153,7 +153,7 @@ Describe 'Transactional sing-box server deployment' {
     It 'uses one ShouldProcess boundary, atomic evidence, reverse compensation, and a finally cleanup path' {
         (Test-Path -LiteralPath $scriptPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return }
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
 
         ([regex]::Matches($text, 'SupportsShouldProcess\s*=\s*\$true', 'IgnoreCase')).Count | Should Be 1
         $text | Should Match '\$PSCmdlet\.ShouldProcess\('
@@ -168,7 +168,7 @@ Describe 'Transactional sing-box server deployment' {
     It 'protects ProgramData before config publication, rehashes installed inputs, and journals before service start' {
         (Test-Path -LiteralPath $scriptPath -PathType Leaf) | Should Be $true
         if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return }
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
 
         $protectIndex = $text.IndexOf('Protect-ServiceDataPath -Path $DataRoot')
         $configCopyIndex = $text.IndexOf('Copy-Item -LiteralPath $ConfigPath')
@@ -185,7 +185,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'publishes an external write-ahead journal before system mutation and tags both owned roots' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $journalIndex = $text.IndexOf('Write-AtomicJson -Path $journalPath')
         $firstRootMutation = $text.IndexOf('New-Item -ItemType Directory -Path $InstallRoot')
 
@@ -197,7 +197,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'compensates in dependency-safe reverse order and never deletes backing files while the service remains' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $start = $text.IndexOf('function Compensate-InstallTransaction')
         $end = $text.IndexOf('function Install-ServerTransaction')
         $body = $text.Substring($start, $end - $start)
@@ -214,7 +214,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'rejects effective broad inbound allows on the server port and does not disclose service argv in baseline evidence' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $text | Should Match 'Assert-NoConflictingServerPortAllow'
         $text | Should Match 'Get-NetFirewallApplicationFilter'
         $text | Should Match 'Get-NetFirewallServiceFilter'
@@ -231,7 +231,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'keeps rollback recoverable and idempotent until exact absence is proven' {
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $start = $text.IndexOf('function Rollback-ServerTransaction')
         $body = $text.Substring($start)
         $body | Should Match 'AlreadyRolledBack'
@@ -256,7 +256,7 @@ Describe 'Transactional sing-box server deployment' {
         $parameters = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.ParameterAst] }, $true))
         @($parameters | Where-Object { $_.Name.VariablePath.UserPath -match '(?i)secret|password|token|pin|credential' }).Count | Should Be 0
 
-        $text = Get-Content -LiteralPath $scriptPath -Raw
+        $text = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $text | Should Not Match '(?im)^\s*Remove-Item[^\r\n]*(\*|\?)'
         $text | Should Not Match '(?im)^\s*&[^\r\n]*(secret|password|token|pin|credential)'
     }
@@ -382,7 +382,7 @@ Describe 'Transactional sing-box server deployment' {
 
         $output = & $packageScriptPath -BundlePath $bundlePath -ServicePath $serviceSourcePath | ConvertFrom-Json
         $packagedService = Join-Path $bundlePath 'overseas-server-service.exe'
-        $manifest = Get-Content -LiteralPath (Join-Path $bundlePath 'sing-box.manifest.json') -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath (Join-Path $bundlePath 'sing-box.manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         $serviceHash = (Get-FileHash -LiteralPath $serviceSourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
         $output.server_service_sha256 | Should Be $serviceHash
@@ -391,7 +391,7 @@ Describe 'Transactional sing-box server deployment' {
     }
 
     It 'wires a dedicated dual-PowerShell server deployment test target without breaking legacy phony targets' {
-        $makefile = Get-Content -LiteralPath $makefilePath -Raw
+        $makefile = Get-Content -LiteralPath $makefilePath -Raw -Encoding UTF8
         $makefile | Should Match '(?m)^\.PHONY:\s+test\s+build\s*$'
         $makefile | Should Match '(?m)^test-server-install:'
         $makefile | Should Match '(?m)^build-server-service:'
@@ -542,7 +542,7 @@ Describe 'Transactional server behavioral refusal gates' {
 
 Describe 'Server firewall and directory ownership units' {
     It 'ignores packaged-app allows that cannot apply to the desktop sing-box executable' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match '\[string\]::IsNullOrWhiteSpace\(\[string\]\s+\$_.Package\)'
         $tokens = $null
         $errors = $null

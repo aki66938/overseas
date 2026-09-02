@@ -1,4 +1,4 @@
-$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $runbookPath = Join-Path $repositoryRoot 'docs\poc-runbook.md'
 $makefilePath = Join-Path $repositoryRoot 'Makefile'
 $gitignorePath = Join-Path $repositoryRoot '.gitignore'
@@ -16,7 +16,7 @@ function Assert-DocumentationFileExists {
 Describe 'Windows forwarding PoC operator documentation' {
     It 'documents the v16 evidence-first recovery and user acceptance boundary' {
         if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
-        $runbook = Get-Content -LiteralPath $runbookPath -Raw
+        $runbook = Get-Content -LiteralPath $runbookPath -Raw -Encoding UTF8
         foreach ($literal in @(
             'generation 5',
             'before recovery',
@@ -40,7 +40,7 @@ Describe 'Windows forwarding PoC operator documentation' {
     }
     It 'documents the hardened evidence sequence and its bindings' {
         if (-not (Assert-DocumentationFileExists -Path $runbookPath)) { return }
-        $runbook = Get-Content -LiteralPath $runbookPath -Raw
+        $runbook = Get-Content -LiteralPath $runbookPath -Raw -Encoding UTF8
 
         foreach ($text in @(
             'written operator approval',
@@ -127,7 +127,7 @@ Describe 'Windows forwarding PoC operator documentation' {
 
     It 'provides reproducible Go and Pester build targets' {
         if (-not (Assert-DocumentationFileExists -Path $makefilePath)) { return }
-        $makefile = Get-Content -LiteralPath $makefilePath -Raw
+        $makefile = Get-Content -LiteralPath $makefilePath -Raw -Encoding UTF8
 
         $makefile | Should Match '(?m)^LOCKED_CLIENT_TOOL\s*:='
         $makefile | Should Match '(?m)^\.PHONY:\s+test\s+build\s*$'
@@ -141,7 +141,7 @@ Describe 'Windows forwarding PoC operator documentation' {
 
     It 'keeps generated configuration and evidence out of source control' {
         if (-not (Assert-DocumentationFileExists -Path $gitignorePath)) { return }
-        $gitignore = Get-Content -LiteralPath $gitignorePath -Raw
+        $gitignore = Get-Content -LiteralPath $gitignorePath -Raw -Encoding UTF8
 
         foreach ($entry in @('/configs/poc.yaml', '/artifacts/*', '!/artifacts/.gitkeep', '/artifacts/.poc-config-*', '/artifacts/*.tmp', 'bin/')) {
             $gitignore | Should Match ([regex]::Escape($entry))
@@ -195,7 +195,7 @@ function Assert-GuardedNativeCommand {
 
 Describe 'sing-box PoC deployment and acceptance runbook' {
 	It 'contains syntactically valid PowerShell blocks' {
-		$runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
+		$runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw -Encoding UTF8
 		$blocks = [regex]::Matches($runbook, '(?ms)^```powershell\r?\n(.*?)^```\s*$')
 		Assert-True -Condition ($blocks.Count -gt 0) -Message 'Runbook has no PowerShell blocks.'
 		foreach ($block in $blocks) {
@@ -206,7 +206,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
 
     It 'exists and records fixed facts and external inputs without live opt-in' {
         Assert-True -Condition (Test-Path -LiteralPath $singBoxRunbookPath -PathType Leaf) -Message "Runbook is missing: $singBoxRunbookPath"
-        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
+        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw -Encoding UTF8
 
         foreach ($text in @(
             '172.20.9.15/22', '172.20.10.1', 'interface index 4',
@@ -234,7 +234,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
     }
 
     It 'puts a stop/go checkpoint before every real mutation group and names exact rollback' {
-        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
+        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw -Encoding UTF8
 
         foreach ($text in @(
             'STOP/GO — server install',
@@ -420,7 +420,7 @@ Describe 'sing-box PoC deployment and acceptance runbook' {
     }
 
     It 'requires evidence collection, zero-drift comparison, and a fail verdict on mandatory failure' {
-        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw
+        $runbook = Get-Content -LiteralPath $singBoxRunbookPath -Raw -Encoding UTF8
         foreach ($text in @(
             'Get-FileHash', 'Compress-Archive', 'baseline-vm.json', 'baseline-physical.json',
             'server-whatif.json', 'server-install.json', 'server-status.json',

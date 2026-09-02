@@ -61,10 +61,19 @@ type serviceTrace interface {
 }
 
 type serviceHandler struct {
-	controller controllerLifecycle
-	pipe       pipeRunner
-	trace      serviceTrace
-	traceClose sync.Once
+	controller     controllerLifecycle
+	pipe           pipeRunner
+	trace          serviceTrace
+	traceClose     sync.Once
+	preparer       servicePreparer
+	prepareCancel  context.CancelFunc
+	prepareWaiters sync.WaitGroup
+}
+
+// servicePreparer builds the reusable disabled protection pool in the
+// background once the service reports Running.
+type servicePreparer interface {
+	Prepare(context.Context) (agent.PreparedNetwork, error)
 }
 
 func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
@@ -74,7 +83,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), serviceStopTimeout)
 	recovery := s.controller.Recover(recoveryContext)
 	cancelRecovery()
-	if recovery.State != accessmodel.StateDisconnected {
+	if recovery.State != accessmodel.StatePrepared {
 		s.recordService(traceevent.LevelError, "Windows 服务启动恢复失败")
 		changes <- svc.Status{State: svc.StopPending}
 		return true, serviceExitRestore
@@ -86,6 +95,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	go func() { pipeErrors <- s.pipe.ListenAndServe(pipeContext) }()
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 	s.recordService(traceevent.LevelInfo, "Windows 服务正在运行")
+	s.startBackgroundPreparation()
 
 	for {
 		select {
@@ -105,7 +115,7 @@ func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			}
 			changes <- svc.Status{State: svc.StopPending}
 			s.recordService(traceevent.LevelError, "本地控制通道意外停止")
-			if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
+			if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StatePrepared {
 				s.recordService(traceevent.LevelError, "控制通道停止后的网络恢复失败")
 				return true, serviceExitRestore
 			}
@@ -119,12 +129,44 @@ func (s *serviceHandler) stop(changes chan<- svc.Status, cancelPipe context.Canc
 	changes <- svc.Status{State: svc.StopPending}
 	s.recordService(traceevent.LevelInfo, "Windows 服务正在停止")
 	cancelPipe()
-	if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StateDisconnected {
+	s.stopBackgroundPreparation()
+	if status := disconnectWithTimeout(s.controller); status.State != accessmodel.StatePrepared {
 		s.recordService(traceevent.LevelError, "Windows 服务停止时网络恢复失败")
 		return true, serviceExitRestore
 	}
 	s.recordService(traceevent.LevelInfo, "Windows 服务已停止")
 	return false, 0
+}
+
+// startBackgroundPreparation launches one background Prepare after the
+// service reports Running. A Connect arriving during preparation joins the
+// same preparation result inside the network manager.
+func (s *serviceHandler) startBackgroundPreparation() {
+	if s.preparer == nil {
+		return
+	}
+	prepareContext, cancel := context.WithCancel(context.Background())
+	s.prepareCancel = cancel
+	s.prepareWaiters.Add(1)
+	go func() {
+		defer s.prepareWaiters.Done()
+		prepared, err := s.preparer.Prepare(prepareContext)
+		if err != nil {
+			if prepareContext.Err() == nil {
+				s.recordService(traceevent.LevelError, "网络保护配置预备失败")
+			}
+			return
+		}
+		s.recordService(traceevent.LevelInfo, "网络保护配置预备完成")
+		_ = prepared
+	}()
+}
+
+func (s *serviceHandler) stopBackgroundPreparation() {
+	if s.prepareCancel != nil {
+		s.prepareCancel()
+	}
+	s.prepareWaiters.Wait()
 }
 
 func (s *serviceHandler) recordService(level, message string) {
@@ -229,6 +271,7 @@ func buildService() (*serviceHandler, error) {
 		controller: controller,
 		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder)),
 		trace:      recorder,
+		preparer:   network,
 	}
 	keepRecorder = true
 	return handler, nil

@@ -1,4 +1,4 @@
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptRoot = Join-Path $repoRoot 'scripts\windows'
 $snapshotScript = Join-Path $scriptRoot 'snapshot.ps1'
 $applyScript = Join-Path $scriptRoot 'apply-poc.ps1'
@@ -381,7 +381,7 @@ Describe 'Windows PoC networking transactions' {
         Assert-MockCalled Remove-NetNat -Times 0 -Exactly -Scope It
 
         foreach ($path in @($applyScript, $rollbackScript)) {
-            $text = Get-Content -LiteralPath $path -Raw
+            $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
             ([regex]::Matches($text, '\$PSCmdlet\.ShouldProcess\(')).Count | Should Be 1
         }
     }
@@ -443,7 +443,7 @@ Describe 'Windows PoC networking transactions' {
 
     It 'rejects an edited snapshot whose integrity hash no longer matches' {
         $snapshot = ConvertTo-TestSnapshotEnvelope -Path (Join-Path $TestDrive 'edited.json')
-        $envelope = Get-Content -LiteralPath $snapshot.Path -Raw | ConvertFrom-Json
+        $envelope = Get-Content -LiteralPath $snapshot.Path -Raw -Encoding UTF8 | ConvertFrom-Json
         $payloadJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($envelope.PayloadBase64))
         $payloadJson = $payloadJson.Replace('Telecom-Client', 'Unrelated-Adapter')
         $envelope.PayloadBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($payloadJson))

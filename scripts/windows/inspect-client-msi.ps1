@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $MsiPath,
     [Parameter(Mandatory = $true)][string] $StagingPath,

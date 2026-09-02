@@ -48,7 +48,7 @@ func TestRenderClientConfigUsesDirectTelecomHTTPOutbound(t *testing.T) {
 
 func TestServiceTraceClosesAndRecordsNormalLifecycle(t *testing.T) {
 	controller := &fakeServiceController{
-		recoverStatus: agent.Status{State: accessmodel.StateDisconnected}, disconnectStatus: agent.Status{State: accessmodel.StateDisconnected},
+		recoverStatus: agent.Status{State: accessmodel.StatePrepared}, disconnectStatus: agent.Status{State: accessmodel.StatePrepared},
 	}
 	trace := &fakeServiceTrace{}
 	handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}, trace: trace}
@@ -77,7 +77,7 @@ func TestServiceTraceClosesAndRecordsNormalLifecycle(t *testing.T) {
 func TestServiceTraceClosesWhenStartupRecoveryFails(t *testing.T) {
 	trace := &fakeServiceTrace{}
 	handler := &serviceHandler{
-		controller: &fakeServiceController{recoverStatus: agent.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed}},
+		controller: &fakeServiceController{recoverStatus: agent.Status{State: accessmodel.StateFailedSafe, ErrorCode: agent.ErrorAutomaticRestore}},
 		pipe:       blockingPipeRunner{}, trace: trace,
 	}
 	specific, code := handler.Execute(nil, make(chan svc.ChangeRequest), make(chan svc.Status, 2))
@@ -98,8 +98,8 @@ func TestServiceTraceProductionLimitsAreFixed(t *testing.T) {
 
 func TestServiceStopDisconnectsAndReturnsServiceSpecificFailure(t *testing.T) {
 	controller := &fakeServiceController{
-		recoverStatus:    agent.Status{State: accessmodel.StateDisconnected},
-		disconnectStatus: agent.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed},
+		recoverStatus:    agent.Status{State: accessmodel.StatePrepared},
+		disconnectStatus: agent.Status{State: accessmodel.StateFailedSafe, ErrorCode: agent.ErrorAutomaticRestore},
 	}
 	handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}}
 	requests := make(chan svc.ChangeRequest, 1)
@@ -124,8 +124,8 @@ func TestServiceStopDisconnectsAndReturnsServiceSpecificFailure(t *testing.T) {
 
 func TestServiceStopReturnsSuccessAfterRestoration(t *testing.T) {
 	controller := &fakeServiceController{
-		recoverStatus:    agent.Status{State: accessmodel.StateDisconnected},
-		disconnectStatus: agent.Status{State: accessmodel.StateDisconnected},
+		recoverStatus:    agent.Status{State: accessmodel.StatePrepared},
+		disconnectStatus: agent.Status{State: accessmodel.StatePrepared},
 	}
 	handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}}
 	requests := make(chan svc.ChangeRequest, 1)
@@ -149,11 +149,11 @@ func TestServiceStopRequiresDisconnectedTerminalState(t *testing.T) {
 	for _, state := range []accessmodel.ConnectionState{
 		accessmodel.StateConnecting,
 		accessmodel.StateConnected,
-		accessmodel.StateFailed,
+		accessmodel.StateFailedSafe,
 	} {
 		t.Run(string(state), func(t *testing.T) {
 			controller := &fakeServiceController{
-				recoverStatus:    agent.Status{State: accessmodel.StateDisconnected},
+				recoverStatus:    agent.Status{State: accessmodel.StatePrepared},
 				disconnectStatus: agent.Status{State: state, ErrorCode: agent.ErrorCanceled},
 			}
 			handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}}
@@ -177,7 +177,7 @@ func TestServiceStopRequiresDisconnectedTerminalState(t *testing.T) {
 
 func TestServiceStartupFailsWhenRestartReconciliationFails(t *testing.T) {
 	controller := &fakeServiceController{
-		recoverStatus: agent.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed},
+		recoverStatus: agent.Status{State: accessmodel.StateFailedSafe, ErrorCode: agent.ErrorAutomaticRestore},
 	}
 	handler := &serviceHandler{controller: controller, pipe: blockingPipeRunner{}}
 

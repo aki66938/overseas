@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+﻿[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('Install', 'Repair', 'Uninstall', 'Status')]
@@ -261,7 +261,9 @@ function Read-PayloadManifest {
     }
     # Verify and parse the same immutable byte snapshot, so a source-file swap cannot
     # replace the manifest between signature validation and interpretation.
-    $manifestBytes = [IO.File]::ReadAllBytes($Path)
+    # The raw .NET exception is locale-dependent and must not leak into journals.
+    $manifestBytes = $null
+    try { $manifestBytes = [IO.File]::ReadAllBytes($Path) } catch { throw 'The payload manifest could not be read.' }
     Assert-DetachedSignatureWithPinnedSigner -ContentBytes $manifestBytes -SignaturePath ($Path + '.p7s') -ExpectedSignerHash $TrustedManifestSignerThumbprint
     $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
     if ($manifest.schema_version -ne 1 -or -not $manifest.product_version) {
@@ -784,12 +786,45 @@ function Assert-NetworkRestored {
     Assert-TunAbsent
     Assert-OwnedRoutesAbsent
     Assert-DnsRestored
-    if (@(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
+    $groupRules = @(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+    $enabledRules = @($groupRules | Where-Object { [string]$_.Enabled -eq 'True' })
+    if ($enabledRules.Count -ne 0) {
         throw 'Agent restoration could not be proven because runtime firewall rules remain.'
     }
     if (Test-Path -LiteralPath (Join-Path $DataRoot 'network-state.json')) {
         throw 'Agent restoration could not be proven because its state journal remains.'
     }
+}
+
+function Remove-PreparedFirewallPool {
+    $preparedPath = Join-Path $DataRoot 'prepared-network.json'
+    $ledger = $null
+    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+        try { $ledger = Get-Content -LiteralPath $preparedPath -Raw | ConvertFrom-Json } catch { throw 'Prepared firewall ledger is unreadable.' }
+    }
+    $rules = @(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+    if ($rules.Count -eq 0) {
+        if ($null -ne $ledger) { Remove-Item -LiteralPath $preparedPath -Force -ErrorAction Stop }
+        return
+    }
+    $enabled = @($rules | Where-Object { [string]$_.Enabled -eq 'True' })
+    if ($enabled.Count -ne 0) { throw 'Refusing to uninstall while prepared firewall rules remain enabled.' }
+    if ($null -eq $ledger) { throw 'Refusing to remove unlabelled product-group firewall rules.' }
+    $ownedNames = @($ledger.rules | ForEach-Object { [string]$_.name } | Sort-Object -Unique)
+    if ($ownedNames.Count -eq 0) { throw 'Prepared firewall ledger lists no owned rules.' }
+    $unknown = @($rules | Where-Object { $ownedNames -notcontains [string]$_.Name })
+    if ($unknown.Count -ne 0) { throw 'Refusing to remove unknown product-group firewall rules.' }
+    foreach ($name in $ownedNames) {
+        $match = @(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+        foreach ($rule in $match) {
+            if ([string]$rule.Group -ne $RuntimeFirewallGroup) { throw "Firewall rule '$name' is not product-owned." }
+            Remove-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction Stop
+        }
+    }
+    if (@(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw 'Prepared firewall pool removal could not be proven.'
+    }
+    Remove-Item -LiteralPath $preparedPath -Force -ErrorAction Stop
 }
 
 function Write-OwnershipManifest {
@@ -807,6 +842,7 @@ function Undo-ClientTransaction {
     param([Parameter(Mandatory = $true)][string] $JournalPath)
     try {
         Write-TransactionPhase -Path $JournalPath -Phase 'Compensating' -PendingResource 'FirewallRules'
+        Remove-PreparedFirewallPool
         Remove-OwnedFirewallRules
         Remove-OwnedShortcut
         Remove-OwnedService
@@ -916,6 +952,7 @@ function Uninstall-ClientTransaction {
         Write-TransactionPhase -Path $JournalPath -Phase 'UninstallDisconnect'
         Request-ControlledDisconnect
         Assert-NetworkRestored
+        Remove-PreparedFirewallPool
         Write-TransactionPhase -Path $JournalPath -Phase 'UninstallResources'
         Remove-OwnedFirewallRules
         Remove-OwnedShortcut

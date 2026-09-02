@@ -1,4 +1,4 @@
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repoRoot 'scripts\fetch-sing-box.ps1'
 $manifestPath = Join-Path $repoRoot 'sing-box.manifest.json'
 
@@ -59,7 +59,7 @@ Describe 'Pinned sing-box acquisition' {
         [void] [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
         $errors.Count | Should Be 0
 
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $manifest.version | Should Be '1.13.19'
         $manifest.archive_sha256 | Should Match '^[0-9a-f]{64}$'
         $manifest.archive_sha256 | Should Not Match '^(0+|a+|b+|c+|sample|\$\()'
@@ -90,7 +90,7 @@ Describe 'Pinned sing-box acquisition' {
         if (-not (Assert-RepositoryFileExists -Path $scriptPath)) { return }
         if (-not (Assert-RepositoryFileExists -Path $manifestPath)) { return }
 
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $destination = Join-Path $TestDrive 'publish'
 
         Mock Invoke-WebRequest {
@@ -122,7 +122,7 @@ Describe 'Pinned sing-box acquisition' {
         if (-not (Assert-RepositoryFileExists -Path $scriptPath)) { return }
         if (-not (Assert-RepositoryFileExists -Path $manifestPath)) { return }
 
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $destination = Join-Path $TestDrive 'publish'
 
         Mock Invoke-WebRequest {
@@ -166,8 +166,8 @@ Describe 'Pinned sing-box acquisition' {
         $runtimeManifestPath = Join-Path $destination 'sing-box.manifest.json'
         (Test-Path -LiteralPath $exePath -PathType Leaf) | Should Be $true
         (Test-Path -LiteralPath $runtimeManifestPath -PathType Leaf) | Should Be $true
-        $runtimeManifestRaw = Get-Content -LiteralPath $runtimeManifestPath -Raw
-        $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+        $runtimeManifestRaw = Get-Content -LiteralPath $runtimeManifestPath -Raw -Encoding UTF8
+        $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $runtimeManifest.version | Should Be '1.13.19'
         $runtimeManifest.archive_sha256 | Should Be $manifest.archive_sha256
         $runtimeManifest.executable_sha256 | Should Be ('d' * 64)
@@ -188,6 +188,6 @@ Describe 'Pinned sing-box acquisition' {
             & $scriptPath -Version '1.13.19' -ExpectedSha256 $manifest.archive_sha256 -Destination $destination
         }
         $existingMessage | Should Match 'already exists'
-        (Get-Content -LiteralPath (Join-Path $destination 'sing-box.exe') -Raw).Trim() | Should Be 'preserve-me'
+        (Get-Content -LiteralPath (Join-Path $destination 'sing-box.exe') -Raw -Encoding UTF8).Trim() | Should Be 'preserve-me'
     }
 }

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $RepositoryPath,
     [Parameter(Mandatory = $true)][string] $GoExecutable,

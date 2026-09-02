@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $SigningCertificateThumbprint,
     [string] $SignToolPath = 'signtool.exe',

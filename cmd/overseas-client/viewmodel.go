@@ -14,13 +14,10 @@ import (
 )
 
 const (
-	defaultTraceInterval  = 500 * time.Millisecond
-	traceBatchLimit       = 32
-	maxTimelineEvents     = 2048
-	safeRetryProofTimeout = 10 * time.Second
+	defaultTraceInterval = 500 * time.Millisecond
+	traceBatchLimit      = 32
+	maxTimelineEvents    = 2048
 )
-
-var errResidueProof = errors.New("zero-residue proof is unavailable")
 
 type serviceClient interface {
 	Connect(context.Context) (clientapi.Status, error)

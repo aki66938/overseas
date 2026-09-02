@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(

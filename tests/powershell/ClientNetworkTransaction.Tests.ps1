@@ -1,4 +1,4 @@
-$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+﻿$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $scriptPath = Join-Path $repo 'scripts\windows\verify-client-network-transaction.ps1'
 $integrationPath = Join-Path $repo 'internal\agent\network_windows_integration_test.go'
 $firewallPoolPath = Join-Path $repo 'internal\agent\firewall_pool_windows.go'
@@ -6,7 +6,7 @@ $firewallPoolPath = Join-Path $repo 'internal\agent\firewall_pool_windows.go'
 Describe 'Client LocalSystem network transaction gate' {
     It 'defines materialized exact-name prepared firewall operations' {
         Test-Path -LiteralPath $firewallPoolPath -PathType Leaf | Should Be $true
-        $source = Get-Content -LiteralPath $firewallPoolPath -Raw
+        $source = Get-Content -LiteralPath $firewallPoolPath -Raw -Encoding UTF8
         foreach ($literal in @(
             'firewall_prepare',
             'firewall_enable',
@@ -35,7 +35,7 @@ Describe 'Client LocalSystem network transaction gate' {
     }
 
     It 'requires LocalSystem and clean absolute inputs before invoking the exact live test' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('[IO.Path]::IsPathRooted($RepositoryPath)'))
         $source | Should Match ([regex]::Escape('[IO.Path]::IsPathRooted($GoExecutable)'))
         $source | Should Match ([regex]::Escape('[IO.Path]::IsPathRooted($EvidencePath)'))
@@ -46,7 +46,7 @@ Describe 'Client LocalSystem network transaction gate' {
     }
 
     It 'refuses product residue and emits create-new bounded evidence' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('network-state.json'))
         $source | Should Match ([regex]::Escape('RegenBioOverseasAccess.Managed'))
         $source | Should Match ([regex]::Escape('RegenBio.Diagnostic'))
@@ -57,7 +57,7 @@ Describe 'Client LocalSystem network transaction gate' {
     }
 
     It 'runs only the internal agent package and restores the caller environment' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape("test ./internal/agent"))
         $source | Should Match ([regex]::Escape('$previousGate'))
         $source | Should Match ([regex]::Escape('$env:OVERSEAS_ACCESS_NETWORK_GATE = $previousGate'))
@@ -66,15 +66,15 @@ Describe 'Client LocalSystem network transaction gate' {
     }
 
     It 'does not turn native Go stderr progress into a terminating PowerShell exception' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('$previousErrorActionPreference'))
         $source | Should Match ([regex]::Escape('$ErrorActionPreference = ''Continue'''))
         $source | Should Match ([regex]::Escape('$ErrorActionPreference = $previousErrorActionPreference'))
     }
 
     It 'captures structured trace checkpoints and proves paired lifecycle stages' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
-        $integrationSource = Get-Content -LiteralPath $integrationPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+        $integrationSource = Get-Content -LiteralPath $integrationPath -Raw -Encoding UTF8
         foreach ($literal in @(
             'OVERSEAS_ACCESS_TRACE_EVIDENCE_PATH',
             'BeforePublish',
@@ -100,7 +100,7 @@ Describe 'Client LocalSystem network transaction gate' {
     }
 
     It 'keeps the trace sidecar create-new bounded and removes it after evidence publication' {
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match ([regex]::Escape('$EvidencePath + ''.trace.json'''))
         $source | Should Match 'TraceEvidence.{0,80}65536'
         $source | Should Match 'Remove-Item\s+-LiteralPath\s+\$traceEvidencePath'

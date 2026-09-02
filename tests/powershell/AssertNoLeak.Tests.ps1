@@ -1,4 +1,4 @@
-$scriptPath = [System.IO.Path]::GetFullPath(
+﻿$scriptPath = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\..\scripts\windows\assert-no-leak.ps1')
 )
 
@@ -174,7 +174,7 @@ Describe 'Windows PoC no-leak orchestration' {
         [void] [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $errors)
         $errors.Count | Should Be 0
 
-        $source = Get-Content -LiteralPath $scriptPath -Raw
+        $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $source | Should Match '(?i)Get-FileHash'
         $source | Should Match '(?i)Start-Process'
         $source | Should Match '(?i)WaitForExit'
@@ -190,7 +190,7 @@ Describe 'Windows PoC no-leak orchestration' {
         }
 
         $message | Should Match 'already exists'
-        (Get-Content -LiteralPath $outputPath -Raw).Trim() | Should Be 'preserve-me'
+        (Get-Content -LiteralPath $outputPath -Raw -Encoding UTF8).Trim() | Should Be 'preserve-me'
         Assert-MockCalled Read-Host -Times 0 -Exactly -Scope It
         Assert-MockCalled Start-Process -Times 0 -Exactly -Scope It
     }
@@ -233,7 +233,7 @@ Describe 'Windows PoC no-leak orchestration' {
 
         (Test-Path -LiteralPath $outputPath -PathType Leaf) | Should Be $true
         (Test-Path -LiteralPath $monitorPath -PathType Leaf) | Should Be $true
-        $monitor = Get-Content -LiteralPath $monitorPath -Raw | ConvertFrom-Json
+        $monitor = Get-Content -LiteralPath $monitorPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $monitor.reconnect_detected | Should Be $false
         @($monitor.telecom_route_prefixes).Count | Should Be 1
         @($monitor.telecom_route_prefixes)[0] | Should Be '0.0.0.0/0'
@@ -261,7 +261,7 @@ Describe 'Windows PoC no-leak orchestration' {
 
 		$global:NoLeakProbeProcess.WaitCalls | Should Be 3
 		$global:NoLeakProbeProcess.KillCalls | Should Be 0
-		$monitor = Get-Content -LiteralPath $monitorPath -Raw | ConvertFrom-Json
+		$monitor = Get-Content -LiteralPath $monitorPath -Raw -Encoding UTF8 | ConvertFrom-Json
 		$monitor.sample_count | Should Be 4
 		$monitor.reconnect_detected | Should Be $false
 	}
@@ -367,7 +367,7 @@ Describe 'Windows PoC no-leak orchestration' {
 
         $message | Should Match 'automatically reconnected'
         $global:NoLeakPromptCount | Should Be 2
-        $monitor = Get-Content -LiteralPath $monitorPath -Raw | ConvertFrom-Json
+        $monitor = Get-Content -LiteralPath $monitorPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $monitor.reconnect_detected | Should Be $true
         $monitor.reconnect_interface_up | Should Be $true
         @($monitor.reconnect_routes).Count | Should Be 1
