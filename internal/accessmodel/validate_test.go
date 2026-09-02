@@ -1,6 +1,7 @@
 package accessmodel_test
 
 import (
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -192,6 +193,24 @@ func TestCanonicalSHA256IsStableAndOrderIndependent(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(firstHash) {
 		t.Fatalf("hash = %q, want lowercase SHA-256", firstHash)
+	}
+}
+
+func TestConnectionStatePreparedContracts(t *testing.T) {
+	want := []accessmodel.ConnectionState{
+		accessmodel.StatePreparing,
+		accessmodel.StatePrepared,
+		accessmodel.StateConnecting,
+		accessmodel.StateConnected,
+		accessmodel.StateRestoring,
+		accessmodel.StateFailedSafe,
+	}
+	got := []string{
+		string(want[0]), string(want[1]), string(want[2]),
+		string(want[3]), string(want[4]), string(want[5]),
+	}
+	if !reflect.DeepEqual(got, []string{"preparing", "prepared", "connecting", "connected", "restoring", "failed_safe"}) {
+		t.Fatalf("connection states = %v", got)
 	}
 }
 

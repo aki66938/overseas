@@ -36,8 +36,12 @@ const (
 type ConnectionState string
 
 const (
+	StatePreparing    ConnectionState = "preparing"
+	StatePrepared     ConnectionState = "prepared"
 	StateDisconnected ConnectionState = "disconnected"
 	StateConnecting   ConnectionState = "connecting"
 	StateConnected    ConnectionState = "connected"
+	StateRestoring    ConnectionState = "restoring"
+	StateFailedSafe   ConnectionState = "failed_safe"
 	StateFailed       ConnectionState = "failed"
 )

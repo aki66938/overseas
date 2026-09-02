@@ -12,6 +12,32 @@ import (
 	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
+func TestErrorCodePreparedContracts(t *testing.T) {
+	got := []string{
+		ErrorPreparedUnavailable,
+		ErrorNetworkChanged,
+		ErrorFirewallEnable,
+		ErrorFirewallVerify,
+		ErrorTUNNotFound,
+		ErrorTUNIdentityMismatch,
+		ErrorAutomaticRestore,
+	}
+	want := []string{
+		"prepared_state_unavailable",
+		"network_changed",
+		"firewall_enable_failed",
+		"firewall_verify_failed",
+		"tun_not_found",
+		"tun_identity_mismatch",
+		"automatic_restore_failed",
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("error code %d = %q, want %q", index, got[index], want[index])
+		}
+	}
+}
+
 func TestControllerSuccessfulConnectEmitsOrderedStagePairs(t *testing.T) {
 	sink := &recordingTraceSink{}
 	deps := testDependencies(nil)

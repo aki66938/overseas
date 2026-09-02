@@ -122,6 +122,30 @@ func TestResidueIsZero(t *testing.T) {
 	if (Residue{Snapshot: true}).IsZero() {
 		t.Fatal("snapshot was ignored")
 	}
+	if !(Residue{DisabledPreparedRules: 9}).IsZero() {
+		t.Fatal("disabled prepared rules are active residue")
+	}
+}
+
+func TestTraceStagePreparedContracts(t *testing.T) {
+	want := []string{
+		StageNetworkPrepare,
+		StageNetworkFingerprint,
+		StageFirewallPrepare,
+		StageFirewallEnable,
+		StageFirewallVerify,
+		StageMonitorStart,
+		StageAutomaticRestore,
+	}
+	approved := map[string]bool{}
+	for _, stage := range ApprovedStages() {
+		approved[stage] = true
+	}
+	for _, stage := range want {
+		if !approved[stage] {
+			t.Fatalf("prepared stage %q is not approved", stage)
+		}
+	}
 }
 
 func TestGenerationContextRoundTrip(t *testing.T) {

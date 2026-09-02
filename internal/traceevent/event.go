@@ -35,8 +35,13 @@ const (
 	StagePolicyValidation    = "policy_validation"
 	StageBinaryVerification  = "binary_verification"
 	StageCredentialLoad      = "credential_load"
+	StageNetworkPrepare      = "network_prepare"
+	StageNetworkFingerprint  = "network_fingerprint"
 	StageNetworkCapture      = "network_capture"
 	StageAdapterScan         = "adapter_scan"
+	StageFirewallPrepare     = "firewall_prepare"
+	StageFirewallEnable      = "firewall_enable"
+	StageFirewallVerify      = "firewall_verify"
 	StageFirewallPublish     = "firewall_publish"
 	StageActiveStoreVerify   = "active_store_verify"
 	StageEmergencyProtection = "emergency_protection"
@@ -46,7 +51,9 @@ const (
 	StageTUNReady            = "tun_ready"
 	StageRouteActivation     = "route_activation"
 	StageConnected           = "connected"
+	StageMonitorStart        = "monitor_start"
 	StageCoreStop            = "core_stop"
+	StageAutomaticRestore    = "automatic_restore"
 	StageNetworkRestore      = "network_restore"
 	StageResidueVerify       = "residue_verify"
 	StageServiceRecovery     = "service_recovery"
@@ -70,8 +77,13 @@ var (
 		StagePolicyValidation,
 		StageBinaryVerification,
 		StageCredentialLoad,
+		StageNetworkPrepare,
+		StageNetworkFingerprint,
 		StageNetworkCapture,
 		StageAdapterScan,
+		StageFirewallPrepare,
+		StageFirewallEnable,
+		StageFirewallVerify,
 		StageFirewallPublish,
 		StageActiveStoreVerify,
 		StageEmergencyProtection,
@@ -81,7 +93,9 @@ var (
 		StageTUNReady,
 		StageRouteActivation,
 		StageConnected,
+		StageMonitorStart,
 		StageCoreStop,
+		StageAutomaticRestore,
 		StageNetworkRestore,
 		StageResidueVerify,
 		StageServiceRecovery,
@@ -90,12 +104,13 @@ var (
 )
 
 type Residue struct {
-	ManagedRules  int    `json:"managed_rules"`
-	ProductRoutes int    `json:"product_routes"`
-	ProductTUNs   int    `json:"product_tuns"`
-	CoreProcesses int    `json:"core_processes"`
-	Snapshot      bool   `json:"snapshot"`
-	SnapshotPhase string `json:"snapshot_phase,omitempty"`
+	ManagedRules          int    `json:"managed_rules"`
+	DisabledPreparedRules int    `json:"disabled_prepared_rules"`
+	ProductRoutes         int    `json:"product_routes"`
+	ProductTUNs           int    `json:"product_tuns"`
+	CoreProcesses         int    `json:"core_processes"`
+	Snapshot              bool   `json:"snapshot"`
+	SnapshotPhase         string `json:"snapshot_phase,omitempty"`
 }
 
 func (r Residue) IsZero() bool {
@@ -151,8 +166,13 @@ func ApprovedStages() []string {
 		StagePolicyValidation,
 		StageBinaryVerification,
 		StageCredentialLoad,
+		StageNetworkPrepare,
+		StageNetworkFingerprint,
 		StageNetworkCapture,
 		StageAdapterScan,
+		StageFirewallPrepare,
+		StageFirewallEnable,
+		StageFirewallVerify,
 		StageFirewallPublish,
 		StageActiveStoreVerify,
 		StageEmergencyProtection,
@@ -162,7 +182,9 @@ func ApprovedStages() []string {
 		StageTUNReady,
 		StageRouteActivation,
 		StageConnected,
+		StageMonitorStart,
 		StageCoreStop,
+		StageAutomaticRestore,
 		StageNetworkRestore,
 		StageResidueVerify,
 		StageServiceRecovery,
@@ -208,7 +230,7 @@ func Validate(event Event) error {
 		return errors.New("started trace cannot have residue")
 	}
 	if event.Residue != nil {
-		if event.Residue.ManagedRules < 0 || event.Residue.ProductRoutes < 0 || event.Residue.ProductTUNs < 0 || event.Residue.CoreProcesses < 0 {
+		if event.Residue.ManagedRules < 0 || event.Residue.DisabledPreparedRules < 0 || event.Residue.ProductRoutes < 0 || event.Residue.ProductTUNs < 0 || event.Residue.CoreProcesses < 0 {
 			return errors.New("trace residue count is negative")
 		}
 	}
