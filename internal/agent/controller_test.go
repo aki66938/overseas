@@ -263,12 +263,16 @@ func TestControllerConnectFailureMatrixReturnsPreparedWithOriginalCode(t *testin
 	}{
 		{
 			name: "prepare failure",
-			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.prepareErr = errors.New("baseline unreadable") },
+			mut: func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) {
+				n.prepareErr = errors.New("baseline unreadable")
+			},
 			code: ErrorPreparedUnavailable,
 		},
 		{
 			name: "capture failure",
-			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.captureErr = errors.New("fingerprint drifted") },
+			mut: func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) {
+				n.captureErr = errors.New("fingerprint drifted")
+			},
 			code: ErrorNetworkCapture,
 		},
 		{
@@ -302,12 +306,16 @@ func TestControllerConnectFailureMatrixReturnsPreparedWithOriginalCode(t *testin
 		},
 		{
 			name: "tun not found",
-			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.readyErr = fmt.Errorf("%w: deadline", errTUNNotFound) },
+			mut: func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) {
+				n.readyErr = fmt.Errorf("%w: deadline", errTUNNotFound)
+			},
 			code: ErrorTUNNotFound,
 		},
 		{
 			name: "tun identity mismatch",
-			mut:  func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) { n.readyErr = fmt.Errorf("%w: wrong guid", errTUNIdentityMismatch) },
+			mut: func(n *fakeNetwork, _ *fakeProcess, _ *Dependencies) {
+				n.readyErr = fmt.Errorf("%w: wrong guid", errTUNIdentityMismatch)
+			},
 			code: ErrorTUNIdentityMismatch,
 		},
 		{

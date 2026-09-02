@@ -661,7 +661,7 @@ func TestWindowsNetworkReconcileRejectsTamperedOwnedRouteTuplesBeforeCleanup(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-				if err := manager.Reconcile(context.Background()); err == nil {
+			if err := manager.Reconcile(context.Background()); err == nil {
 				t.Fatal("Reconcile() accepted a tampered owned route tuple")
 			}
 			if got := runner.count(networkOperationRestore); got != 0 {
