@@ -49,10 +49,21 @@ type Request struct {
 }
 
 type Response struct {
-	ID        string `json:"id"`
-	State     string `json:"state"`
-	ErrorCode string `json:"error_code,omitempty"`
-	Message   string `json:"message,omitempty"`
+	ID         string `json:"id"`
+	State      string `json:"state"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Step       int    `json:"step,omitempty"`
+	TotalSteps int    `json:"total_steps,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms,omitempty"`
+}
+
+func responseFromStatus(id string, status Status) Response {
+	return Response{
+		ID: id, State: string(status.State), ErrorCode: status.ErrorCode, Message: status.Message,
+		Phase: status.Phase, Step: status.Step, TotalSteps: status.TotalSteps, ElapsedMS: status.ElapsedMS,
+	}
 }
 
 type PipeController interface {
@@ -244,7 +255,7 @@ func (s *PipeServer) dispatch(ctx context.Context, request Request) Response {
 		}
 	case ActionTrace:
 		if s.traceSource == nil {
-			return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志通道不可用"}
+			return Response{ID: request.ID, State: string(accessmodel.StatePrepared), ErrorCode: ErrorInvalidRequest, Message: "日志通道不可用"}
 		}
 		limit := request.Limit
 		if limit == 0 {
@@ -252,13 +263,13 @@ func (s *PipeServer) dispatch(ctx context.Context, request Request) Response {
 		}
 		batch := s.traceSource.Batch(request.AfterSequence, limit)
 		if !validTraceBatch(batch, request.AfterSequence, limit) {
-			return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
+			return Response{ID: request.ID, State: string(accessmodel.StatePrepared), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
 		}
 		return s.fitTraceResponse(request, batch)
 	default:
-		return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidAction, Message: "不支持的操作"}
+		return Response{ID: request.ID, State: string(accessmodel.StatePrepared), ErrorCode: ErrorInvalidAction, Message: "不支持的操作"}
 	}
-	return Response{ID: request.ID, State: string(status.State), ErrorCode: status.ErrorCode, Message: status.Message}
+	return responseFromStatus(request.ID, status)
 }
 
 func validTraceBatch(batch traceevent.Batch, after uint64, limit int) bool {
@@ -307,7 +318,7 @@ func (s *PipeServer) fitTraceResponse(request Request, batch traceevent.Batch) R
 			return response
 		}
 	}
-	return Response{ID: request.ID, State: string(accessmodel.StateFailed), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
+	return Response{ID: request.ID, State: string(accessmodel.StatePrepared), ErrorCode: ErrorInvalidRequest, Message: "日志批次不可用"}
 }
 
 func (s *PipeServer) redact(message []byte) []byte {

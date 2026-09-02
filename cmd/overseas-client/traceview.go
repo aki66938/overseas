@@ -48,9 +48,9 @@ func formatTraceTimeline(events []traceevent.Event, gap, warning bool, location 
 		}
 		if event.Residue != nil {
 			lines = append(lines, fmt.Sprintf(
-				"    residue: managed_rules=%d product_routes=%d product_tuns=%d core_processes=%d snapshot=%t snapshot_phase=%s",
+				"    residue: managed_rules=%d product_routes=%d product_tuns=%d core_processes=%d disabled_prepared_rules=%d snapshot=%t snapshot_phase=%s",
 				event.Residue.ManagedRules, event.Residue.ProductRoutes, event.Residue.ProductTUNs,
-				event.Residue.CoreProcesses, event.Residue.Snapshot, event.Residue.SnapshotPhase))
+				event.Residue.CoreProcesses, event.Residue.DisabledPreparedRules, event.Residue.Snapshot, event.Residue.SnapshotPhase))
 		}
 	}
 	return strings.Join(lines, "\r\n")
@@ -93,8 +93,11 @@ func protectionSummary(events []traceevent.Event, status clientapi.Status) strin
 		return fmt.Sprintf("防泄漏状态：%d 条规则；%d 路由；%d TUN；%d 核心进程；快照=%t（%s）",
 			residue.ManagedRules, residue.ProductRoutes, residue.ProductTUNs, residue.CoreProcesses, residue.Snapshot, residue.SnapshotPhase)
 	}
-	if status.State == accessmodel.StateFailed {
-		return "防泄漏状态：等待残留检查"
+	if status.State == accessmodel.StateFailedSafe {
+		return "防泄漏状态：应急防护已启用，等待 IT 处理"
+	}
+	if status.State == accessmodel.StateConnecting || status.State == accessmodel.StateConnected || status.State == accessmodel.StateRestoring {
+		return "防泄漏状态：防泄漏保护已启用"
 	}
 	return "防泄漏状态：尚无残留摘要"
 }

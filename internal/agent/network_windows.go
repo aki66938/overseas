@@ -197,6 +197,60 @@ func decodePowerShellEscapes(value string) string {
 	})
 }
 
+// User-facing business messages for each fixed network operation. The raw
+// operation code never appears as the primary line of a trace event.
+func networkOperationStartMessage(operation string) string {
+	start, _ := networkOperationMessages(operation)
+	return start
+}
+
+func networkOperationSuccessMessage(operation string) string {
+	_, success := networkOperationMessages(operation)
+	return success
+}
+
+func networkOperationFailureMessage(operation string) string {
+	if start, _ := networkOperationMessages(operation); start != "" {
+		return start + "失败"
+	}
+	return "网络操作失败"
+}
+
+func networkOperationMessages(operation string) (string, string) {
+	switch operation {
+	case networkOperationFirewallPrepare:
+		return "正在创建预置防泄漏规则", "预置规则已准备并保持禁用"
+	case networkOperationFirewallEnable:
+		return "正在启用防泄漏保护", "防泄漏保护已启用"
+	case networkOperationFirewallVerify:
+		return "正在核对 Windows 防火墙活动状态", "活动规则核对通过"
+	case networkOperationFirewallDisable:
+		return "正在禁用预置防泄漏规则", "预置规则已禁用"
+	case networkOperationFirewallAudit:
+		return "正在审计预置防火墙定义", "预置防火墙定义审计通过"
+	case networkOperationReady:
+		return "正在等待 sing-box TUN 网卡", "TUN 网卡已就绪"
+	case networkOperationActivate:
+		return "正在切换 DNS 与安全路由", "安全路由已启用"
+	case networkOperationRestore, networkOperationPreparedRestore:
+		return "正在恢复普通网络", "普通网络已恢复"
+	case networkOperationResidue:
+		return "正在检查连接残留", "活动残留已清零"
+	case networkOperationEmergency:
+		return "正在启用应急防护", "应急防护已启用"
+	case networkOperationCapture:
+		return "正在读取当前网络配置", "当前网络配置已确认"
+	case networkOperationScan:
+		return "正在枚举需要保护的网卡", "已识别需保护接口"
+	case networkOperationBlock:
+		return "正在启用防泄漏保护", "防泄漏保护已启用"
+	case networkOperationVerify:
+		return "正在核对 Windows 防火墙活动状态", "活动规则核对通过"
+	default:
+		return "", ""
+	}
+}
+
 func networkStage(operation string) string {
 	switch operation {
 	case networkOperationCapture:
@@ -779,12 +833,12 @@ func (m *WindowsNetworkManager) run(ctx context.Context, operation string, input
 	summary := networkInputSummary(operation, input)
 	m.emitNetworkTrace(traceevent.Event{
 		Generation: generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentPowerShell,
-		Stage: stage, Event: traceevent.EventStarted, Message: "开始执行固定网络操作", Detail: summary,
+		Stage: stage, Event: traceevent.EventStarted, Message: networkOperationStartMessage(operation), Detail: summary,
 	})
 	payload, err := json.Marshal(input)
 	if err != nil {
 		wrapped := newFixedNetworkOperationErrorWithContext(ctx, operation, err, nil)
-		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, "固定网络操作输入编码失败", wrapped.DiagnosticDetail(), traceevent.LevelError)
+		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, networkOperationFailureMessage(operation), wrapped.DiagnosticDetail(), traceevent.LevelError)
 		return nil, wrapped
 	}
 	output, err := m.runner.Run(ctx, operation, payload)
@@ -798,10 +852,10 @@ func (m *WindowsNetworkManager) run(ctx context.Context, operation string, input
 			detail = diagnostic.DiagnosticDetail()
 		}
 		detail, _ = traceevent.SanitizeDetail(detail)
-		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, "固定网络操作失败", detail, traceevent.LevelError)
+		m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventFailed, networkOperationFailureMessage(operation), detail, traceevent.LevelError)
 		return nil, err
 	}
-	m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventSucceeded, "固定网络操作完成", summary, traceevent.LevelInfo)
+	m.emitNetworkTerminal(generation, stage, startedAt, traceevent.EventSucceeded, networkOperationSuccessMessage(operation), summary, traceevent.LevelInfo)
 	return output, nil
 }
 

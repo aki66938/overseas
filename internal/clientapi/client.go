@@ -31,9 +31,13 @@ var (
 )
 
 type Status struct {
-	State     accessmodel.ConnectionState `json:"state"`
-	ErrorCode string                      `json:"error_code,omitempty"`
-	Message   string                      `json:"message,omitempty"`
+	State      accessmodel.ConnectionState `json:"state"`
+	ErrorCode  string                      `json:"error_code,omitempty"`
+	Message    string                      `json:"message,omitempty"`
+	Phase      string                      `json:"phase,omitempty"`
+	Step       int                         `json:"step,omitempty"`
+	TotalSteps int                         `json:"total_steps,omitempty"`
+	ElapsedMS  int64                       `json:"elapsed_ms,omitempty"`
 }
 
 type Diagnostics struct {

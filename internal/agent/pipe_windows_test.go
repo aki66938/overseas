@@ -44,14 +44,14 @@ func TestPipeTraceReturnsIncrementalBoundedBatch(t *testing.T) {
 	source := &fakeTraceSource{batch: traceevent.Batch{
 		Events: events, NextSequence: 5, HasMore: true, OldestSequence: 3,
 	}}
-	controller := &fakePipeController{status: Status{State: accessmodel.StateFailed}}
+	controller := &fakePipeController{status: Status{State: accessmodel.StatePrepared}}
 	server := NewPipeServer(controller, WithTraceSource(source))
 
 	response, ok := pipeTransaction(t, server, Request{ID: "trace-1", Action: ActionTrace, AfterSequence: 2, Limit: 3})
 	if !ok {
 		t.Fatal("trace returned no response")
 	}
-	if response.ID != "trace-1" || response.State != string(accessmodel.StateFailed) || response.ErrorCode != "" {
+	if response.ID != "trace-1" || response.State != string(accessmodel.StatePrepared) || response.ErrorCode != "" {
 		t.Fatalf("response = %#v", response)
 	}
 	var batch traceevent.Batch
@@ -104,7 +104,7 @@ func TestPipeTraceRejectsInvalidRequestFields(t *testing.T) {
 func TestPipeTraceWithoutSourceFailsClosed(t *testing.T) {
 	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateDisconnected}})
 	response, ok := pipeTransaction(t, server, Request{ID: "no-source", Action: ActionTrace})
-	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StateFailed) {
+	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StatePrepared) {
 		t.Fatalf("response = %#v ok=%v", response, ok)
 	}
 }
@@ -115,7 +115,7 @@ func TestPipeTraceRejectsInvalidSourceBatch(t *testing.T) {
 	source := &fakeTraceSource{batch: traceevent.Batch{Events: []traceevent.Event{event}, NextSequence: 1, OldestSequence: 1}}
 	server := NewPipeServer(&fakePipeController{status: Status{State: accessmodel.StateConnected}}, WithTraceSource(source))
 	response, ok := pipeTransaction(t, server, Request{ID: "invalid-source", Action: ActionTrace})
-	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StateFailed) {
+	if !ok || response.ErrorCode != ErrorInvalidRequest || response.State != string(accessmodel.StatePrepared) {
 		t.Fatalf("response = %#v ok=%v", response, ok)
 	}
 }
@@ -316,9 +316,9 @@ func TestPipeDisconnectReceivesDedicatedRecoveryContext(t *testing.T) {
 
 func TestPipeDiagnosticsAreRedacted(t *testing.T) {
 	controller := &fakePipeController{
-		status: Status{State: accessmodel.StateFailed},
+		status: Status{State: accessmodel.StatePrepared},
 		diagnostics: Diagnostics{
-			State:     accessmodel.StateFailed,
+			State:     accessmodel.StatePrepared,
 			ErrorCode: ErrorCredential,
 			Message:   "credential topsecret could not be read",
 			Stage:     "firewall_publish",
@@ -450,7 +450,7 @@ type deadlinePipeController struct {
 func (d *deadlinePipeController) Connect(ctx context.Context) Status {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return Status{State: accessmodel.StateFailed, ErrorCode: "missing_deadline"}
+		return Status{State: accessmodel.StatePrepared, ErrorCode: "missing_deadline"}
 	}
 	d.remaining = time.Until(deadline)
 	return Status{State: accessmodel.StateConnected}
@@ -459,7 +459,7 @@ func (d *deadlinePipeController) Connect(ctx context.Context) Status {
 func (d *deadlinePipeController) Disconnect(ctx context.Context) Status {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return Status{State: accessmodel.StateFailed, ErrorCode: "missing_deadline"}
+		return Status{State: accessmodel.StatePrepared, ErrorCode: "missing_deadline"}
 	}
 	d.remaining = time.Until(deadline)
 	return Status{State: accessmodel.StateDisconnected}

@@ -30,10 +30,20 @@ func TestViewModelMapsConnectionStatesToExactCopy(t *testing.T) {
 			},
 		},
 		{
-			name:   "connecting",
+			name:   "connecting without phase",
 			status: clientapi.Status{State: accessmodel.StateConnecting},
 			want: ViewState{
-				StatusText:    "正在连接",
+				StatusText:    "正在建立安全连接",
+				DetailText:    "",
+				ButtonText:    "正在连接",
+				ButtonEnabled: false,
+			},
+		},
+		{
+			name:   "connecting firewall phase",
+			status: clientapi.Status{State: accessmodel.StateConnecting, Phase: agent.PhaseFirewall, Step: 2, TotalSteps: 6, ElapsedMS: 2100},
+			want: ViewState{
+				StatusText:    "正在启用防泄漏保护 · 2.1 秒 · 第 2/6 步",
 				DetailText:    "",
 				ButtonText:    "正在连接",
 				ButtonEnabled: false,
@@ -50,53 +60,83 @@ func TestViewModelMapsConnectionStatesToExactCopy(t *testing.T) {
 			},
 		},
 		{
-			name:   "failed invalid binary",
-			status: clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorInvalidBinary, Message: "raw internal message"},
+			name:   "prepared after invalid binary",
+			status: clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorInvalidBinary, Message: "raw internal message"},
 			want: ViewState{
-				StatusText:    "连接失败",
+				StatusText:    "未连接",
 				DetailText:    "客户端配置需要修复，请联系 IT",
-				ButtonText:    "安全重试",
+				ButtonText:    "重试连接",
 				ButtonEnabled: true,
 			},
 		},
 		{
-			name:   "failed upstream unavailable",
-			status: clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorCoreNotReady},
+			name:   "prepared after upstream unavailable",
+			status: clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorCoreNotReady},
 			want: ViewState{
-				StatusText:    "连接失败",
-				DetailText:    "无法连接海外访问服务器",
-				ButtonText:    "安全重试",
+				StatusText:    "未连接",
+				DetailText:    "无法启动访问核心，已自动恢复，可重试",
+				ButtonText:    "重试连接",
 				ButtonEnabled: true,
 			},
 		},
 		{
-			name:   "failed carrier session lost",
-			status: clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorReadinessLost},
+			name:   "prepared after carrier session lost",
+			status: clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorReadinessLost},
 			want: ViewState{
-				StatusText:    "连接失败",
-				DetailText:    "运营商线路未登录或已失效，请联系 IT",
-				ButtonText:    "安全重试",
+				StatusText:    "未连接",
+				DetailText:    "连接中断后已自动恢复普通网络，可重试",
+				ButtonText:    "重试连接",
 				ButtonEnabled: true,
 			},
 		},
 		{
-			name:   "failed local configuration",
-			status: clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorNetworkCapture},
+			name:   "prepared after local configuration failure",
+			status: clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorNetworkCapture},
 			want: ViewState{
-				StatusText:    "连接失败",
-				DetailText:    "本机安全网络配置失败，请联系 IT",
-				ButtonText:    "安全重试",
+				StatusText:    "未连接",
+				DetailText:    "本机安全网络配置失败，已自动恢复，可重试",
+				ButtonText:    "重试连接",
 				ButtonEnabled: true,
 			},
 		},
 		{
-			name:   "failed unauthorized",
-			status: clientapi.Status{State: accessmodel.StateFailed, ErrorCode: clientapi.ErrorUnauthorized},
+			name:   "prepared after unauthorized",
+			status: clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: clientapi.ErrorUnauthorized},
 			want: ViewState{
-				StatusText:    "连接失败",
+				StatusText:    "未连接",
 				DetailText:    "当前账号未获授权",
-				ButtonText:    "安全重试",
+				ButtonText:    "重试连接",
 				ButtonEnabled: true,
+			},
+		},
+		{
+			name:   "restoring",
+			status: clientapi.Status{State: accessmodel.StateRestoring},
+			want: ViewState{
+				StatusText:    "正在恢复普通网络",
+				DetailText:    "",
+				ButtonText:    "正在恢复普通网络",
+				ButtonEnabled: false,
+			},
+		},
+		{
+			name:   "preparing",
+			status: clientapi.Status{State: accessmodel.StatePreparing},
+			want: ViewState{
+				StatusText:    "正在准备网络保护配置",
+				DetailText:    "",
+				ButtonText:    "正在准备网络保护配置",
+				ButtonEnabled: false,
+			},
+		},
+		{
+			name:   "failed safe",
+			status: clientapi.Status{State: accessmodel.StateFailedSafe, ErrorCode: agent.ErrorAutomaticRestore},
+			want: ViewState{
+				StatusText:    "已进入应急防护",
+				DetailText:    "自动恢复未能证明完成，应急防护已启用。请重启本机 RegenBio 服务或联系 IT 处理，期间不会发生公网直连。",
+				ButtonText:    "连接不可用",
+				ButtonEnabled: false,
 			},
 		},
 	}
@@ -151,7 +191,7 @@ func TestViewModelSuppressesDoubleClickWhileOperationRuns(t *testing.T) {
 func TestViewModelShowsDisconnectBusyStateAndThenDisconnected(t *testing.T) {
 	client := &fakeServiceClient{
 		statusResult:     clientapi.Status{State: accessmodel.StateConnected},
-		disconnectResult: clientapi.Status{State: accessmodel.StateDisconnected},
+		disconnectResult: clientapi.Status{State: accessmodel.StatePrepared},
 		disconnectGate:   make(chan struct{}),
 		disconnectStart:  make(chan struct{}, 1),
 	}
@@ -208,7 +248,7 @@ func TestViewModelShowsDisconnectBusyStateAndThenError(t *testing.T) {
 	close(client.disconnectGate)
 	<-done
 
-	if got := vm.State(); got.StatusText != "连接失败" || got.DetailText != "无法连接海外访问服务器" || got.ButtonText != "安全重试" || !got.ButtonEnabled {
+	if got := vm.State(); got.StatusText != "未连接" || got.DetailText != "无法启动访问核心，已自动恢复，可重试" || got.ButtonText != "重试连接" || !got.ButtonEnabled {
 		t.Fatalf("final error state = %#v", got)
 	}
 }
@@ -447,53 +487,54 @@ func TestViewModelTracePollContinuesWhileConnectIsBusy(t *testing.T) {
 	<-done
 }
 
-func TestViewModelSafeRetryRestoresAndProvesZeroResidueBeforeConnect(t *testing.T) {
-	zero := traceevent.Residue{}
-	event := viewTraceEvent(12, 4, traceevent.StageResidueVerify, traceevent.EventSucceeded, &zero)
+func TestViewModelPreparedRetryConnectsDirectlyWithoutPreliminaryDisconnect(t *testing.T) {
 	client := &fakeServiceClient{
-		statusResult:      clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorPublicTCPBlock},
-		disconnectResult:  clientapi.Status{State: accessmodel.StateDisconnected},
-		diagnosticsResult: clientapi.Diagnostics{State: accessmodel.StateDisconnected, Generation: 4},
-		connectResult:     clientapi.Status{State: accessmodel.StateConnected},
-		traceBatches:      []traceevent.Batch{{Events: []traceevent.Event{event}, NextSequence: 12, OldestSequence: 12}},
+		statusResult:     clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorPublicTCPBlock},
+		connectResult:    clientapi.Status{State: accessmodel.StateConnected},
+		disconnectResult: clientapi.Status{State: accessmodel.StatePrepared},
 	}
-	vm := NewViewModel(client, nil, WithTraceInterval(time.Millisecond))
+	vm := NewViewModel(client, nil)
 	vm.setStatus(client.statusResult)
 	if err := vm.Toggle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	calls := client.calls()
-	if indexOf(calls, "disconnect") >= indexOf(calls, "diagnostics") || indexOf(calls, "diagnostics") >= indexOf(calls, "trace") || indexOf(calls, "trace") >= indexOf(calls, "connect") {
-		t.Fatalf("safe retry order = %v", calls)
+	if indexOf(calls, "disconnect") != -1 || client.connectCalls() != 1 {
+		t.Fatalf("v18 retry must call Connect directly: %v", calls)
 	}
 	if vm.State().StatusText != "已连接" {
 		t.Fatalf("state = %#v", vm.State())
 	}
 }
 
-func TestViewModelSafeRetryStopsOnNonzeroResidue(t *testing.T) {
-	residue := traceevent.Residue{ManagedRules: 1}
-	event := viewTraceEvent(9, 2, traceevent.StageResidueVerify, traceevent.EventFailed, &residue)
+func TestViewModelFailedSafeRefusesConnectAndAllowsRestore(t *testing.T) {
 	client := &fakeServiceClient{
-		statusResult:      clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorPublicTCPBlock},
-		disconnectResult:  clientapi.Status{State: accessmodel.StateDisconnected},
-		diagnosticsResult: clientapi.Diagnostics{State: accessmodel.StateDisconnected, Generation: 2},
-		traceBatches:      []traceevent.Batch{{Events: []traceevent.Event{event}, NextSequence: 9, OldestSequence: 9}},
+		statusResult:     clientapi.Status{State: accessmodel.StateFailedSafe, ErrorCode: agent.ErrorAutomaticRestore},
+		disconnectResult: clientapi.Status{State: accessmodel.StatePrepared},
 	}
-	vm := NewViewModel(client, nil, WithTraceInterval(time.Millisecond))
+	vm := NewViewModel(client, nil)
 	vm.setStatus(client.statusResult)
 	if err := vm.Toggle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if client.connectCalls() != 0 || vm.State().PrimaryEnabled {
-		t.Fatalf("unsafe retry state=%#v calls=%v", vm.State(), client.calls())
+	if client.connectCalls() != 0 || client.disconnectCalls() != 0 {
+		t.Fatalf("failed_safe toggle must not call the service: %v", client.calls())
+	}
+	if vm.State().PrimaryEnabled {
+		t.Fatalf("failed_safe primary button must stay disabled: %#v", vm.State())
+	}
+	if err := vm.Restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.disconnectCalls() != 1 {
+		t.Fatalf("restore calls = %v", client.calls())
 	}
 }
 
 func TestViewModelRestoreNeverReconnects(t *testing.T) {
 	client := &fakeServiceClient{
-		statusResult:     clientapi.Status{State: accessmodel.StateFailed},
-		disconnectResult: clientapi.Status{State: accessmodel.StateDisconnected},
+		statusResult:     clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorPublicTCPBlock},
+		disconnectResult: clientapi.Status{State: accessmodel.StatePrepared},
 	}
 	vm := NewViewModel(client, nil)
 	vm.setStatus(client.statusResult)

@@ -171,6 +171,23 @@ func TestWindowsNetworkResidueRetainsExactOwnershipAfterRestore(t *testing.T) {
 	}
 }
 
+func TestNetworkOperationMessagesAreBusinessTexts(t *testing.T) {
+	if len(networkPowerShellScripts) == 0 {
+		t.Fatal("no network operations registered")
+	}
+	for operation := range networkPowerShellScripts {
+		start, success := networkOperationMessages(operation)
+		if start == "" || success == "" {
+			t.Fatalf("operation %s has no business messages", operation)
+		}
+		for _, forbidden := range []string{"固定网络操作", "network operation", operation} {
+			if strings.Contains(start, forbidden) || strings.Contains(success, forbidden) {
+				t.Fatalf("operation %s leaks generic or raw text: %q / %q", operation, start, success)
+			}
+		}
+	}
+}
+
 func TestResiduePowerShellUsesOnlyFixedProductIdentities(t *testing.T) {
 	for _, marker := range []string{
 		"Get-NetFirewallRule -PolicyStore ActiveStore -Group", "Get-NetRoute -AddressFamily", "Get-NetAdapter -IncludeHidden",

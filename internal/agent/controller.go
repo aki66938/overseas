@@ -272,7 +272,7 @@ func (c *Controller) Connect(ctx context.Context) Status {
 // with a later generation, and StartMonitor runs only after the status is
 // connected.
 func (c *Controller) startRuntimeMonitor(ctx context.Context, generation uint64, instance ProcessInstance, done chan struct{}, prepared PreparedNetwork) {
-	monitorStarted := c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageMonitorStart, "启动运行期监控")
+	monitorStarted := c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageMonitorStart, "正在启动运行期监控")
 	failures, err := c.network.StartMonitor(ctx, prepared)
 	if err != nil {
 		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageMonitorStart, monitorStarted, "运行期监控启动失败", err, nil)
@@ -488,11 +488,11 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 	c.mu.Unlock()
 	if c.network == nil {
 		err := errors.New("network manager is unavailable")
-		startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, "准备网络保护配置")
+		startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, "正在读取当前网络配置与网卡清单")
 		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, startedTrace, "网络保护配置不可用", err, nil)
 		return preChecks(ErrorPreparedUnavailable)
 	}
-	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, "准备网络保护配置")
+	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, "正在读取当前网络配置与网卡清单")
 	prepared, err := c.network.Prepare(ctx)
 	if err != nil {
 		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, startedTrace, "网络保护配置不可用", err, nil)
@@ -503,10 +503,10 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 		return c.restoreAfterFailure(ctx, generation, code, PreparedNetwork{}, false, nil, nil, false)
 	}
 	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, startedTrace, "网络保护配置已就绪", fmt.Sprintf("generation=%d adapters=%d rules=%d", prepared.Generation, prepared.AdapterCount, prepared.RuleCount), nil)
-	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, "保存当前网络状态")
+	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, "正在读取当前网络配置")
 	snapshot, err := c.network.Capture(ctx, prepared)
 	if err != nil {
-		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedTrace, "无法保存当前网络状态", err, nil)
+		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedTrace, "无法读取当前网络配置", err, nil)
 		code := codeForContext(ctx, ErrorNetworkCapture)
 		return c.restoreAfterFailure(ctx, generation, code, PreparedNetwork{}, false, nil, nil, false)
 	}
@@ -514,13 +514,13 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 	c.snapshot = snapshot
 	c.hasSnapshot = true
 	c.mu.Unlock()
-	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedTrace, "当前网络状态已保存", "", nil)
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageNetworkCapture, startedTrace, "当前网络配置已确认", "", nil)
 
 	// Step 2: enable and verify the prepared leak protection.
 	c.mu.Lock()
 	_ = c.setStatusLocked(c.phaseStatus(PhaseFirewall, 2, startedAt, false))
 	c.mu.Unlock()
-	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageFirewallEnable, "启用防泄漏保护")
+	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageFirewallEnable, "正在启用防泄漏保护")
 	if err := c.network.EnableProtection(ctx, prepared); err != nil {
 		code := ErrorFirewallEnable
 		if diagnosticStage(err) == traceevent.StageFirewallVerify {
@@ -588,7 +588,7 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 	c.mu.Lock()
 	_ = c.setStatusLocked(c.phaseStatus(PhaseTUN, 4, startedAt, false))
 	c.mu.Unlock()
-	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, "等待 TUN 接口就绪")
+	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, "正在等待 sing-box TUN 网卡")
 	if err := c.network.WaitTUNReady(ctx); err != nil {
 		code := ErrorTUNNotFound
 		stage := traceevent.StageTUNReady
@@ -603,13 +603,13 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 		c.traceFailure(generation, traceevent.ComponentNetwork, stage, startedTrace, tunFailureMessage(code), err, nil)
 		return c.restoreAfterFailure(ctx, generation, code, prepared, true, instance, snapshot, true)
 	}
-	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, startedTrace, "TUN 接口已就绪", "", nil)
+	c.traceSuccess(generation, traceevent.ComponentNetwork, traceevent.StageTUNReady, startedTrace, "TUN 网卡已就绪", "", nil)
 
 	// Step 5: switch DNS, interface metric, and the safe routes.
 	c.mu.Lock()
 	_ = c.setStatusLocked(c.phaseStatus(PhaseRouteDNS, 5, startedAt, false))
 	c.mu.Unlock()
-	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, "切换 DNS 与安全路由")
+	startedTrace = c.traceStart(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, "正在切换 DNS 与安全路由")
 	if err := c.network.ActivateTUNRoutes(ctx); err != nil {
 		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageRouteActivation, startedTrace, "安全路由启用失败", err, nil)
 		return c.restoreAfterFailure(ctx, generation, codeForContext(ctx, ErrorRouteActivationFailed), prepared, true, instance, snapshot, true)
@@ -634,7 +634,7 @@ func tunFailureMessage(code string) string {
 	case ErrorCanceled:
 		return "TUN 等待已取消"
 	default:
-		return "TUN 接口未就绪"
+		return "TUN 网卡在截止时间内未出现"
 	}
 }
 
@@ -650,7 +650,7 @@ func diagnosticStage(err error) string {
 // proves zero active residue. It returns prepared with the original error code
 // when the restore is provably complete, and failed_safe otherwise.
 func (c *Controller) restoreAfterFailure(ctx context.Context, generation uint64, code string, prepared PreparedNetwork, processStarted bool, instance ProcessInstance, snapshot any, hasSnapshot bool) connectOutcome {
-	startedTrace := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageAutomaticRestore, "自动恢复普通网络")
+	startedTrace := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageAutomaticRestore, "正在自动恢复普通网络")
 	outcome := c.restoreTransaction(context.WithoutCancel(ctx), generation, processStarted, instance, snapshot, hasSnapshot)
 	if outcome.restored {
 		status := safeFailure(code)
@@ -673,10 +673,10 @@ func (c *Controller) restoreTransaction(ctx context.Context, generation uint64, 
 			return disconnectOutcome{status: failedSafeStatus(), restored: false, err: termination.Err}
 		}
 	}
-	restoreStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, "恢复产品拥有的网络状态")
+	restoreStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, "正在恢复普通网络")
 	if c.network == nil {
 		err := errors.New("network manager is unavailable")
-		c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态恢复失败", err, nil)
+		c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "普通网络恢复失败", err, nil)
 		return disconnectOutcome{status: failedSafeStatus(), restored: false, err: err}
 	}
 	var restoreErr error
@@ -686,12 +686,12 @@ func (c *Controller) restoreTransaction(ctx context.Context, generation uint64, 
 		restoreErr = c.network.Reconcile(ctx)
 	}
 	if restoreErr != nil {
-		c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "网络状态恢复失败", restoreErr, nil)
+		c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "普通网络恢复失败", restoreErr, nil)
 		return disconnectOutcome{status: failedSafeStatus(), restored: false, err: restoreErr}
 	}
-	c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "产品网络状态已恢复", "", nil)
+	c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageNetworkRestore, restoreStarted, "普通网络已恢复", "", nil)
 	if reporter, ok := c.network.(residueReporter); ok {
-		residueStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, "检查连接残留")
+		residueStarted := c.traceStart(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, "正在检查连接残留")
 		residue, err := reporter.Residue(ctx)
 		if err != nil {
 			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留检查失败", err, nil)
@@ -702,7 +702,7 @@ func (c *Controller) restoreTransaction(ctx context.Context, generation uint64, 
 			c.traceFailure(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留未清零", err, &residue)
 			return disconnectOutcome{status: failedSafeStatus(), restored: false, err: err}
 		}
-		c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "连接残留已清零", "", &residue)
+		c.traceSuccess(generation, traceevent.ComponentRecovery, traceevent.StageResidueVerify, residueStarted, "活动残留已清零", "", &residue)
 	}
 	return disconnectOutcome{status: preparedStatus("普通网络已恢复"), restored: true}
 }
@@ -988,7 +988,7 @@ var failureMessages = map[string]string{
 	ErrorExpiredCredential:     "访问凭据已过期",
 	ErrorPreparedUnavailable:   "网络保护配置不可用",
 	ErrorNetworkChanged:        "网络环境已变化",
-	ErrorNetworkCapture:        "无法保存当前网络状态",
+	ErrorNetworkCapture:        "无法读取当前网络配置",
 	ErrorFirewallEnable:        "无法启用防泄漏保护",
 	ErrorFirewallVerify:        "防泄漏规则核对失败",
 	ErrorPublicTCPBlock:        "无法建立防泄漏保护",

@@ -77,7 +77,7 @@ func NewViewModel(client serviceClient, clipboard clipboard, options ...ViewMode
 	vm := &ViewModel{
 		client: client, clipboard: clipboard,
 		pollInterval: 2 * time.Second, traceInterval: defaultTraceInterval,
-		status:    clientapi.Status{State: accessmodel.StateDisconnected},
+		status:    clientapi.Status{State: accessmodel.StatePrepared},
 		closePoll: make(chan struct{}),
 	}
 	for _, option := range options {
@@ -186,7 +186,7 @@ func (v *ViewModel) RefreshTrace(ctx context.Context) error {
 
 func (v *ViewModel) Toggle(ctx context.Context) error {
 	v.mu.Lock()
-	if v.busy || v.status.State == accessmodel.StateConnecting || (v.status.State == accessmodel.StateFailed && v.retryBlocked) {
+	if v.busy || stateBlocksToggle(v.status.State) {
 		state := v.renderLocked()
 		v.mu.Unlock()
 		v.notify(state)
@@ -197,9 +197,10 @@ func (v *ViewModel) Toggle(ctx context.Context) error {
 	switch current.State {
 	case accessmodel.StateConnected:
 		v.busyAction = busyActionDisconnect
-	case accessmodel.StateFailed:
-		v.busyAction = busyActionRetry
 	default:
+		// A prepared response may carry the last failure code; the v18
+		// connect transaction restores by itself, so retry needs no
+		// preliminary disconnect.
 		v.busyAction = busyActionConnect
 	}
 	state := v.renderLocked()
@@ -208,86 +209,27 @@ func (v *ViewModel) Toggle(ctx context.Context) error {
 
 	var next clientapi.Status
 	var err error
-	switch current.State {
-	case accessmodel.StateConnected:
+	if current.State == accessmodel.StateConnected {
 		next, err = v.client.Disconnect(ctx)
-	case accessmodel.StateFailed:
-		next, err = v.safeRetry(ctx)
-	default:
+	} else {
 		next, err = v.client.Connect(ctx)
 	}
 	if err != nil {
-		if errors.Is(err, errResidueProof) {
-			v.update(clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorRestoreFailed}, false, true)
-			return nil
-		}
 		next = statusForClientError(err)
 	}
 	v.update(next, false, false)
 	return nil
 }
 
-func (v *ViewModel) safeRetry(ctx context.Context) (clientapi.Status, error) {
-	restored, err := v.client.Disconnect(ctx)
-	if err != nil {
-		return clientapi.Status{}, err
+// stateBlocksToggle reports whether the primary button must refuse to start a
+// new connect transaction in the given state.
+func stateBlocksToggle(state accessmodel.ConnectionState) bool {
+	switch state {
+	case accessmodel.StateConnecting, accessmodel.StatePreparing, accessmodel.StateRestoring, accessmodel.StateFailedSafe:
+		return true
+	default:
+		return false
 	}
-	if restored.State != accessmodel.StateDisconnected {
-		return clientapi.Status{}, errResidueProof
-	}
-	diagnostics, err := v.client.Diagnostics(ctx)
-	if err != nil || diagnostics.State != accessmodel.StateDisconnected {
-		return clientapi.Status{}, errResidueProof
-	}
-	if err := v.waitForZeroResidue(ctx, diagnostics.Generation); err != nil {
-		return clientapi.Status{}, errResidueProof
-	}
-	return v.client.Connect(ctx)
-}
-
-func (v *ViewModel) waitForZeroResidue(ctx context.Context, generation uint64) error {
-	proofContext, cancel := context.WithTimeout(ctx, safeRetryProofTimeout)
-	defer cancel()
-	for {
-		if found, zero := v.residueProof(generation); found {
-			if zero {
-				return nil
-			}
-			return errResidueProof
-		}
-		if err := v.RefreshTrace(proofContext); err != nil {
-			return err
-		}
-		if found, zero := v.residueProof(generation); found {
-			if zero {
-				return nil
-			}
-			return errResidueProof
-		}
-		timer := time.NewTimer(v.traceInterval)
-		select {
-		case <-proofContext.Done():
-			timer.Stop()
-			return proofContext.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func (v *ViewModel) residueProof(generation uint64) (found, zero bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for index := len(v.traceEvents) - 1; index >= 0; index-- {
-		event := v.traceEvents[index]
-		if event.Generation != generation || event.Stage != traceevent.StageResidueVerify || event.Residue == nil {
-			continue
-		}
-		if event.Event != traceevent.EventSucceeded && event.Event != traceevent.EventFailed {
-			continue
-		}
-		return true, event.Event == traceevent.EventSucceeded && event.Residue.IsZero()
-	}
-	return false, false
 }
 
 func (v *ViewModel) Restore(ctx context.Context) error {
@@ -305,7 +247,7 @@ func (v *ViewModel) Restore(ctx context.Context) error {
 	if err != nil {
 		status = statusForClientError(err)
 	}
-	v.update(status, false, status.State != accessmodel.StateDisconnected)
+	v.update(status, false, status.State == accessmodel.StateFailedSafe)
 	return nil
 }
 
@@ -414,35 +356,71 @@ func (v *ViewModel) renderLocked() ViewState {
 			state.StatusText, state.PrimaryButtonText = "正在关闭", "正在关闭"
 		case busyActionRestore:
 			state.StatusText, state.PrimaryButtonText = "正在恢复", "正在恢复"
-		case busyActionRetry:
-			state.StatusText, state.PrimaryButtonText = "正在安全重试", "正在安全重试"
 		default:
-			state.StatusText, state.PrimaryButtonText = "正在连接", "正在连接"
+			state.StatusText, state.PrimaryButtonText = connectionPhaseText(v.status), "正在连接"
 		}
 		return withCompatibility(state)
 	}
-	if v.status.State == accessmodel.StateConnecting {
-		state.StatusText, state.PrimaryButtonText = "正在连接", "正在连接"
-		return withCompatibility(state)
-	}
 	switch v.status.State {
+	case accessmodel.StateConnecting:
+		state.StatusText = connectionPhaseText(v.status)
+		state.PrimaryButtonText = "正在连接"
+		return withCompatibility(state)
+	case accessmodel.StatePreparing:
+		state.StatusText = "正在准备网络保护配置"
+		state.PrimaryButtonText = "正在准备网络保护配置"
+		return withCompatibility(state)
+	case accessmodel.StateRestoring:
+		state.StatusText = "正在恢复普通网络"
+		state.PrimaryButtonText = "正在恢复普通网络"
+		return withCompatibility(state)
 	case accessmodel.StateConnected:
 		state.StatusText = "已连接"
 		state.PrimaryButtonText = "关闭海外访问"
 		state.PrimaryEnabled = true
 		state.RestoreEnabled = true
-	case accessmodel.StateFailed:
-		state.StatusText = "连接失败"
-		state.DetailText = approvedMessage(v.status)
-		state.PrimaryButtonText = "安全重试"
-		state.PrimaryEnabled = !v.retryBlocked
+	case accessmodel.StateFailedSafe:
+		state.StatusText = "已进入应急防护"
+		state.DetailText = "自动恢复未能证明完成，应急防护已启用。请重启本机 RegenBio 服务或联系 IT 处理，期间不会发生公网直连。"
+		state.PrimaryButtonText = "连接不可用"
+		state.PrimaryEnabled = false
 		state.RestoreEnabled = true
+	case accessmodel.StatePrepared:
+		state.StatusText = "未连接"
+		state.DetailText = approvedMessage(v.status)
+		state.PrimaryButtonText = "开启海外访问"
+		state.PrimaryEnabled = true
+		if v.status.ErrorCode != "" {
+			state.PrimaryButtonText = "重试连接"
+			state.RestoreEnabled = true
+		}
 	default:
 		state.StatusText = "未连接"
 		state.PrimaryButtonText = "开启海外访问"
 		state.PrimaryEnabled = true
 	}
 	return withCompatibility(state)
+}
+
+// connectionPhaseText renders the six-step business header, for example
+// "正在启用防泄漏保护 · 2.1 秒 · 第 2/6 步".
+func connectionPhaseText(status clientapi.Status) string {
+	names := map[string]string{
+		agent.PhaseFingerprintSnapshot: "正在读取当前网络配置",
+		agent.PhaseFirewall:            "正在启用防泄漏保护",
+		agent.PhaseCore:                "正在启动访问核心",
+		agent.PhaseTUN:                 "正在等待 TUN 网卡",
+		agent.PhaseRouteDNS:            "正在切换 DNS 与安全路由",
+		agent.PhaseConnected:           "已连接",
+	}
+	name, ok := names[status.Phase]
+	if !ok || name == "" {
+		name = "正在建立安全连接"
+	}
+	if status.Step > 0 && status.TotalSteps >= status.Step {
+		return fmt.Sprintf("%s · %.1f 秒 · 第 %d/%d 步", name, float64(status.ElapsedMS)/1000.0, status.Step, status.TotalSteps)
+	}
+	return name
 }
 
 func withCompatibility(state ViewState) ViewState {
@@ -454,28 +432,38 @@ func withCompatibility(state ViewState) ViewState {
 const (
 	busyActionConnect    = "connect"
 	busyActionDisconnect = "disconnect"
-	busyActionRetry      = "retry"
 	busyActionRestore    = "restore"
 )
 
 func approvedMessage(status clientapi.Status) string {
+	if status.ErrorCode == "" {
+		return ""
+	}
 	switch status.ErrorCode {
 	case clientapi.ErrorUnauthorized:
 		return "当前账号未获授权"
 	case agent.ErrorReadinessLost:
-		return "运营商线路未登录或已失效，请联系 IT"
-	case agent.ErrorNetworkCapture, agent.ErrorPublicTCPBlock, agent.ErrorRouteActivationFailed, agent.ErrorRestoreFailed:
-		return "本机安全网络配置失败，请联系 IT"
+		return "连接中断后已自动恢复普通网络，可重试"
+	case agent.ErrorNetworkChanged:
+		return "网络环境发生变化，已自动恢复，可重试"
+	case agent.ErrorNetworkCapture, agent.ErrorPublicTCPBlock, agent.ErrorFirewallEnable, agent.ErrorFirewallVerify, agent.ErrorRouteActivationFailed, agent.ErrorRestoreFailed:
+		return "本机安全网络配置失败，已自动恢复，可重试"
+	case agent.ErrorTUNNotFound, agent.ErrorTUNIdentityMismatch:
+		return "TUN 网卡创建异常，已自动恢复，可重试"
+	case agent.ErrorPreparedUnavailable:
+		return "网络保护配置暂不可用，请稍后重试或联系 IT"
 	case agent.ErrorInvalidPolicy, agent.ErrorInvalidBinary, agent.ErrorCredential, agent.ErrorExpiredCredential, agent.ErrorRender:
 		return "客户端配置需要修复，请联系 IT"
+	case agent.ErrorCoreStart, agent.ErrorCoreNotReady:
+		return "无法启动访问核心，已自动恢复，可重试"
 	default:
-		return "无法连接海外访问服务器"
+		return "连接未成功，已自动恢复普通网络，可重试"
 	}
 }
 
 func statusForClientError(err error) clientapi.Status {
 	if errors.Is(err, clientapi.ErrServiceUnavailable) {
-		return clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorCoreNotReady}
+		return clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorCoreNotReady}
 	}
-	return clientapi.Status{State: accessmodel.StateFailed, ErrorCode: agent.ErrorInvalidBinary}
+	return clientapi.Status{State: accessmodel.StatePrepared, ErrorCode: agent.ErrorInvalidBinary}
 }
