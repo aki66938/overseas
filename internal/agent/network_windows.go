@@ -1735,6 +1735,7 @@ if ([bool]$i.RestoreInterfaces) {
 $allAdapters = @(Get-NetAdapter -IncludeHidden)
 foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
   $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
+  if ($matches.Count -eq 0) { continue }
   if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
   if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
   $currentIndex = [int]$matches[0].InterfaceIndex
@@ -1772,6 +1773,7 @@ if ([bool]$i.RestoreInterfaces) {
 $allAdapters = @(Get-NetAdapter -IncludeHidden)
 foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
   $matches = @($allAdapters | Where-Object { [string]::Equals([string]$_.InterfaceGuid, [string]$physical.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase) })
+  if ($matches.Count -eq 0) { continue }
   if ($matches.Count -ne 1) { throw 'Could not resolve one physical adapter by stable GUID.' }
   if ($null -ne $i.OwnedTUN -and [string]::Equals([string]$matches[0].InterfaceGuid, [string]$i.OwnedTUN.InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical adapter identity resolves to the owned TUN.' }
   $currentIndex = [int]$matches[0].InterfaceIndex

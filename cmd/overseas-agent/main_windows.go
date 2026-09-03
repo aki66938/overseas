@@ -31,6 +31,11 @@ const (
 	serviceExitPipe    = 2
 	serviceExitRestore = 3
 	serviceStopTimeout = 20 * time.Second
+	// Startup recovery runs multi-step PowerShell transactions that are
+	// especially slow right after boot; 20 seconds was proven too tight on
+	// the pilot machine and left the service dead after reboots.
+	serviceRecoveryTimeout = 75 * time.Second
+	serviceStartPumpTick   = 3 * time.Second
 
 	installDirectory = `C:\Program Files\RegenBio\OverseasAccess`
 	dataDirectory    = `C:\ProgramData\RegenBio\OverseasAccess`
@@ -79,10 +84,32 @@ type servicePreparer interface {
 func (s *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	defer s.closeTrace()
 	s.recordService(traceevent.LevelInfo, "Windows 服务开始启动")
-	changes <- svc.Status{State: svc.StartPending}
-	recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), serviceStopTimeout)
-	recovery := s.controller.Recover(recoveryContext)
-	cancelRecovery()
+	changes <- svc.Status{State: svc.StartPending, WaitHint: uint32(serviceStartPumpTick.Milliseconds())}
+	// Run recovery while pumping StartPending checkpoints so SCM's 30-second
+	// start deadline never fires during a slow multi-step PowerShell restore.
+	recoveryDone := make(chan agent.Status, 1)
+	go func() {
+		recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), serviceRecoveryTimeout)
+		defer cancelRecovery()
+		recoveryDone <- s.controller.Recover(recoveryContext)
+	}()
+	pumpStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(serviceStartPumpTick)
+		defer ticker.Stop()
+		checkpoint := uint32(0)
+		for {
+			select {
+			case <-ticker.C:
+				checkpoint++
+				changes <- svc.Status{State: svc.StartPending, WaitHint: uint32(serviceStartPumpTick.Milliseconds()), CheckPoint: checkpoint}
+			case <-pumpStop:
+				return
+			}
+		}
+	}()
+	recovery := <-recoveryDone
+	close(pumpStop)
 	if recovery.State != accessmodel.StatePrepared {
 		s.recordService(traceevent.LevelError, "Windows 服务启动恢复失败")
 		changes <- svc.Status{State: svc.StopPending}

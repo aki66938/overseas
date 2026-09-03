@@ -177,13 +177,28 @@ $allowedNames = @($expectedNames + $previousNames | Sort-Object -Unique)
 $rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
 $unknown = @($rules | Where-Object { $allowedNames -notcontains [string]$_.Name })
 if ($unknown.Count -ne 0) { throw 'prepared_firewall: unknown product-group rule exists.' }
-if ($previousRules.Count -ne 0) {
-  foreach ($previous in $previousRules) { Assert-PreparedRuleFor $previous 'PersistentStore' 'False' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ }) }
-  $previousEmergency = @($previousRules | Where-Object { [bool]$_.Emergency })
+# Topology drift tolerance: a ledger rule whose definition no longer matches
+# (renamed or vanished adapter aliases, changed prefix sets) is materialized
+# and removed so the rebuild recreates it for the current topology. Only
+# enabled or ambiguous rules are hostile and fail closed.
+$previousValid = @()
+$previousDrifted = @()
+foreach ($previous in $previousRules) {
+  $name = [string]$previous.Name
+  $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+  if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule is ambiguous: ' + $name) }
+  if ([string]$owned[0].Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: previous rule is unowned: ' + $name) }
+  if ([string]$owned[0].Enabled -eq 'True') { throw ('prepared_firewall: previous rule is enabled: ' + $name) }
+  $drifted = $false
+  try { Assert-PreparedRuleFor $previous 'PersistentStore' 'False' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ }) } catch { $drifted = $true }
+  if ($drifted) { Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop; $previousDrifted += $previous } else { $previousValid += $previous }
+}
+$previousEmergency = @($previousValid | Where-Object { [bool]$_.Emergency })
+if ($previousValid.Count -ne 0) {
   if ($previousEmergency.Count -ne 1) { throw 'prepared_firewall: previous emergency rule is ambiguous.' }
   Enable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$previousEmergency[0].Name) -ErrorAction Stop
   Assert-PreparedRuleFor $previousEmergency[0] 'ActiveStore' 'True' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ })
-  $previousNormalNames = @($previousRules | Where-Object { -not [bool]$_.Emergency } | ForEach-Object { [string]$_.Name })
+  $previousNormalNames = @($previousValid | Where-Object { -not [bool]$_.Emergency } | ForEach-Object { [string]$_.Name })
   foreach ($name in $previousNormalNames) {
     $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop)
     if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule became ambiguous: ' + $name) }
@@ -208,11 +223,11 @@ foreach ($expected in @($expectedRules | Where-Object { -not [bool]$_.Emergency 
 }
 $expectedEmergency = @($expectedRules | Where-Object { [bool]$_.Emergency })
 if ($expectedEmergency.Count -ne 1) { throw 'prepared_firewall: desired emergency rule is ambiguous.' }
-if ($previousRules.Count -ne 0) {
+if ($previousValid.Count -ne 0) {
   $oldEmergencyName = [string]$previousEmergency[0].Name
-  $ownedEmergency = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction Stop)
-  if ($ownedEmergency.Count -ne 1) { throw 'prepared_firewall: previous emergency rule became ambiguous.' }
-  Remove-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction Stop
+  $ownedEmergency = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction SilentlyContinue)
+  if ($ownedEmergency.Count -gt 1) { throw 'prepared_firewall: previous emergency rule became ambiguous.' }
+  if ($ownedEmergency.Count -eq 1) { Remove-NetFirewallRule -PolicyStore PersistentStore -Name $oldEmergencyName -ErrorAction Stop }
 }
 $expected = $expectedEmergency[0]
 $name = [string]$expected.Name
