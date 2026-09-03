@@ -125,6 +125,8 @@ func RenderClient(input ClientInput) ([]byte, error) {
 	// suffixes resolve to real corporate addresses via corp-dns; the final
 	// server handles every other record type (sing-box 1.13 forbids fakeip
 	// as the default server).
+	// The fakeip pool is IPv4-only: the tun carries no IPv6 route, and an
+	// AAAA fake address would blackhole browser connections instantly.
 	dnsServers := []dnsServer{
 		{
 			Type:       "tcp",
@@ -137,7 +139,6 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Type:       "fakeip",
 			Tag:        "fakeip",
 			Inet4Range: "198.18.0.0/15",
-			Inet6Range: "fc00::/18",
 		},
 	}
 	dnsRules := []dnsRule{{
