@@ -1521,20 +1521,23 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 // per-interface resolver and metric writes only.
 const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
   Clear-DnsClientCache -ErrorAction SilentlyContinue
-  Set-DnsClientServerAddress -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
-  foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
-    Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
-  }
-  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction Stop
+  # Deterministic resolution: every live IPv4 interface (including adapters
+  # that appeared after prepare) points at the tun resolver, so Windows'
+  # parallel DNS racing can never answer with a polluted corporate address.
+  $tunIndex = [int]$i.OwnedTUN.InterfaceIndex
+  $all = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.InterfaceIndex -ne $tunIndex -and $_.InterfaceIndex -gt 1 } | Select-Object -ExpandProperty InterfaceIndex -Unique)
+  if ($all.Count -ne 0) { Set-DnsClientServerAddress -InterfaceIndex $all -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop }
+  Set-DnsClientServerAddress -InterfaceIndex $tunIndex -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
+  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $tunIndex -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction Stop
   [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
 } else {
   Clear-DnsClientCache -ErrorAction SilentlyContinue
+  # Restore: every live interface returns to its own default resolver; the
+  # prepared interfaces also get their captured metrics back.
+  $tunIndex = [int]$i.OwnedTUN.InterfaceIndex
+  $all = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.InterfaceIndex -ne $tunIndex -and $_.InterfaceIndex -gt 1 } | Select-Object -ExpandProperty InterfaceIndex -Unique)
+  if ($all.Count -ne 0) { Set-DnsClientServerAddress -InterfaceIndex $all -ResetServerAddresses -ErrorAction Stop }
   foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
-    if ([bool]$physical.DNSAutomatic) {
-      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ResetServerAddresses -ErrorAction Stop
-    } else {
-      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @($physical.DNSServers) -ErrorAction Stop
-    }
     Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$physical.Index) -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric -ErrorAction Stop
   }
   [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
