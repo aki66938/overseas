@@ -66,7 +66,7 @@ func (windowsIPHelperAPI) Adapters(ctx context.Context) ([]ipHelperAdapter, erro
 					return nil, fmt.Errorf("adapter %s unicast address: %w", name, addressErr)
 				}
 				if address.Is4() {
-					addresses = append(addresses, address.String())
+					addresses = append(addresses, fmt.Sprintf("%s/%d", address.String(), unicast.OnLinkPrefixLength))
 				}
 			}
 			result = append(result, ipHelperAdapter{
@@ -126,7 +126,7 @@ func (r ipHelperNetworkReader) TUNReady(ctx context.Context, alias, address stri
 		}
 		matching := make([]string, 0)
 		for _, value := range adapter.IPAddresses {
-			if value == target {
+			if candidate, _, _ := strings.Cut(value, "/"); candidate == target {
 				matching = append(matching, value)
 			}
 		}
