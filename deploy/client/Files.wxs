@@ -1,4 +1,4 @@
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+﻿<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Fragment>
     <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
@@ -56,6 +56,7 @@
         <File Id="SingBoxLicense" Source="sing-box-LICENSE.txt" Checksum="yes" />
         <!-- Wintun Prebuilt Binaries License; keep the official license distinct. -->
         <File Id="WintunLicense" Source="wintun-LICENSE.txt" Checksum="yes" />
+        <File Id="PocRootCert" Source="RegenBio-OverseasAccess-PoC-Root.cer" Checksum="yes" />
       </Component>
       <Component Id="InstallerHarness" Guid="5AF50244-CB84-4B2D-80BD-B36315F29E54" Bitness="always64">
         <File Id="InstallerHarnessFile" Source="install-client.ps1" KeyPath="yes" Checksum="yes" />

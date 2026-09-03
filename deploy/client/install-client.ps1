@@ -49,7 +49,8 @@ $RequiredPayloads = @(
     'client-sbom.json',
     'SHA256SUMS',
     'sing-box-LICENSE.txt',
-    'wintun-LICENSE.txt'
+    'wintun-LICENSE.txt',
+    'RegenBio-OverseasAccess-PoC-Root.cer'
 )
 
 function Assert-Elevated {
@@ -497,6 +498,16 @@ function Set-ServiceHardening {
     if (-not $configurationProof.DelayedAutoStart) { throw 'Delayed-auto start proof failed.' }
 }
 
+function Import-PocRootCertificate {
+    $certPath = Join-Path $InstallRoot 'RegenBio-OverseasAccess-PoC-Root.cer'
+    if (-not (Test-Path -LiteralPath $certPath -PathType Leaf)) { throw 'The PoC root certificate file is missing.' }
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+    foreach ($storeName in @('Root', 'TrustedPublisher')) {
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+        try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close() }
+    }
+}
+
 function Ensure-OwnedService {
     $binaryPath = Join-Path $InstallRoot 'overseas-agent.exe'
     $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -885,7 +896,8 @@ function Install-ClientTransaction {
         }
         Write-OwnershipManifest -TransactionId $TransactionId -Manifest $Manifest
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingService' -PendingResource $ServiceName
-        Ensure-OwnedService
+        Import-PocRootCertificate
+  Ensure-OwnedService
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingFirewall' -PendingResource $OwnedFirewallGroup -CompletedResource $ServiceName
         Ensure-OwnedFirewallRules
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingShortcut' -PendingResource $ShortcutPath -CompletedResource $OwnedFirewallGroup
