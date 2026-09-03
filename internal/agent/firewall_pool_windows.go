@@ -185,7 +185,10 @@ $previousDrifted = @()
 foreach ($previous in $previousRules) {
   $name = [string]$previous.Name
   $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
-  if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule is ambiguous: ' + $name) }
+  # Count 0 means an earlier failed attempt already deleted it while the
+  # ledger stayed stale: tolerate and move on, or every retry would deadlock.
+  if ($owned.Count -gt 1) { throw ('prepared_firewall: previous rule is ambiguous: ' + $name) }
+  if ($owned.Count -eq 0) { continue }
   if ([string]$owned[0].Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: previous rule is unowned: ' + $name) }
   if ([string]$owned[0].Enabled -eq 'True') { throw ('prepared_firewall: previous rule is enabled: ' + $name) }
   $drifted = $false
@@ -193,16 +196,19 @@ foreach ($previous in $previousRules) {
   if ($drifted) { Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop; $previousDrifted += $previous } else { $previousValid += $previous }
 }
 $previousEmergency = @($previousValid | Where-Object { [bool]$_.Emergency })
-if ($previousValid.Count -ne 0) {
-  if ($previousEmergency.Count -ne 1) { throw 'prepared_firewall: previous emergency rule is ambiguous.' }
+if ($previousEmergency.Count -gt 1) { throw 'prepared_firewall: previous emergency rule is ambiguous.' }
+if ($previousEmergency.Count -eq 1) {
   Enable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$previousEmergency[0].Name) -ErrorAction Stop
   Assert-PreparedRuleFor $previousEmergency[0] 'ActiveStore' 'True' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ })
-  $previousNormalNames = @($previousValid | Where-Object { -not [bool]$_.Emergency } | ForEach-Object { [string]$_.Name })
-  foreach ($name in $previousNormalNames) {
-    $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop)
-    if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule became ambiguous: ' + $name) }
-    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop
-  }
+}
+# Remove every still-present previous normal rule. When the previous
+# emergency drifted away there is nothing to carry: the rebuild recreates
+# the full pool (emergency included) for the current topology.
+$previousNormalNames = @($previousValid | Where-Object { -not [bool]$_.Emergency } | ForEach-Object { [string]$_.Name })
+foreach ($name in $previousNormalNames) {
+  $owned = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop)
+  if ($owned.Count -ne 1) { throw ('prepared_firewall: previous rule became ambiguous: ' + $name) }
+  Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop
 }
 foreach ($expected in @($expectedRules | Where-Object { -not [bool]$_.Emergency })) {
   $name = [string]$expected.Name
