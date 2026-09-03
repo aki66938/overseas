@@ -16,11 +16,14 @@ func TestPreparedNetworkJSONContract(t *testing.T) {
 		{},
 		{Generation: 1, Fingerprint: "ABC", AdapterCount: 1, RuleCount: 4},
 		{Generation: 1, Fingerprint: strings.Repeat("a", 64), AdapterCount: 0, RuleCount: 3},
-		{Generation: 1, Fingerprint: strings.Repeat("a", 64), AdapterCount: 1, RuleCount: 0},
 	} {
 		if err := validatePreparedNetwork(invalid); err == nil {
 			t.Fatalf("validatePreparedNetwork(%+v) succeeded", invalid)
 		}
+	}
+	// RuleCount 0 is valid in the PoC fast path (no firewall pool).
+	if err := validatePreparedNetwork(PreparedNetwork{Generation: 1, Fingerprint: strings.Repeat("a", 64), AdapterCount: 1, RuleCount: 0}); err != nil {
+		t.Fatalf("validatePreparedNetwork(poc zero-rule) = %v", err)
 	}
 }
 

@@ -120,6 +120,13 @@ func (m *WindowsNetworkManager) Prepare(ctx context.Context) (PreparedNetwork, e
 	if err := ctx.Err(); err != nil {
 		return PreparedNetwork{}, err
 	}
+	return m.preparePoc(ctx)
+}
+
+func (m *WindowsNetworkManager) legacyPrepare(ctx context.Context) (PreparedNetwork, error) {
+	if err := ctx.Err(); err != nil {
+		return PreparedNetwork{}, err
+	}
 	m.mu.Lock()
 	active := m.current != nil
 	m.mu.Unlock()
@@ -367,7 +374,13 @@ func (m *WindowsNetworkManager) snapshotFromPrepared(state WindowsPreparedState)
 	}, nil
 }
 
+// EnableProtection: no firewall pool in the PoC path — sing-box owns
+// routing; egress policy belongs to the server side.
 func (m *WindowsNetworkManager) EnableProtection(ctx context.Context, prepared PreparedNetwork) error {
+	return nil
+}
+
+func (m *WindowsNetworkManager) legacyEnableProtection(ctx context.Context, prepared PreparedNetwork) error {
 	m.mu.Lock()
 	if m.current == nil || m.current.PreparedGeneration != prepared.Generation || m.prepared == nil || preparedNetworkFromState(*m.prepared) != prepared {
 		m.mu.Unlock()

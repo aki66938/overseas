@@ -17,9 +17,8 @@ const (
 	// types; A/AAAA come from the fakeip pool so the tunnel carries no
 	// lookup traffic in the common path.
 	publicDNSOverTCPServer = "8.8.8.8"
-	tunAddress       = "172.19.0.1/30"
-	publicDNSServer  = "1.1.1.1"
-
+	tunAddress             = "172.19.0.1/30"
+	publicDNSServer        = "1.1.1.1"
 )
 
 var shadowsocks2022KeyLengths = map[string]int{

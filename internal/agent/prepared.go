@@ -83,6 +83,7 @@ type WindowsPreparedRule struct {
 type WindowsPreparedState struct {
 	Version                   int                    `json:"Version"`
 	Generation                uint64                 `json:"Generation"`
+	AdapterCount              int                    `json:"AdapterCount,omitempty"`
 	PolicySHA256              string                 `json:"PolicySHA256"`
 	RuleDefinitionVersion     int                    `json:"RuleDefinitionVersion"`
 	FingerprintSHA256         string                 `json:"FingerprintSHA256"`
@@ -116,9 +117,10 @@ func validatePreparedNetwork(prepared PreparedNetwork) error {
 	if !lowercaseSHA256Pattern.MatchString(prepared.Fingerprint) {
 		return errors.New("prepared fingerprint must be lowercase SHA-256")
 	}
-	if prepared.AdapterCount <= 0 || prepared.RuleCount <= 0 {
-		return errors.New("prepared adapter and rule counts must be positive")
+	if prepared.AdapterCount <= 0 {
+		return errors.New("prepared adapter count must be positive")
 	}
+	// RuleCount may be zero in the PoC fast path: no firewall pool.
 	return nil
 }
 

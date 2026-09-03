@@ -226,8 +226,8 @@ func TestClientDNSFakeIPConfigPresent(t *testing.T) {
 			Type       string `json:"type"`
 			Inet4Range string `json:"inet4_range"`
 		} `json:"servers"`
-		Final            string `json:"final"`
-		IndependentCache bool   `json:"independent_cache"`
+		Final            string         `json:"final"`
+		IndependentCache bool           `json:"independent_cache"`
 		FakeIP           map[string]any `json:"fakeip"`
 	}
 	if err := json.Unmarshal(root.DNS, &dns); err != nil {

@@ -166,7 +166,10 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Tag:           "tun-in",
 			InterfaceName: tunInterfaceName,
 			Address:       []string{tunAddress},
-			AutoRoute:     false,
+			// auto_route: sing-box installs the two default-half routes and
+			// the tun DNS itself, and they vanish with the process. No
+			// product-owned route table to build, verify, or restore.
+			AutoRoute: true,
 		}},
 		Outbounds: []clientOutbound{
 			{

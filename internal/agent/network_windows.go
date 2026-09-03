@@ -544,7 +544,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 // fingerprint, and atomically persists the active snapshot without touching
 // the firewall.
 func (m *WindowsNetworkManager) Capture(ctx context.Context, prepared PreparedNetwork) (any, error) {
-	return m.capturePrepared(ctx, prepared)
+	return m.capturePoc(ctx, prepared)
 }
 
 func (m *WindowsNetworkManager) installEmergencyProtection(ctx context.Context) error {
@@ -577,122 +577,90 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	var identity WindowsTUNIdentity
-	ready := false
-	if reader, ok := m.native.(tunReadyReader); ok {
-		// Native polling: one IP Helper call per 150ms tick instead of a
-		// multi-second PowerShell session.
-		deadline := time.Now().Add(8 * time.Second)
-		for {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				m.mu.Unlock()
-				return ctxErr
-			}
-			candidate, found, pollErr := reader.TUNReady(ctx, windowsTUNInterface, windowsTUNAddress, m.current.BaselineAdapterGuids)
-			if pollErr == nil && found {
-				if err := validateTUNIdentity(candidate, m.current.BaselineAdapterGuids); err != nil {
-					// A present adapter that fails ownership validation is a
-					// hard mismatch: waiting longer cannot fix it.
-					m.mu.Unlock()
-					return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
-				}
-				identity = candidate
-				ready = true
-				break
-			}
-			if time.Now().After(deadline) {
-				m.mu.Unlock()
-				return fmt.Errorf("%w: deadline reached", errTUNNotFound)
-			}
-			time.Sleep(150 * time.Millisecond)
-		}
-	} else {
-		input := windowsNetworkInput{
-			TUNInterface:         windowsTUNInterface,
-			TUNAddress:           windowsTUNAddress,
-			BaselineAdapterGuids: append([]string(nil), m.current.BaselineAdapterGuids...),
-		}
-		output, err := m.run(ctx, networkOperationReady, input)
-		if err != nil {
-			m.mu.Unlock()
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			var diagnostic stagedDiagnosticError
-			detail := ""
-			if errors.As(err, &diagnostic) {
-				detail = diagnostic.DiagnosticDetail()
-			}
-			if strings.Contains(detail, "More than one fixed TUN adapter") {
-				return fmt.Errorf("%w: %s", errTUNIdentityMismatch, detail)
-			}
-			return fmt.Errorf("%w: %s", errTUNNotFound, err.Error())
-		}
-		if err := json.Unmarshal(output, &identity); err != nil {
-			m.mu.Unlock()
-			return fmt.Errorf("%w: decode TUN identity: %v", errTUNIdentityMismatch, err)
-		}
-		if err := validateTUNIdentity(identity, m.current.BaselineAdapterGuids); err != nil {
-			m.mu.Unlock()
-			return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
-		}
-		ready = true
-	}
-	if !ready {
+	reader, ok := m.native.(tunReadyReader)
+	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: deadline reached", errTUNNotFound)
+		return errors.New("native tun detection is unavailable")
 	}
-	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+1)
-	ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: windowsFakeIPRoutePrefix, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
-	for _, value := range m.blockedPrefixes {
-		if addressFamilyForPrefix(value) == "IPv4" {
-			ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: value, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
+	deadline := time.Now().Add(8 * time.Second)
+	var identity WindowsTUNIdentity
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			m.mu.Unlock()
+			return ctxErr
 		}
-	}
-	for _, route := range m.current.NodeRoutes {
-		if route.BypassRequired {
-			ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{
-				AddressFamily:     "IPv4",
-				DestinationPrefix: route.NodeAddress + "/32",
-				InterfaceIndex:    route.InterfaceIndex,
-				NextHop:           route.NextHop,
-				RouteMetric:       route.RouteMetric,
-			})
+		candidate, found, pollErr := reader.TUNReady(ctx, windowsTUNInterface, windowsTUNAddress, m.current.BaselineAdapterGuids)
+		if pollErr == nil && found {
+			if err := validateTUNIdentity(candidate, m.current.BaselineAdapterGuids); err != nil {
+				m.mu.Unlock()
+				return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
+			}
+			identity = candidate
+			break
 		}
+		if time.Now().After(deadline) {
+			m.mu.Unlock()
+			return fmt.Errorf("%w: deadline reached", errTUNNotFound)
+		}
+		time.Sleep(150 * time.Millisecond)
 	}
 	m.current.OwnedTUN = &identity
-	m.current.OwnedRoutes = ownedRoutes
 	m.current.OwnershipPhase = windowsSnapshotPhaseTUNOwned
-	if err := sealWindowsSnapshot(m.current); err != nil {
-		m.mu.Unlock()
-		return err
-	}
-	if err := m.store.Save(m.statePath, *m.current); err != nil {
-		m.mu.Unlock()
-		return err
-	}
 	m.mu.Unlock()
 	return nil
 }
 
-// ActivateTUNRoutes applies the owned routes and TUN metric natively, then
-// delegates the DNS switch to one small PowerShell transaction.
+// ActivateTUNRoutes: routes and tun DNS are owned by sing-box auto_route;
+// the product only flushes the resolver cache so fresh fakeip mappings
+// replace any stale ones from a previous core instance.
 func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 	m.mu.Lock()
 	if m.current == nil {
 		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	snapshot := *m.current
 	m.mu.Unlock()
-	if m.routes == nil {
-		return errors.New("route applier is unavailable")
-	}
-	if err := m.routes.ApplyOwnedRoutes(snapshot); err != nil {
+	return minimalRouting{}.flushResolverCache()
+}
+
+// Restore: nothing persisted, no routes or resolver writes to undo — stop
+// is handled by the controller; flush the cache and clear the transaction.
+func (m *WindowsNetworkManager) Restore(ctx context.Context, _ any) error {
+	if err := (minimalRouting{}).flushResolverCache(); err != nil {
 		return err
 	}
-	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, true))
-	return err
+	m.mu.Lock()
+	if m.current != nil {
+		m.rememberOwnershipLocked(*m.current)
+	}
+	m.current = nil
+	m.mu.Unlock()
+	return nil
+}
+
+// Reconcile: startup hygiene only.
+func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
+	return minimalRouting{}.flushResolverCache()
+}
+
+// Residue: the tun adapter is the only product footprint that can outlive
+// a transaction; routes die with the core process.
+func (m *WindowsNetworkManager) Residue(ctx context.Context) (traceevent.Residue, error) {
+	reader, ok := m.native.(tunReadyReader)
+	tunCount := 0
+	if ok {
+		if _, found, err := reader.TUNReady(ctx, windowsTUNInterface, windowsTUNAddress, nil); err == nil && found {
+			tunCount = 1
+		}
+	}
+	residue := traceevent.Residue{ProductTUNs: tunCount}
+	if residue.IsZero() {
+		m.mu.Lock()
+		m.lastOwnedRoutes = nil
+		m.lastOwnedTUN = nil
+		m.mu.Unlock()
+	}
+	return residue, nil
 }
 
 func dnsMetricInput(snapshot WindowsNetworkSnapshot, connected bool) windowsNetworkInput {
@@ -735,167 +703,6 @@ func (m *WindowsNetworkManager) loadSealedPreparedState(accept func(WindowsPrepa
 		return WindowsPreparedState{}, false
 	}
 	return state, true
-}
-
-func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
-	snapshot, err := asWindowsSnapshot(value)
-	if err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	m.mu.Lock()
-	if m.current != nil {
-		snapshot = *m.current
-	}
-	m.mu.Unlock()
-	if err := m.validateWindowsSnapshot(snapshot); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	if snapshot.PreparedGeneration != 0 {
-		state, ok := m.preparedStateForSnapshot(snapshot)
-		if ok {
-			if err := m.restorePreparedTransaction(ctx, snapshot, state); err != nil {
-				return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
-			}
-		} else {
-			err := errors.New("prepared generation for the active snapshot is unavailable")
-			return errors.Join(err, m.armEmergencyProtection(ctx))
-		}
-	} else if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	if err := m.store.Delete(m.statePath); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	m.mu.Lock()
-	m.rememberOwnershipLocked(snapshot)
-	m.current = nil
-	m.mu.Unlock()
-	return nil
-}
-
-// restorePreparedTransaction reverses one prepared connection: DNS, interface
-// metrics, and owned routes return to the captured baseline; the prepared
-// pool is disabled (never deleted) inside the same PowerShell transaction.
-func (m *WindowsNetworkManager) restorePreparedTransaction(ctx context.Context, snapshot WindowsNetworkSnapshot, state WindowsPreparedState) error {
-	if m.routes != nil {
-		if err := m.routes.RevokeOwnedRoutes(snapshot); err != nil {
-			return err
-		}
-	}
-	if _, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, false)); err != nil {
-		return err
-	}
-	return m.disablePreparedFirewall(ctx, state)
-}
-
-func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
-	m.mu.Lock()
-	snapshot, err := m.store.Load(m.statePath)
-	if errors.Is(err, errSnapshotNotFound) {
-		m.mu.Unlock()
-		if state, ok := m.loadSealedPreparedState(func(WindowsPreparedState) bool { return true }); ok {
-			return m.disablePreparedFirewall(ctx, state)
-		}
-		input := windowsNetworkInput{
-			FirewallRuleNames:         windowsFirewallRuleNames(),
-			FirewallGroup:             windowsFirewallGroup,
-			BlockedRemoteAddresses:    append([]string(nil), m.blockedPrefixes...),
-			DNSBlockedRemoteAddresses: append([]string(nil), m.dnsBlockedPrefixes...),
-		}
-		if _, cleanupErr := m.run(ctx, networkOperationRestore, input); cleanupErr != nil {
-			return errors.Join(cleanupErr, m.armEmergencyProtection(ctx))
-		}
-		return nil
-	}
-	if err != nil {
-		m.mu.Unlock()
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	m.mu.Unlock()
-	if err := m.validateWindowsSnapshot(snapshot); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	if snapshot.PreparedGeneration != 0 {
-		if state, ok := m.preparedStateForSnapshot(snapshot); ok {
-			if err := m.restorePreparedTransaction(ctx, snapshot, state); err != nil {
-				return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
-			}
-		} else {
-			err := errors.New("prepared generation for the leftover snapshot is unavailable")
-			return errors.Join(err, m.armEmergencyProtection(ctx))
-		}
-	} else if _, err := m.run(ctx, networkOperationRestore, m.restorationInput(snapshot)); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	if err := m.store.Delete(m.statePath); err != nil {
-		return errors.Join(err, m.armEmergencyProtection(ctx))
-	}
-	m.mu.Lock()
-	m.rememberOwnershipLocked(snapshot)
-	m.current = nil
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *WindowsNetworkManager) Residue(ctx context.Context) (traceevent.Residue, error) {
-	m.mu.Lock()
-	ownedRoutes := append([]WindowsOwnedRoute(nil), m.lastOwnedRoutes...)
-	ownedTUN := cloneTUNIdentity(m.lastOwnedTUN)
-	current := m.current
-	if current != nil {
-		ownedRoutes = append([]WindowsOwnedRoute(nil), current.OwnedRoutes...)
-		ownedTUN = cloneTUNIdentity(current.OwnedTUN)
-	}
-	m.mu.Unlock()
-
-	residue := traceevent.Residue{}
-	if current != nil {
-		residue.Snapshot = true
-		residue.SnapshotPhase = current.OwnershipPhase
-	} else {
-		snapshot, err := m.store.Load(m.statePath)
-		if err == nil {
-			residue.Snapshot = true
-			residue.SnapshotPhase = snapshot.OwnershipPhase
-			if len(ownedRoutes) == 0 {
-				ownedRoutes = append([]WindowsOwnedRoute(nil), snapshot.OwnedRoutes...)
-			}
-			if ownedTUN == nil {
-				ownedTUN = cloneTUNIdentity(snapshot.OwnedTUN)
-			}
-		} else if !errors.Is(err, errSnapshotNotFound) {
-			return traceevent.Residue{}, err
-		}
-	}
-	output, err := m.run(ctx, networkOperationResidue, windowsNetworkInput{
-		FirewallGroup:  windowsFirewallGroup,
-		TUNInterface:   windowsTUNInterface,
-		OwnedTUN:       ownedTUN,
-		OwnedRoutes:    ownedRoutes,
-		CoreExecutable: windowsCoreExecutable,
-	})
-	if err != nil {
-		return traceevent.Residue{}, err
-	}
-	var counts windowsResidueCounts
-	if err := json.Unmarshal(output, &counts); err != nil {
-		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, fmt.Errorf("decode residue counts: %w", err), nil)
-	}
-	if counts.ManagedRules < 0 || counts.DisabledPreparedRules < 0 || counts.ProductRoutes < 0 || counts.ProductTUNs < 0 || counts.CoreProcesses < 0 {
-		return traceevent.Residue{}, newFixedNetworkOperationErrorWithContext(ctx, networkOperationResidue, errors.New("negative residue count"), nil)
-	}
-	residue.ManagedRules = counts.ManagedRules
-	residue.DisabledPreparedRules = counts.DisabledPreparedRules
-	residue.ProductRoutes = counts.ProductRoutes
-	residue.ProductTUNs = counts.ProductTUNs
-	residue.CoreProcesses = counts.CoreProcesses
-	if residue.IsZero() {
-		m.mu.Lock()
-		m.lastOwnedRoutes = nil
-		m.lastOwnedTUN = nil
-		m.mu.Unlock()
-	}
-	return residue, nil
 }
 
 func (m *WindowsNetworkManager) rememberOwnershipLocked(snapshot WindowsNetworkSnapshot) {
