@@ -60,6 +60,9 @@ type scriptedNativeReader struct {
 	release          chan struct{}
 	once             sync.Once
 	failFingerprints int
+	tunReady         bool
+	tun              WindowsTUNIdentity
+	tunReadyErr      error
 }
 
 func (r *scriptedNativeReader) Baseline(ctx context.Context, _ []string) (WindowsNetworkBaseline, error) {
@@ -84,6 +87,12 @@ func (r *scriptedNativeReader) Baseline(ctx context.Context, _ []string) (Window
 		r.baselines = r.baselines[1:]
 	}
 	return value, nil
+}
+
+func (r *scriptedNativeReader) TUNReady(ctx context.Context, alias, address string, baseline []string) (WindowsTUNIdentity, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tun, r.tunReady, r.tunReadyErr
 }
 
 func (r *scriptedNativeReader) Fingerprint(ctx context.Context, nodes []string) (string, error) {
@@ -127,8 +136,10 @@ func TestWindowsNetworkPrepareFirstGenerationAndUnchangedReuse(t *testing.T) {
 	if preparedStore.saves != 1 || runner.count(networkOperationFirewallPrepare) != 1 {
 		t.Fatalf("saves/prepare = %d/%d, want 1/1", preparedStore.saves, runner.count(networkOperationFirewallPrepare))
 	}
-	if runner.count(networkOperationFirewallAudit) != 2 {
-		t.Fatalf("audit calls = %d, want 2", runner.count(networkOperationFirewallAudit))
+	// First prepare audits the fresh pool; the unchanged reuse path skips the
+	// ~10s audit so a click never pays for it.
+	if runner.count(networkOperationFirewallAudit) != 1 {
+		t.Fatalf("audit calls = %d, want 1", runner.count(networkOperationFirewallAudit))
 	}
 }
 
@@ -320,7 +331,7 @@ func TestWindowsNetworkFastPathUsesNativeCaptureThenExactEnableAndVerify(t *test
 	if runner.count(networkOperationCapture) != 0 || runner.count(networkOperationScan) != 0 || runner.count(networkOperationBlock) != 0 || runner.count(networkOperationVerify) != 0 {
 		t.Fatalf("legacy operations ran: %v", runner.operations)
 	}
-	want := []string{networkOperationFirewallPrepare, networkOperationFirewallAudit, networkOperationFirewallEnable, networkOperationFirewallVerify}
+	want := []string{networkOperationFirewallPrepare, networkOperationFirewallAudit, networkOperationFirewallArm}
 	if len(runner.operations) != len(want) {
 		t.Fatalf("operations = %v, want %v", runner.operations, want)
 	}
@@ -338,6 +349,7 @@ func TestWindowsNetworkWaitTUNReadyDoesNotReconcileFirewall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.native = &testTUNNative{inner: manager.native, tun: validTUNIdentity(), found: true}
 	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)

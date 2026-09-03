@@ -193,9 +193,9 @@ func (m *WindowsNetworkManager) prepareNetwork(ctx context.Context) (PreparedNet
 			if err := validatePreparedFirewallOwnership(rules, existing.Rules); err != nil {
 				return PreparedNetwork{}, err
 			}
-			if err := m.auditPreparedFirewall(ctx, existing, false); err != nil {
-				return PreparedNetwork{}, errors.Join(err, m.installPreparedEmergencyProtection(ctx, existing))
-			}
+			// No audit on the reuse path: the sealed ledger plus the arm-time
+			// bulk assertions already prove ownership, and a full audit costs
+			// ~10s of PowerShell on every click.
 			m.mu.Lock()
 			copyState := existing
 			m.prepared = &copyState
@@ -377,10 +377,7 @@ func (m *WindowsNetworkManager) EnableProtection(ctx context.Context, prepared P
 		return err
 	}
 	m.mu.Unlock()
-	if err := m.enablePreparedFirewall(ctx, state); err != nil {
-		return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
-	}
-	if err := m.verifyPreparedFirewall(ctx, state); err != nil {
+	if err := m.armPreparedFirewall(ctx, state); err != nil {
 		return errors.Join(err, m.installPreparedEmergencyProtection(context.WithoutCancel(ctx), state))
 	}
 	return nil

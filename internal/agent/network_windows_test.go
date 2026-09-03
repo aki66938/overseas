@@ -149,6 +149,7 @@ func TestWindowsNetworkResidueRetainsExactOwnershipAfterRestore(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +173,16 @@ func TestWindowsNetworkResidueRetainsExactOwnershipAfterRestore(t *testing.T) {
 }
 
 func TestNetworkOperationMessagesAreBusinessTexts(t *testing.T) {
+	// dns_metric and firewall_arm carry dedicated business texts.
+	for _, pair := range []struct{ operation, start, success string }{
+		{networkOperationDNSMetric, "正在切换 DNS 与安全路由", "安全路由已启用"},
+		{networkOperationFirewallArm, "正在启用防泄漏保护", "防泄漏保护已启用"},
+	} {
+		start, success := networkOperationMessages(pair.operation)
+		if start != pair.start || success != pair.success {
+			t.Fatalf("operation %s messages = %q / %q", pair.operation, start, success)
+		}
+	}
 	if len(networkPowerShellScripts) == 0 {
 		t.Fatal("no network operations registered")
 	}
@@ -327,9 +338,11 @@ func TestWindowsNetworkActivateUsesFixedTUNRoutesAndDNS(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	armTestTUN(manager, runner)
 	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)
@@ -339,14 +352,18 @@ func TestWindowsNetworkActivateUsesFixedTUNRoutesAndDNS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	input := runner.inputFor(t, networkOperationActivate)
-	if input.TUNInterface != windowsTUNInterface || input.TUNDNS != windowsTUNDNS {
-		t.Fatalf("TUN input = interface %q DNS %q", input.TUNInterface, input.TUNDNS)
+	applier := manager.routes.(*testRouteApplier)
+	if len(applier.applied) == 0 {
+		t.Fatal("routes were not applied")
 	}
-	if input.OwnedTUN == nil || input.OwnedTUN.InterfaceGuid != "new-tun-guid" || len(input.OwnedRoutes) == 0 {
-		t.Fatalf("owned TUN activation input = %#v", input)
+	if applier.applied[0].OwnedTUN == nil || applier.applied[0].OwnedTUN.InterfaceGuid != "new-tun-guid" || len(applier.applied[0].OwnedRoutes) == 0 {
+		t.Fatalf("owned TUN activation input = %#v", applier.applied[0])
 	}
-	assertOwnedRouteCovers(t, input.OwnedRoutes, netip.MustParseAddr("8.8.8.8"), windowsOwnedRouteMetric, validTUNIdentity().InterfaceIndex)
+	assertOwnedRouteCovers(t, applier.applied[0].OwnedRoutes, netip.MustParseAddr("8.8.8.8"), windowsOwnedRouteMetric, validTUNIdentity().InterfaceIndex)
+	dns := runner.inputFor(t, networkOperationDNSMetric)
+	if dns.TUNInterface != windowsTUNInterface || dns.TUNDNS != windowsTUNDNS || !dns.DNSConnected {
+		t.Fatalf("dns metric input = %#v", dns)
+	}
 }
 
 func TestWindowsNetworkRestoreDeletesSnapshotOnlyAfterSuccess(t *testing.T) {
@@ -402,9 +419,11 @@ func TestWindowsNetworkTUNOwnedRestoreUsesStableInterfaceGUID(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	armTestTUN(manager, runner)
 	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)
@@ -480,6 +499,7 @@ func TestWindowsNetworkCanonicalIPv4ExceptionsReachFirewallAndTUNRoutes(t *testi
 	runner := &fakeNetworkRunner{capture: validWindowsSnapshot(), ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,12 +512,15 @@ func TestWindowsNetworkCanonicalIPv4ExceptionsReachFirewallAndTUNRoutes(t *testi
 	}
 	t.Cleanup(func() { _ = manager.Restore(context.Background(), snapshot) })
 
-	block := manager.blockedPrefixes
-	tun := runner.inputFor(t, networkOperationActivate).OwnedRoutes
+	tun := manager.routes.(*testRouteApplier).applied[0].OwnedRoutes
 	for _, value := range []string{"192.0.0.9", "192.0.0.10"} {
 		address := netip.MustParseAddr(value)
-		assertAddressCovered(t, block, address, true)
+		assertAddressCovered(t, manager.blockedPrefixes, address, true)
 		assertOwnedRouteCovers(t, tun, address, windowsOwnedRouteMetric, validTUNIdentity().InterfaceIndex)
+	}
+	dns := runner.inputFor(t, networkOperationDNSMetric)
+	if dns.TUNInterface != windowsTUNInterface || dns.TUNDNS != windowsTUNDNS || !dns.DNSConnected {
+		t.Fatalf("dns metric input = %#v", dns)
 	}
 }
 
@@ -803,9 +826,11 @@ func TestWindowsNetworkUsesCapturedBestRouteForEveryNodeBypass(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: snapshot, ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(policy, `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	armTestTUN(manager, runner)
 	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)
@@ -815,7 +840,11 @@ func TestWindowsNetworkUsesCapturedBestRouteForEveryNodeBypass(t *testing.T) {
 	}
 	assertAddressCovered(t, manager.blockedPrefixes, netip.MustParseAddr("8.8.4.4"), false)
 
-	input := runner.inputFor(t, networkOperationActivate)
+	applier := manager.routes.(*testRouteApplier)
+	if len(applier.applied) == 0 {
+		t.Fatal("routes were not applied")
+	}
+	input := applier.applied[0]
 	var bypass *WindowsOwnedRoute
 	for index := range input.OwnedRoutes {
 		if input.OwnedRoutes[index].DestinationPrefix == "8.8.4.4/32" {
@@ -839,6 +868,7 @@ func TestWindowsNetworkRestoreCarriesFullOwnedRouteTuples(t *testing.T) {
 	runner := &fakeNetworkRunner{capture: snapshot, ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -896,6 +926,7 @@ func TestWindowsNetworkReadinessRejectsUnownedOrMalformedTUN(t *testing.T) {
 			runner := &fakeNetworkRunner{capture: snapshot, ready: test.identity}
 			store := &fakeSnapshotStore{}
 			manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+			armTestTUN(manager, runner)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -919,6 +950,7 @@ func TestWindowsNetworkReadinessAcceptsNewFixedIdentityWithoutDriverMetadataHeur
 	runner := &fakeNetworkRunner{capture: snapshot, ready: identity}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -986,14 +1018,76 @@ func fullyOwnedWindowsSnapshotFromCapture(t *testing.T, capture WindowsNetworkSn
 	runner := &fakeNetworkRunner{capture: capture, ready: validTUNIdentity()}
 	store := &fakeSnapshotStore{}
 	manager, err := newWindowsNetworkManager(validPolicy(), `C:\state.json`, runner, store)
+	armTestTUN(manager, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	armTestTUN(manager, runner)
+	armTestTUN(manager, runner)
 	seedActiveSnapshot(t, manager, store, runner)
 	if err := manager.WaitTUNReady(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	return store.snapshot
+}
+
+// testTUNNative decorates the production native reader so WaitTUNReady can be
+// exercised without a real wintun adapter.
+type testTUNNative struct {
+	inner nativeNetworkReader
+	tun   WindowsTUNIdentity
+	found bool
+	err   error
+}
+
+func (n *testTUNNative) Baseline(ctx context.Context, nodes []string) (WindowsNetworkBaseline, error) {
+	return n.inner.Baseline(ctx, nodes)
+}
+
+func (n *testTUNNative) Fingerprint(ctx context.Context, nodes []string) (string, error) {
+	return n.inner.Fingerprint(ctx, nodes)
+}
+
+func (n *testTUNNative) TUNReady(ctx context.Context, alias, address string, baseline []string) (WindowsTUNIdentity, bool, error) {
+	return n.tun, n.found, n.err
+}
+
+type testRouteApplier struct {
+	mu       sync.Mutex
+	applied  []WindowsNetworkSnapshot
+	revoked  []WindowsNetworkSnapshot
+	applyErr error
+}
+
+func (a *testRouteApplier) ApplyOwnedRoutes(snapshot WindowsNetworkSnapshot) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.applyErr != nil {
+		return a.applyErr
+	}
+	a.applied = append(a.applied, snapshot)
+	return nil
+}
+
+func (a *testRouteApplier) RevokeOwnedRoutes(snapshot WindowsNetworkSnapshot) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.revoked = append(a.revoked, snapshot)
+	return nil
+}
+
+// armTestTUN wires the TUN detection stub and a recording route applier from
+// the runner fixture: a configured ready identity means present-and-ready;
+// otherwise not found.
+func armTestTUN(manager *WindowsNetworkManager, runner *fakeNetworkRunner) *testRouteApplier {
+	applier := &testRouteApplier{}
+	manager.routes = applier
+	if runner.ready.InterfaceAlias != "" || runner.ready.InterfaceGuid != "" {
+		manager.native = &testTUNNative{inner: manager.native, tun: runner.ready, found: true}
+		return applier
+	}
+	manager.native = &testTUNNative{inner: manager.native}
+	return applier
 }
 
 // seedActiveSnapshot installs the fixture as the manager's persisted captured
@@ -1031,6 +1125,7 @@ func capturedWindowsSnapshot(t *testing.T) WindowsNetworkSnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
+	armTestTUN(manager, runner)
 	return seedActiveSnapshot(t, manager, store, runner)
 }
 

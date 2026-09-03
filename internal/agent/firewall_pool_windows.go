@@ -71,13 +71,10 @@ func (m *WindowsNetworkManager) installPreparedEmergencyProtection(ctx context.C
 	return err
 }
 
-func (m *WindowsNetworkManager) enablePreparedFirewall(ctx context.Context, state WindowsPreparedState) error {
-	_, err := m.run(ctx, networkOperationFirewallEnable, m.preparedFirewallInput(state, false))
-	return err
-}
-
-func (m *WindowsNetworkManager) verifyPreparedFirewall(ctx context.Context, state WindowsPreparedState) error {
-	_, err := m.run(ctx, networkOperationFirewallVerify, m.preparedFirewallInput(state, true))
+// armPreparedFirewall enables the pool and proves the active store in a
+// single PowerShell transaction.
+func (m *WindowsNetworkManager) armPreparedFirewall(ctx context.Context, state WindowsPreparedState) error {
+	_, err := m.run(ctx, networkOperationFirewallArm, m.preparedFirewallInput(state, false))
 	return err
 }
 
@@ -249,6 +246,57 @@ foreach ($name in @($i.FirewallRuleNames)) {
   Enable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$name) -ErrorAction Stop
 }
 foreach ($expected in $normal) { Assert-PreparedRule $expected 'ActiveStore' 'True' }
+[pscustomobject]@{EnabledCount=[int]$normal.Count}|ConvertTo-Json -Compress`
+
+// preparedFirewallArmPowerShell enables the pool and verifies the active
+// store inside ONE PowerShell session: bulk reads replace per-rule CIM
+// round trips (the dominant cost on AV-hooked machines).
+const preparedFirewallArmPowerShell = preparedFirewallPowerShellHelpers + `
+$normal = @($i.PreparedRules | Where-Object { -not [bool]$_.Emergency })
+if ($normal.Count -eq 0) { throw 'prepared_firewall: normal rule set is empty.' }
+$names = @($normal | ForEach-Object { [string]$_.Name })
+$rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $names -ErrorAction Stop)
+if ($rules.Count -ne $normal.Count) { throw 'prepared_firewall: a normal rule is missing from the persistent store.' }
+foreach ($rule in $rules) {
+  if ([string]$rule.Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: unowned rule ' + [string]$rule.Name + '.') }
+  if ([string]$rule.Enabled -ne 'False') { throw ('prepared_firewall: rule ' + [string]$rule.Name + ' is not disabled.') }
+}
+$expectedByName = @{}
+foreach ($expected in $normal) { $expectedByName[[string]$expected.Name] = $expected }
+foreach ($rule in $rules) {
+  $expected = $expectedByName[[string]$rule.Name]
+  if ([string]$rule.Description -ne (Get-PreparedDescription $expected)) { throw ('prepared_firewall: definition drift for ' + [string]$rule.Name + '.') }
+}
+Enable-NetFirewallRule -PolicyStore PersistentStore -Name $names -ErrorAction Stop
+$active = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $names -ErrorAction Stop)
+if ($active.Count -ne $normal.Count) { throw 'prepared_firewall: enabled rules are not visible in the active store.' }
+$activeByName = @{}
+foreach ($rule in $active) { $activeByName[[string]$rule.Name] = $rule }
+foreach ($expected in $normal) {
+  $name = [string]$expected.Name
+  $rule = $activeByName[$name]
+  if ($null -eq $rule) { throw ('prepared_firewall: ' + $name + ' is not active.') }
+  if ([string]$rule.Enabled -ne 'True' -or [string]$rule.Action -ne 'Block' -or [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: ' + $name + ' metadata mismatch.') }
+}
+$addressFilters = @($rules | Get-NetFirewallAddressFilter -ErrorAction Stop)
+$aliases = @($rules | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
+$addressByName = @{}
+for ($index = 0; $index -lt $rules.Count; $index++) { $addressByName[[string]$rules[$index].Name] = @($addressFilters[$index].RemoteAddress) }
+$aliasByName = @{}
+for ($index = 0; $index -lt $rules.Count; $index++) { $aliasByName[[string]$rules[$index].Name] = @($aliases[$index].InterfaceAlias) }
+foreach ($expected in $normal) {
+  $name = [string]$expected.Name
+  $actualAddresses = @($addressByName[$name] | ForEach-Object { Normalize-PreparedToken $_ } | Sort-Object)
+  $expectedAddresses = @(Get-PreparedRemote $expected | ForEach-Object { Normalize-PreparedToken $_ } | Sort-Object)
+  if ([string]::Join('|', $actualAddresses) -ne [string]::Join('|', $expectedAddresses)) { throw ('prepared_firewall: ' + $name + ' remote prefixes mismatch.') }
+  $actualAliases = @($aliasByName[$name] | Sort-Object)
+  $expectedAliases = @(Get-PreparedAliases $expected | Sort-Object)
+  if ([string]::Join('|', $actualAliases) -ne [string]::Join('|', $expectedAliases)) { throw ('prepared_firewall: ' + $name + ' interface aliases mismatch.') }
+}
+$emergency = @($i.PreparedRules | Where-Object { [bool]$_.Emergency })
+if ($emergency.Count -ne 1) { throw 'prepared_firewall: emergency rule is ambiguous.' }
+$emergencyRule = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$emergency[0].Name) -ErrorAction SilentlyContinue)
+if ($emergencyRule.Count -ne 1 -or [string]$emergencyRule[0].Enabled -ne 'False') { throw 'prepared_firewall: emergency rule must stay disabled.' }
 [pscustomobject]@{EnabledCount=[int]$normal.Count}|ConvertTo-Json -Compress`
 
 const preparedFirewallVerifyPowerShell = preparedFirewallPowerShellHelpers + `

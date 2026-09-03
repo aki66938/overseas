@@ -13,8 +13,7 @@ func TestPreparedFirewallPowerShellScriptsParse(t *testing.T) {
 	for operation, script := range map[string]string{
 		networkOperationEmergency:       emergencyNetworkPowerShell,
 		networkOperationFirewallPrepare: preparedFirewallPreparePowerShell,
-		networkOperationFirewallEnable:  preparedFirewallEnablePowerShell,
-		networkOperationFirewallVerify:  preparedFirewallVerifyPowerShell,
+		networkOperationFirewallArm:     preparedFirewallArmPowerShell,
 		networkOperationFirewallDisable: preparedFirewallDisablePowerShell,
 		networkOperationFirewallAudit:   preparedFirewallAuditPowerShell,
 	} {
@@ -139,10 +138,7 @@ func TestWindowsNetworkPreparedFirewallOperationsUseExactRuleSets(t *testing.T) 
 	if err := manager.prepareFirewallPool(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.enablePreparedFirewall(context.Background(), state); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.verifyPreparedFirewall(context.Background(), state); err != nil {
+	if err := manager.armPreparedFirewall(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.disablePreparedFirewall(context.Background(), state); err != nil {
@@ -155,9 +151,9 @@ func TestWindowsNetworkPreparedFirewallOperationsUseExactRuleSets(t *testing.T) 
 	if prepare.PreparedGeneration != state.Generation || prepare.RuleDefinitionVersion != windowsFirewallRuleDefinitionVersion || len(prepare.PreparedRules) != len(state.Rules) {
 		t.Fatalf("prepare input = %+v", prepare)
 	}
-	enable := runner.inputFor(t, networkOperationFirewallEnable)
-	if len(enable.FirewallRuleNames) != len(state.Rules)-1 || containsString(enable.FirewallRuleNames, windowsEmergencyBlockRule) {
-		t.Fatalf("enable names = %v", enable.FirewallRuleNames)
+	arm := runner.inputFor(t, networkOperationFirewallArm)
+	if len(arm.FirewallRuleNames) != len(state.Rules)-1 || containsString(arm.FirewallRuleNames, windowsEmergencyBlockRule) {
+		t.Fatalf("arm names = %v", arm.FirewallRuleNames)
 	}
 	disable := runner.inputFor(t, networkOperationFirewallDisable)
 	if len(disable.FirewallRuleNames) != len(state.Rules) || !containsString(disable.FirewallRuleNames, windowsEmergencyBlockRule) {

@@ -59,10 +59,20 @@ func (windowsIPHelperAPI) Adapters(ctx context.Context) ([]ipHelperAdapter, erro
 					dns = append(dns, address.String())
 				}
 			}
+			addresses := make([]string, 0)
+			for unicast := current.FirstUnicastAddress; unicast != nil; unicast = unicast.Next {
+				address, addressErr := socketAddressIP(unicast.Address)
+				if addressErr != nil {
+					return nil, fmt.Errorf("adapter %s unicast address: %w", name, addressErr)
+				}
+				if address.Is4() {
+					addresses = append(addresses, address.String())
+				}
+			}
 			result = append(result, ipHelperAdapter{
 				InterfaceIndex: int(current.IfIndex), LUID: current.Luid, InterfaceGuid: canonicalAdapterGUID(name),
 				InterfaceAlias: alias, Status: adapterOperationalStatus(current.OperStatus),
-				DNSServers: dns, DNSAutomatic: adapterDNSAutomatic(name),
+				DNSServers: dns, DNSAutomatic: adapterDNSAutomatic(name), IPAddresses: addresses,
 			})
 		}
 		runtime.KeepAlive(buffer)
@@ -98,6 +108,38 @@ func (windowsIPHelperAPI) IPv4Interfaces(ctx context.Context, adapters []ipHelpe
 		return nil, errors.New("IP Helper returned no IPv4 interfaces")
 	}
 	return result, nil
+}
+
+// TUNReady reports the fixed TUN identity when the adapter exists with the
+// expected address. found=false means not present yet; a present adapter
+// failing the baseline check still returns found=true so the caller can
+// validate and report an identity mismatch.
+func (r ipHelperNetworkReader) TUNReady(ctx context.Context, alias, address string, baseline []string) (WindowsTUNIdentity, bool, error) {
+	adapters, err := r.api.Adapters(ctx)
+	if err != nil {
+		return WindowsTUNIdentity{}, false, err
+	}
+	target, _, _ := strings.Cut(address, "/")
+	for _, adapter := range adapters {
+		if !strings.EqualFold(adapter.InterfaceAlias, alias) {
+			continue
+		}
+		matching := make([]string, 0)
+		for _, value := range adapter.IPAddresses {
+			if value == target {
+				matching = append(matching, value)
+			}
+		}
+		if len(matching) == 0 {
+			continue
+		}
+		identity := WindowsTUNIdentity{
+			InterfaceIndex: adapter.InterfaceIndex, InterfaceGuid: adapter.InterfaceGuid,
+			InterfaceAlias: adapter.InterfaceAlias, Addresses: matching,
+		}
+		return identity, true, nil
+	}
+	return WindowsTUNIdentity{}, false, nil
 }
 
 func (windowsIPHelperAPI) IPv4Routes(ctx context.Context) ([]ipHelperRoute, error) {

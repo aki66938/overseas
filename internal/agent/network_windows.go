@@ -41,14 +41,16 @@ const (
 	networkOperationActivate        = "activate"
 	networkOperationRestore         = "restore"
 	networkOperationPreparedRestore = "prepared_restore"
+	networkOperationDNSMetric       = "dns_metric"
 	networkOperationResidue         = "residue"
 	networkOperationFirewallPrepare = "firewall_prepare"
 	networkOperationFirewallEnable  = "firewall_enable"
 	networkOperationFirewallVerify  = "firewall_verify"
 	networkOperationFirewallDisable = "firewall_disable"
+	networkOperationFirewallArm     = "firewall_arm"
 	networkOperationFirewallAudit   = "firewall_audit"
 
-	windowsTUNInterface           = "RegenBioOverseasAccess"
+	windowsTUNInterface = "RegenBioOverseasAccess"
 	// windowsFakeIPRoutePrefix must mirror the fakeip inet4_range rendered by
 	// internal/singconfig: tun-side fake-ip destinations only reach the core
 	// when this route exists.
@@ -226,15 +228,15 @@ func networkOperationMessages(operation string) (string, string) {
 		return "正在创建预置防泄漏规则", "预置规则已准备并保持禁用"
 	case networkOperationFirewallEnable:
 		return "正在启用防泄漏保护", "防泄漏保护已启用"
-	case networkOperationFirewallVerify:
-		return "正在核对 Windows 防火墙活动状态", "活动规则核对通过"
+	case networkOperationFirewallArm, networkOperationFirewallVerify:
+		return "正在启用防泄漏保护", "防泄漏保护已启用"
 	case networkOperationFirewallDisable:
 		return "正在禁用预置防泄漏规则", "预置规则已禁用"
 	case networkOperationFirewallAudit:
 		return "正在审计预置防火墙定义", "预置防火墙定义审计通过"
 	case networkOperationReady:
 		return "正在等待 sing-box TUN 网卡", "TUN 网卡已就绪"
-	case networkOperationActivate:
+	case networkOperationActivate, networkOperationDNSMetric:
 		return "正在切换 DNS 与安全路由", "安全路由已启用"
 	case networkOperationRestore, networkOperationPreparedRestore:
 		return "正在恢复普通网络", "普通网络已恢复"
@@ -271,13 +273,13 @@ func networkStage(operation string) string {
 		return traceevent.StageTUNReady
 	case networkOperationActivate:
 		return traceevent.StageRouteActivation
-	case networkOperationRestore, networkOperationPreparedRestore:
+	case networkOperationRestore, networkOperationPreparedRestore, networkOperationDNSMetric:
 		return traceevent.StageNetworkRestore
 	case networkOperationResidue:
 		return traceevent.StageResidueVerify
 	case networkOperationFirewallPrepare:
 		return traceevent.StageFirewallPrepare
-	case networkOperationFirewallEnable:
+	case networkOperationFirewallArm, networkOperationFirewallEnable:
 		return traceevent.StageFirewallEnable
 	case networkOperationFirewallVerify, networkOperationFirewallAudit:
 		return traceevent.StageFirewallVerify
@@ -289,6 +291,20 @@ func networkStage(operation string) string {
 }
 
 var errSnapshotNotFound = errors.New("network snapshot not found")
+
+// tunReadyReader is the native fast path for fixed-TUN detection; the
+// PowerShell ready operation remains as the fallback for readers that do
+// not implement it.
+type tunReadyReader interface {
+	TUNReady(ctx context.Context, alias, address string, baseline []string) (WindowsTUNIdentity, bool, error)
+}
+
+// routeApplier applies/revokes owned TUN routes and the TUN interface
+// metric through native IP Helper calls instead of per-route WMI writes.
+type routeApplier interface {
+	ApplyOwnedRoutes(snapshot WindowsNetworkSnapshot) error
+	RevokeOwnedRoutes(snapshot WindowsNetworkSnapshot) error
+}
 
 type WindowsInterfaceSnapshot struct {
 	Index           int      `json:"Index"`
@@ -373,6 +389,7 @@ type windowsNetworkInput struct {
 	PreviousRuleDefinitionVersion     int                        `json:"PreviousRuleDefinitionVersion,omitempty"`
 	PreviousBlockedRemoteAddresses    []string                   `json:"PreviousBlockedRemoteAddresses,omitempty"`
 	PreviousDNSBlockedRemoteAddresses []string                   `json:"PreviousDNSBlockedRemoteAddresses,omitempty"`
+	DNSConnected                      bool                       `json:"DNSConnected,omitempty"`
 	TUNInterface                      string                     `json:"TUNInterface,omitempty"`
 	TUNAddress                        string                     `json:"TUNAddress,omitempty"`
 	TUNDNS                            string                     `json:"TUNDNS,omitempty"`
@@ -426,12 +443,17 @@ type WindowsNetworkManager struct {
 	monitorClock       monitorClock
 	monitorConfig      networkMonitorConfig
 	monitorFlights     int
+	routes             routeApplier
 }
 
 type WindowsNetworkOption func(*WindowsNetworkManager)
 
 func WithWindowsTraceSink(sink traceevent.Sink) WindowsNetworkOption {
 	return func(manager *WindowsNetworkManager) { manager.trace = sink }
+}
+
+func withWindowsRouteApplier(applier routeApplier) WindowsNetworkOption {
+	return func(manager *WindowsNetworkManager) { manager.routes = applier }
 }
 
 func withWindowsNativeNetworkReader(reader nativeNetworkReader) WindowsNetworkOption {
@@ -508,6 +530,7 @@ func newWindowsNetworkManager(policy accessmodel.Policy, statePath string, runne
 		nodeAddresses:      nodeAddresses,
 		blockedPrefixes:    blocked,
 		dnsBlockedPrefixes: dnsBlocked,
+		routes:             windowsRouteApplier{},
 	}
 	for _, option := range options {
 		if option != nil {
@@ -554,35 +577,70 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	input := windowsNetworkInput{
-		TUNInterface:         windowsTUNInterface,
-		TUNAddress:           windowsTUNAddress,
-		BaselineAdapterGuids: append([]string(nil), m.current.BaselineAdapterGuids...),
-	}
-	output, err := m.run(ctx, networkOperationReady, input)
-	if err != nil {
-		m.mu.Unlock()
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		var diagnostic stagedDiagnosticError
-		detail := ""
-		if errors.As(err, &diagnostic) {
-			detail = diagnostic.DiagnosticDetail()
-		}
-		if strings.Contains(detail, "More than one fixed TUN adapter") {
-			return fmt.Errorf("%w: %s", errTUNIdentityMismatch, detail)
-		}
-		return fmt.Errorf("%w: %s", errTUNNotFound, err.Error())
-	}
 	var identity WindowsTUNIdentity
-	if err := json.Unmarshal(output, &identity); err != nil {
-		m.mu.Unlock()
-		return fmt.Errorf("%w: decode TUN identity: %v", errTUNIdentityMismatch, err)
+	ready := false
+	if reader, ok := m.native.(tunReadyReader); ok {
+		// Native polling: one IP Helper call per 150ms tick instead of a
+		// multi-second PowerShell session.
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				m.mu.Unlock()
+				return ctxErr
+			}
+			candidate, found, pollErr := reader.TUNReady(ctx, windowsTUNInterface, windowsTUNAddress, m.current.BaselineAdapterGuids)
+			if pollErr == nil && found {
+				if err := validateTUNIdentity(candidate, m.current.BaselineAdapterGuids); err != nil {
+					// A present adapter that fails ownership validation is a
+					// hard mismatch: waiting longer cannot fix it.
+					m.mu.Unlock()
+					return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
+				}
+				identity = candidate
+				ready = true
+				break
+			}
+			if time.Now().After(deadline) {
+				m.mu.Unlock()
+				return fmt.Errorf("%w: deadline reached", errTUNNotFound)
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+	} else {
+		input := windowsNetworkInput{
+			TUNInterface:         windowsTUNInterface,
+			TUNAddress:           windowsTUNAddress,
+			BaselineAdapterGuids: append([]string(nil), m.current.BaselineAdapterGuids...),
+		}
+		output, err := m.run(ctx, networkOperationReady, input)
+		if err != nil {
+			m.mu.Unlock()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			var diagnostic stagedDiagnosticError
+			detail := ""
+			if errors.As(err, &diagnostic) {
+				detail = diagnostic.DiagnosticDetail()
+			}
+			if strings.Contains(detail, "More than one fixed TUN adapter") {
+				return fmt.Errorf("%w: %s", errTUNIdentityMismatch, detail)
+			}
+			return fmt.Errorf("%w: %s", errTUNNotFound, err.Error())
+		}
+		if err := json.Unmarshal(output, &identity); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("%w: decode TUN identity: %v", errTUNIdentityMismatch, err)
+		}
+		if err := validateTUNIdentity(identity, m.current.BaselineAdapterGuids); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
+		}
+		ready = true
 	}
-	if err := validateTUNIdentity(identity, m.current.BaselineAdapterGuids); err != nil {
+	if !ready {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
+		return fmt.Errorf("%w: deadline reached", errTUNNotFound)
 	}
 	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+1)
 	ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: windowsFakeIPRoutePrefix, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
@@ -617,15 +675,36 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	return nil
 }
 
+// ActivateTUNRoutes applies the owned routes and TUN metric natively, then
+// delegates the DNS switch to one small PowerShell transaction.
 func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.current == nil {
+		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	input := activationInput(*m.current)
-	_, err := m.run(ctx, networkOperationActivate, input)
+	snapshot := *m.current
+	m.mu.Unlock()
+	if m.routes == nil {
+		return errors.New("route applier is unavailable")
+	}
+	if err := m.routes.ApplyOwnedRoutes(snapshot); err != nil {
+		return err
+	}
+	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, true))
 	return err
+}
+
+func dnsMetricInput(snapshot WindowsNetworkSnapshot, connected bool) windowsNetworkInput {
+	input := windowsNetworkInput{
+		Interfaces:        append([]WindowsInterfaceSnapshot(nil), snapshot.Interfaces...),
+		TUNInterface:      windowsTUNInterface,
+		TUNDNS:            windowsTUNDNS,
+		OwnedTUN:          snapshot.OwnedTUN,
+		DNSConnected:      connected,
+		RestoreInterfaces: !connected,
+	}
+	return input
 }
 
 // preparedStateForSnapshot resolves the sealed prepared state matching the
@@ -698,13 +777,15 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 // metrics, and owned routes return to the captured baseline; the prepared
 // pool is disabled (never deleted) inside the same PowerShell transaction.
 func (m *WindowsNetworkManager) restorePreparedTransaction(ctx context.Context, snapshot WindowsNetworkSnapshot, state WindowsPreparedState) error {
-	input := m.restorationInput(snapshot)
-	input.PreparedRules = append([]WindowsPreparedRule(nil), state.Rules...)
-	input.PreparedGeneration = state.Generation
-	input.RuleDefinitionVersion = state.RuleDefinitionVersion
-	input.RestoreInterfaces = snapshot.OwnershipPhase == windowsSnapshotPhaseTUNOwned || snapshot.OwnershipPhase == windowsSnapshotPhaseProtected
-	_, err := m.run(ctx, networkOperationPreparedRestore, input)
-	return err
+	if m.routes != nil {
+		if err := m.routes.RevokeOwnedRoutes(snapshot); err != nil {
+			return err
+		}
+	}
+	if _, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, false)); err != nil {
+		return err
+	}
+	return m.disablePreparedFirewall(ctx, state)
 }
 
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
@@ -1435,6 +1516,28 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 	return prefixes
 }
 
+// dnsMetricPowerShell switches DNS and the TUN metric for one direction of
+// the connection lifecycle. Routes are handled natively; this covers the
+// per-interface resolver and metric writes only.
+const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
+  Set-DnsClientServerAddress -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
+  foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
+    Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
+  }
+  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction Stop
+  [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
+} else {
+  foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
+    if ([bool]$physical.DNSAutomatic) {
+      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ResetServerAddresses -ErrorAction Stop
+    } else {
+      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @($physical.DNSServers) -ErrorAction Stop
+    }
+    Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$physical.Index) -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric -ErrorAction Stop
+  }
+  [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
+}`
+
 var networkPowerShellScripts = map[string]string{
 	networkOperationCapture:         captureNetworkPowerShell,
 	networkOperationScan:            scanNetworkPowerShell,
@@ -1445,10 +1548,10 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationActivate:        activateNetworkPowerShell,
 	networkOperationRestore:         restoreNetworkPowerShell,
 	networkOperationPreparedRestore: preparedRestoreNetworkPowerShell,
+	networkOperationDNSMetric:       dnsMetricPowerShell,
 	networkOperationResidue:         residueNetworkPowerShell,
 	networkOperationFirewallPrepare: preparedFirewallPreparePowerShell,
-	networkOperationFirewallEnable:  preparedFirewallEnablePowerShell,
-	networkOperationFirewallVerify:  preparedFirewallVerifyPowerShell,
+	networkOperationFirewallArm:     preparedFirewallArmPowerShell,
 	networkOperationFirewallDisable: preparedFirewallDisablePowerShell,
 	networkOperationFirewallAudit:   preparedFirewallAuditPowerShell,
 }
