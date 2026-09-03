@@ -170,6 +170,13 @@ func (m *WindowsNetworkManager) prepareNetwork(ctx context.Context) (PreparedNet
 		if strings.EqualFold(adapter.InterfaceAlias, windowsTUNInterface) {
 			return PreparedNetwork{}, errors.New("owned TUN alias exists while preparing")
 		}
+		// Foreign tunnel adapters (Clash-family TUN, iKuuu/Sakura VPN, other
+		// wintun/tap users) fight this product for the default egress and
+		// churn the rule pool. Refuse with a clear, user-actionable error
+		// instead of building rules around a transient topology.
+		if foreignTunnelAdapter(adapter) {
+			return PreparedNetwork{}, fmt.Errorf("%w: %s (%s)", errVPNConflict, adapter.InterfaceAlias, adapter.Description)
+		}
 	}
 	fingerprint, err := fingerprintNativeNetwork(baseline)
 	if err != nil {

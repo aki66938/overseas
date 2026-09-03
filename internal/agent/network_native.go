@@ -25,6 +25,7 @@ type ipHelperAdapter struct {
 	DNSServers     []string
 	DNSAutomatic   bool
 	IPAddresses    []string
+	Description    string
 }
 
 type ipHelperInterface struct {

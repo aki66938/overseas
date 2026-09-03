@@ -329,6 +329,7 @@ func isApprovedErrorCode(code string) bool {
 		agent.ErrorCredential,
 		agent.ErrorExpiredCredential,
 		agent.ErrorPreparedUnavailable,
+		agent.ErrorVPNConflict,
 		agent.ErrorNetworkChanged,
 		agent.ErrorNetworkCapture,
 		agent.ErrorFirewallEnable,

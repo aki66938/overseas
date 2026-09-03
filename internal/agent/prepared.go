@@ -22,6 +22,7 @@ var (
 	errTUNNotFound         = errors.New("fixed TUN adapter did not appear before the deadline")
 	errTUNIdentityMismatch = errors.New("fixed TUN adapter identity does not match the owned definition")
 	errNetworkChanged      = errors.New("network fingerprint changed while connected")
+	errVPNConflict         = errors.New("a foreign VPN tunnel adapter is active")
 	errFirewallAudit       = errors.New("prepared firewall audit failed")
 )
 
@@ -34,6 +35,7 @@ type PreparedNetwork struct {
 
 type WindowsNativeAdapter struct {
 	InterfaceIndex int      `json:"InterfaceIndex"`
+	Description    string   `json:"Description,omitempty"`
 	InterfaceLUID  uint64   `json:"InterfaceLUID"`
 	InterfaceGuid  string   `json:"InterfaceGuid"`
 	InterfaceAlias string   `json:"InterfaceAlias"`
@@ -89,6 +91,22 @@ type WindowsPreparedState struct {
 	DNSBlockedRemoteAddresses []string               `json:"DNSBlockedRemoteAddresses"`
 	Rules                     []WindowsPreparedRule  `json:"Rules"`
 	IntegritySHA256           string                 `json:"IntegritySHA256"`
+}
+
+// foreignTunnelAdapter reports whether an adapter belongs to a third-party
+// tunnel (Clash-family TUN, iKuuu/Sakura VPN, wintun/tap users). Only the
+// product's own tun and physical adapters take part in the rule pool.
+func foreignTunnelAdapter(adapter WindowsNativeAdapter) bool {
+	if strings.EqualFold(adapter.InterfaceAlias, windowsTUNInterface) {
+		return false
+	}
+	description := strings.ToLower(adapter.Description)
+	for _, marker := range []string{"wintun", "tap-", "tun2socks", "sing-box", "clash", "meta", "ikuuu", "sakura", "vpn"} {
+		if strings.Contains(description, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePreparedNetwork(prepared PreparedNetwork) error {

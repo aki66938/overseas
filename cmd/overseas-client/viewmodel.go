@@ -449,6 +449,8 @@ func approvedMessage(status clientapi.Status) string {
 		return "TUN 网卡创建异常，已自动恢复，可重试"
 	case agent.ErrorPreparedUnavailable:
 		return "网络保护配置暂不可用，请稍后重试或联系 IT"
+	case agent.ErrorVPNConflict:
+		return "检测到其他 VPN/代理（如 Clash 系工具）正在运行，请先退出后再连接"
 	case agent.ErrorInvalidPolicy, agent.ErrorInvalidBinary, agent.ErrorCredential, agent.ErrorExpiredCredential, agent.ErrorRender:
 		return "客户端配置需要修复，请联系 IT"
 	case agent.ErrorCoreStart, agent.ErrorCoreNotReady:

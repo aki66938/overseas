@@ -18,6 +18,7 @@ const (
 	ErrorCredential            = "credential_unavailable"
 	ErrorExpiredCredential     = "credential_expired"
 	ErrorPreparedUnavailable   = "prepared_state_unavailable"
+	ErrorVPNConflict           = "vpn_conflict"
 	ErrorNetworkChanged        = "network_changed"
 	ErrorNetworkCapture        = "network_capture_failed"
 	ErrorFirewallEnable        = "firewall_enable_failed"
@@ -497,6 +498,9 @@ func (c *Controller) runConnect(ctx context.Context, generation uint64, startedA
 	if err != nil {
 		c.traceFailure(generation, traceevent.ComponentNetwork, traceevent.StageNetworkPrepare, startedTrace, "网络保护配置不可用", err, nil)
 		code := ErrorPreparedUnavailable
+		if errors.Is(err, errVPNConflict) {
+			code = ErrorVPNConflict
+		}
 		if contextError(ctx) != nil {
 			code = ErrorCanceled
 		}
@@ -987,6 +991,7 @@ var failureMessages = map[string]string{
 	ErrorCredential:            "访问凭据不可用",
 	ErrorExpiredCredential:     "访问凭据已过期",
 	ErrorPreparedUnavailable:   "网络保护配置不可用",
+	ErrorVPNConflict:           "检测到其他 VPN/代理正在运行",
 	ErrorNetworkChanged:        "网络环境已变化",
 	ErrorNetworkCapture:        "无法读取当前网络配置",
 	ErrorFirewallEnable:        "无法启用防泄漏保护",

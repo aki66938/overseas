@@ -73,6 +73,7 @@ func (windowsIPHelperAPI) Adapters(ctx context.Context) ([]ipHelperAdapter, erro
 				InterfaceIndex: int(current.IfIndex), LUID: current.Luid, InterfaceGuid: canonicalAdapterGUID(name),
 				InterfaceAlias: alias, Status: adapterOperationalStatus(current.OperStatus),
 				DNSServers: dns, DNSAutomatic: adapterDNSAutomatic(name), IPAddresses: addresses,
+				Description: strings.TrimSpace(windows.UTF16PtrToString(current.Description)),
 			})
 		}
 		runtime.KeepAlive(buffer)
