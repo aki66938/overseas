@@ -55,7 +55,9 @@ func newMonitorFixture(t *testing.T, fingerprintDrift bool) monitorFixture {
 	baseline := validPreparedBaseline()
 	drifted := validPreparedBaseline()
 	drifted.Adapters[0].InterfaceAlias = "Renamed Ethernet"
-	baselines := []WindowsNetworkBaseline{baseline}
+	// Sequence: prepare reads [0]; the monitor baseline reads [1]; the first
+	// drift tick reads [2] when scripted.
+	baselines := []WindowsNetworkBaseline{baseline, baseline}
 	if fingerprintDrift {
 		baselines = append(baselines, drifted)
 	}

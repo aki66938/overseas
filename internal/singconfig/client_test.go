@@ -66,13 +66,13 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if len(config.Route.Rules) != 7 {
 		t.Fatalf("route.rules = %d, want 7", len(config.Route.Rules))
 	}
-	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[2], nil, nil, nil, []string{"ad.intra.regen-bio.com"}, "direct")
-	assertRouteRule(t, config.Route.Rules[3], nil, nil, []int{53}, nil, "")
-	if got := stringValue(t, config.Route.Rules[3]["action"]); got != "hijack-dns" {
-		t.Fatalf("DNS action = %q, want hijack-dns", got)
+	assertRouteRule(t, config.Route.Rules[0], nil, nil, []int{53}, nil, "")
+	if got := stringValue(t, config.Route.Rules[0]["action"]); got != "hijack-dns" {
+		t.Fatalf("DNS action = %q, want hijack-dns first", got)
 	}
+	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[2], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[3], nil, nil, nil, []string{"ad.intra.regen-bio.com"}, "direct")
 	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, []int{443}, nil, "")
 	assertRejectAction(t, config.Route.Rules[4])
 	assertRouteRule(t, config.Route.Rules[5], nil, []string{"udp"}, nil, nil, "")
@@ -182,12 +182,12 @@ func TestRenderClientOmitsInternalSuffixDirectRuleWhenNoSuffixesConfigured(t *te
 	if len(config.Route.Rules) != 6 {
 		t.Fatalf("route.rules = %d, want 6", len(config.Route.Rules))
 	}
-	assertRouteRule(t, config.Route.Rules[0], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
-	assertRouteRule(t, config.Route.Rules[2], nil, nil, []int{53}, nil, "")
-	if got := stringValue(t, config.Route.Rules[2]["action"]); got != "hijack-dns" {
-		t.Fatalf("DNS action = %q, want hijack-dns", got)
+	assertRouteRule(t, config.Route.Rules[0], nil, nil, []int{53}, nil, "")
+	if got := stringValue(t, config.Route.Rules[0]["action"]); got != "hijack-dns" {
+		t.Fatalf("DNS action = %q, want hijack-dns first", got)
 	}
+	assertRouteRule(t, config.Route.Rules[1], []string{"172.20.9.15/32"}, nil, nil, nil, "direct")
+	assertRouteRule(t, config.Route.Rules[2], []string{"172.20.8.0/22", "172.20.10.1/32"}, nil, nil, nil, "direct")
 	assertRouteRule(t, config.Route.Rules[3], nil, []string{"udp"}, []int{443}, nil, "")
 	assertRejectAction(t, config.Route.Rules[3])
 	assertRouteRule(t, config.Route.Rules[4], nil, []string{"udp"}, nil, nil, "")

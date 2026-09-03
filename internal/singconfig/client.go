@@ -116,18 +116,14 @@ func RenderClient(input ClientInput) ([]byte, error) {
 	}
 
 	dnsServers := []dnsServer{{
-		Type:       "https",
+		// Plain DNS-over-TCP through the tunnel: the http-connect tunnel
+		// cannot carry UDP, and DoH adds a TLS handshake to every cold
+		// lookup that exceeds the Windows resolver timeout.
+		Type:       "tcp",
 		Tag:        "public-dns",
-		Server:     publicDNSServer,
-		ServerPort: 443,
-		Path:       "/dns-query",
-		Headers: map[string][]string{
-			"Host": {"cloudflare-dns.com"},
-		},
-		TLS: &dnsTLSConfig{
-			ServerName: "cloudflare-dns.com",
-		},
-		Detour: "tunnel",
+		Server:     publicDNSOverTCPServer,
+		ServerPort: 53,
+		Detour:     "tunnel",
 	}}
 	dnsRules := []dnsRule(nil)
 	if len(corporateDNS) > 0 {
@@ -166,6 +162,13 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		Route: clientRouteConfig{
 			Rules: []routeRule{
 				{
+					// DNS hijack must precede every other rule: the blanket
+					// UDP reject below otherwise pre-matches UDP/53 queries
+					// and silently kills all tun-side name resolution.
+					Port:   []int{53},
+					Action: "hijack-dns",
+				},
+				{
 					IPCIDR:   []string{nodeAddress + "/32"},
 					Action:   "route",
 					Outbound: "direct",
@@ -174,10 +177,6 @@ func RenderClient(input ClientInput) ([]byte, error) {
 					IPCIDR:   corpDirectTargets,
 					Action:   "route",
 					Outbound: "direct",
-				},
-				{
-					Port:   []int{53},
-					Action: "hijack-dns",
 				},
 				{
 					Network: []string{"udp"},
@@ -204,11 +203,13 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		},
 	}
 	if len(internalSuffixes) > 0 {
-		config.Route.Rules = append(config.Route.Rules[:2], append([]routeRule{{
+		// Insert after the node/corporate direct rules but before the
+		// blanket UDP reject.
+		config.Route.Rules = append(config.Route.Rules[:3], append([]routeRule{{
 			DomainSuffix: internalSuffixes,
 			Action:       "route",
 			Outbound:     "direct",
-		}}, config.Route.Rules[2:]...)...)
+		}}, config.Route.Rules[3:]...)...)
 	}
 	return json.Marshal(config)
 }

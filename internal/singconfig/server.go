@@ -14,6 +14,11 @@ const (
 	tunInterfaceName = "RegenBioOverseasAccess"
 	tunAddress       = "172.19.0.1/30"
 	publicDNSServer  = "1.1.1.1"
+
+	// publicDNSOverTCPServer is the plain DNS-over-TCP resolver used by the
+	// rendered client config. TCP 8.8.8.8:53 through the http-connect tunnel
+	// answers in tens of milliseconds without a TLS handshake.
+	publicDNSOverTCPServer = "8.8.8.8"
 )
 
 var shadowsocks2022KeyLengths = map[string]int{

@@ -103,6 +103,17 @@ func (m *WindowsNetworkManager) runMonitor(ctx context.Context, state WindowsPre
 	defer fingerprints.Stop()
 	audits := clock.NewTicker(config.AuditInterval)
 	defer audits.Stop()
+	// The comparison baseline is the CONNECTED state (TUN up, DNS overrides,
+	// owned routes in place), captured when monitoring starts. Comparing
+	// against the prepared fingerprint would flag the connection's own
+	// network changes as topology drift and kill every session at the first
+	// tick.
+	baselineFingerprint, err := m.native.Fingerprint(ctx, m.nodeAddresses)
+	if err != nil {
+		// A failed read at startup is retried on the next tick; only a
+		// confirmed drift against a known baseline reports failure.
+		baselineFingerprint = ""
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -117,10 +128,13 @@ func (m *WindowsNetworkManager) runMonitor(ctx context.Context, state WindowsPre
 				// it must not tear down a healthy connection.
 				continue
 			}
-			if fingerprint != state.FingerprintSHA256 {
+			if baselineFingerprint != "" && fingerprint != baselineFingerprint {
 				m.armMonitorEmergency(ctx, state)
-				deliverMonitorFailure(failures, fmt.Errorf("%w: runtime fingerprint differs from prepared generation", errNetworkChanged))
+				deliverMonitorFailure(failures, fmt.Errorf("%w: runtime fingerprint differs from the connected baseline", errNetworkChanged))
 				return
+			}
+			if baselineFingerprint == "" {
+				baselineFingerprint = fingerprint
 			}
 		case <-audits.Tick():
 			if ctx.Err() != nil {
