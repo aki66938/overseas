@@ -115,6 +115,10 @@ func (windowsIPHelperAPI) IPv4Interfaces(ctx context.Context, adapters []ipHelpe
 // expected address. found=false means not present yet; a present adapter
 // failing the baseline check still returns found=true so the caller can
 // validate and report an identity mismatch.
+func (r ipHelperNetworkReader) Adapters(ctx context.Context) ([]ipHelperAdapter, error) {
+	return r.api.Adapters(ctx)
+}
+
 func (r ipHelperNetworkReader) TUNReady(ctx context.Context, alias, address string, baseline []string) (WindowsTUNIdentity, bool, error) {
 	adapters, err := r.api.Adapters(ctx)
 	if err != nil {
