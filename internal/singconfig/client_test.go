@@ -225,19 +225,16 @@ func TestClientDNSFakeIPConfigPresent(t *testing.T) {
 		} `json:"servers"`
 		Final            string `json:"final"`
 		IndependentCache bool   `json:"independent_cache"`
-		FakeIP           *struct {
-			Enabled    bool   `json:"enabled"`
-			Inet4Range string `json:"inet4_range"`
-		} `json:"fakeip"`
+		FakeIP           map[string]any `json:"fakeip"`
 	}
 	if err := json.Unmarshal(root.DNS, &dns); err != nil {
 		t.Fatal(err)
 	}
-	if dns.Final != "fakeip" || dns.FakeIP == nil || !dns.FakeIP.Enabled || dns.FakeIP.Inet4Range != "198.18.0.0/15" {
-		t.Fatalf("fakeip dns config = final %q fakeip %#v", dns.Final, dns.FakeIP)
+	if dns.Final != "fakeip" || dns.FakeIP != nil {
+		t.Fatalf("fakeip dns config = final %q fakeip %#v (deprecated top-level block must stay absent)", dns.Final, dns.FakeIP)
 	}
-	if !dns.IndependentCache {
-		t.Fatal("dns.independent_cache must be true")
+	if dns.IndependentCache {
+		t.Fatal("dns.independent_cache must stay absent (deprecated)")
 	}
 	found := false
 	for _, server := range dns.Servers {

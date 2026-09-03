@@ -51,18 +51,10 @@ type clientRouteConfig struct {
 }
 
 type clientDNSConfig struct {
-	Servers          []dnsServer `json:"servers"`
-	Rules            []dnsRule   `json:"rules,omitempty"`
-	Final            string      `json:"final"`
-	ReverseMapping   bool        `json:"reverse_mapping"`
-	IndependentCache bool        `json:"independent_cache"`
-	FakeIP           *dnsFakeIP  `json:"fakeip,omitempty"`
-}
-
-type dnsFakeIP struct {
-	Enabled    bool   `json:"enabled"`
-	Inet4Range string `json:"inet4_range"`
-	Inet6Range string `json:"inet6_range"`
+	Servers        []dnsServer `json:"servers"`
+	Rules          []dnsRule   `json:"rules,omitempty"`
+	Final          string      `json:"final"`
+	ReverseMapping bool        `json:"reverse_mapping"`
 }
 
 type dnsServer struct {
@@ -207,16 +199,10 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Final: "tunnel",
 		},
 		DNS: clientDNSConfig{
-			Servers:          dnsServers,
-			Rules:            dnsRules,
-			Final:            "fakeip",
-			ReverseMapping:   true,
-			IndependentCache: true,
-			FakeIP: &dnsFakeIP{
-				Enabled:    true,
-				Inet4Range: "198.18.0.0/15",
-				Inet6Range: "fc00::/18",
-			},
+			Servers:        dnsServers,
+			Rules:          dnsRules,
+			Final:          "fakeip",
+			ReverseMapping: true,
 		},
 	}
 	if len(internalSuffixes) > 0 {
