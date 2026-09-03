@@ -68,10 +68,15 @@ func (m *WindowsNetworkManager) StartMonitor(ctx context.Context, prepared Prepa
 	if err := validatePreparedNetwork(prepared); err != nil {
 		return nil, err
 	}
-	state, ok := m.preparedStateForSnapshot(WindowsNetworkSnapshot{PreparedGeneration: prepared.Generation})
-	if !ok || preparedNetworkFromState(state) != prepared {
+	// The PoC path keeps the prepared state in memory only; the persisted
+	// ledger no longer exists to load.
+	m.mu.Lock()
+	cached := m.prepared
+	m.mu.Unlock()
+	if cached == nil || cached.Generation != prepared.Generation {
 		return nil, errors.New("prepared generation is not available for monitoring")
 	}
+	state := *cached
 	config := m.monitorConfig
 	if config.FingerprintInterval <= 0 {
 		config.FingerprintInterval = networkMonitorFingerprintInterval

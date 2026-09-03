@@ -7,14 +7,138 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 var (
-	dnsapi                    = windows.NewLazySystemDLL("dnsapi.dll")
-	procDnsFlushResolverCache = dnsapi.NewProc("DnsFlushResolverCache")
+	dnsapi                     = windows.NewLazySystemDLL("dnsapi.dll")
+	procDnsFlushResolverCache  = dnsapi.NewProc("DnsFlushResolverCache")
+	procSetInterfaceDnsSettings = dnsapi.NewProc("SetInterfaceDnsSettings")
 )
+
+const (
+	dnsInterfaceSettingsVersion1 = 1
+	dnsSettingNameserver         = 0x0001
+)
+
+type dnsInterfaceSettings struct {
+	Version    uint32
+	Flags      uint32
+	Domain     *uint16
+	NameServer *uint16
+}
+
+// setInterfaceDNS points one interface (GUID with braces) at servers; an
+// empty string returns it to automatic (DHCP) resolution.
+func setInterfaceDNS(interfaceGuid, servers string) error {
+	name, err := windows.UTF16PtrFromString(interfaceGuid)
+	if err != nil {
+		return err
+	}
+	var serverPtr *uint16
+	if servers != "" {
+		if serverPtr, err = windows.UTF16PtrFromString(servers); err != nil {
+			return err
+		}
+	}
+	settings := dnsInterfaceSettings{
+		Version:    dnsInterfaceSettingsVersion1,
+		Flags:      dnsSettingNameserver,
+		NameServer: serverPtr,
+	}
+	result, _, _ := procSetInterfaceDnsSettings.Call(
+		uintptr(unsafe.Pointer(name)),
+		uintptr(unsafe.Pointer(&settings)),
+	)
+	if result != 0 {
+		return fmt.Errorf("SetInterfaceDnsSettings(%s): winerror %d", interfaceGuid, result)
+	}
+	return nil
+}
+
+type adapterLister interface {
+	Adapters(context.Context) ([]ipHelperAdapter, error)
+}
+
+// pointAllResolversAtTun aims every live IPv4 interface's resolver at the
+// tun resolver natively — no WMI, no PowerShell, no racing with the core's
+// own route setup.
+func (m *WindowsNetworkManager) pointAllResolversAtTun(ctx context.Context) error {
+	lister, ok := m.native.(adapterLister)
+	if !ok {
+		return errors.New("native adapter listing is unavailable")
+	}
+	adapters, err := lister.Adapters(ctx)
+	if err != nil {
+		return err
+	}
+	for _, adapter := range adapters {
+		if strings.EqualFold(adapter.InterfaceAlias, windowsTUNInterface) {
+			continue
+		}
+		if err := setInterfaceDNS(adapter.InterfaceGuid, windowsTUNDNS); err != nil {
+			return err
+		}
+	}
+	tunGuid := ""
+	if m.currentGuidLocked(&tunGuid); tunGuid != "" {
+		return setInterfaceDNS(tunGuid, windowsTUNDNS)
+	}
+	return nil
+}
+
+// restoreSnapshotResolvers returns each captured interface to its original
+// resolver configuration (captured static list, or automatic when it was
+// automatic) and resets any straggler still pointing at the tun resolver.
+func (m *WindowsNetworkManager) restoreSnapshotResolvers(ctx context.Context) error {
+	lister, ok := m.native.(adapterLister)
+	if !ok {
+		return errors.New("native adapter listing is unavailable")
+	}
+	adapters, err := lister.Adapters(ctx)
+	if err != nil {
+		return err
+	}
+	snapshotServers := make(map[string]string)
+	m.mu.Lock()
+	if m.current != nil {
+		for _, iface := range m.current.Interfaces {
+			if iface.DNSAutomatic {
+				snapshotServers[canonicalGuid(iface.InterfaceGuid)] = ""
+			} else {
+				snapshotServers[canonicalGuid(iface.InterfaceGuid)] = strings.Join(iface.DNSServers, ",")
+			}
+		}
+	}
+	m.mu.Unlock()
+	for _, adapter := range adapters {
+		if strings.EqualFold(adapter.InterfaceAlias, windowsTUNInterface) {
+			continue
+		}
+		key := canonicalGuid(adapter.InterfaceGuid)
+		if servers, captured := snapshotServers[key]; captured {
+			if err := setInterfaceDNS(adapter.InterfaceGuid, servers); err != nil {
+				return err
+			}
+			continue
+		}
+		// not in the snapshot but still pointing at the tun resolver — reset
+		if containsString(adapter.DNSServers, windowsTUNDNS) {
+			if err := setInterfaceDNS(adapter.InterfaceGuid, ""); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalGuid(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+
 
 // Minimal (PoC) routing: sing-box auto_route owns the routes and tun DNS,
 // the product builds no firewall pool, owns no route table, and never
@@ -96,4 +220,12 @@ func (m *WindowsNetworkManager) capturePoc(ctx context.Context, prepared Prepare
 	m.current = &snapshot
 	m.mu.Unlock()
 	return snapshot, nil
+}
+
+func (m *WindowsNetworkManager) currentGuidLocked(out *string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.OwnedTUN != nil {
+		*out = m.current.OwnedTUN.InterfaceGuid
+	}
 }

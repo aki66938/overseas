@@ -619,10 +619,8 @@ func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
-	snapshot := *m.current
 	m.mu.Unlock()
-	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, true))
-	return err
+	return m.pointAllResolversAtTun(ctx)
 }
 
 // Restore: sing-box routes die with the core; the product restores each
@@ -644,19 +642,15 @@ func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	if snapshot.OwnedTUN == nil {
 		return (minimalRouting{}).flushResolverCache()
 	}
-	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, false))
-	return err
+	_ = snapshot
+	return m.restoreSnapshotResolvers(ctx)
 }
 
 // Reconcile: startup hygiene only — routes died with the service's core;
 // resolvers cannot be restored without a snapshot, so stray tun DNS is
 // reset via the dns_metric script with an empty snapshot.
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
-	_, err := m.run(ctx, networkOperationDNSMetric, windowsNetworkInput{
-		DNSConnected: false, TUNDNS: windowsTUNDNS,
-		OwnedTUN: &WindowsTUNIdentity{InterfaceIndex: 0, InterfaceAlias: windowsTUNInterface},
-	})
-	return err
+	return (minimalRouting{}).flushResolverCache()
 }
 
 // Residue: the tun adapter is the only product footprint that can outlive
