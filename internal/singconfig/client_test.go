@@ -83,20 +83,23 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 		t.Fatalf("route.final = %q, want tunnel", config.Route.Final)
 	}
 
-	if len(config.DNS.Servers) != 2 {
-		t.Fatalf("dns.servers = %d, want 2", len(config.DNS.Servers))
+	if len(config.DNS.Servers) != 3 {
+		t.Fatalf("dns.servers = %d, want 3", len(config.DNS.Servers))
 	}
 	if got := stringValue(t, config.DNS.Servers[0]["tag"]); got != "corp-dns" {
 		t.Fatalf("dns.servers[0].tag = %q, want corp-dns", got)
 	}
-	if got := stringValue(t, config.DNS.Servers[1]["tag"]); got != "fakeip" {
-		t.Fatalf("dns.servers[1].tag = %q, want fakeip", got)
+	if got := stringValue(t, config.DNS.Servers[1]["tag"]); got != "remote-dns" {
+		t.Fatalf("dns.servers[1].tag = %q, want remote-dns", got)
 	}
-	if got := stringValue(t, config.DNS.Servers[1]["inet4_range"]); got != "198.18.0.0/15" {
+	if got := stringValue(t, config.DNS.Servers[2]["tag"]); got != "fakeip" {
+		t.Fatalf("dns.servers[2].tag = %q, want fakeip", got)
+	}
+	if got := stringValue(t, config.DNS.Servers[2]["inet4_range"]); got != "198.18.0.0/15" {
 		t.Fatalf("fakeip inet4_range = %q", got)
 	}
-	if len(config.DNS.Rules) != 1 {
-		t.Fatalf("dns.rules = %d, want 1", len(config.DNS.Rules))
+	if len(config.DNS.Rules) != 2 {
+		t.Fatalf("dns.rules = %d, want 2", len(config.DNS.Rules))
 	}
 	if got, ok := config.DNS.ReverseMapping.(bool); !ok || !got {
 		t.Fatalf("dns.reverse_mapping = %#v, want true", config.DNS.ReverseMapping)
@@ -109,8 +112,8 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if got := stringValue(t, rule["server"]); got != "corp-dns" {
 		t.Fatalf("dns rule server = %q, want corp-dns", got)
 	}
-	if config.DNS.Final != "fakeip" {
-		t.Fatalf("dns.final = %q, want fakeip", config.DNS.Final)
+	if config.DNS.Final != "remote-dns" {
+		t.Fatalf("dns.final = %q, want remote-dns", config.DNS.Final)
 	}
 }
 
@@ -230,8 +233,8 @@ func TestClientDNSFakeIPConfigPresent(t *testing.T) {
 	if err := json.Unmarshal(root.DNS, &dns); err != nil {
 		t.Fatal(err)
 	}
-	if dns.Final != "fakeip" || dns.FakeIP != nil {
-		t.Fatalf("fakeip dns config = final %q fakeip %#v (deprecated top-level block must stay absent)", dns.Final, dns.FakeIP)
+	if dns.Final != "remote-dns" || dns.FakeIP != nil {
+		t.Fatalf("dns config = final %q fakeip %#v (final must be remote-dns; deprecated top-level fakeip block must stay absent)", dns.Final, dns.FakeIP)
 	}
 	if dns.IndependentCache {
 		t.Fatal("dns.independent_cache must stay absent (deprecated)")

@@ -76,7 +76,8 @@ type dnsTLSConfig struct {
 
 type dnsRule struct {
 	DomainSuffix []string `json:"domain_suffix,omitempty"`
-	Action       string   `json:"action"`
+	QueryType    []string `json:"query_type,omitempty"`
+	Action       string   `json:"action,omitempty"`
 	Server       string   `json:"server,omitempty"`
 }
 
@@ -117,18 +118,32 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		corpDirectTargets = append(corpDirectTargets, dnsAddress+"/32")
 	}
 
-	// FakeIP design: tun-side queries are answered instantly from the
+	// FakeIP design: tun-side A/AAAA queries are answered instantly from the
 	// fake-ip pool and connections are routed by DOMAIN through the proxy,
-	// which resolves names on the telecom egress. No DNS traffic crosses
-	// the tunnel, so name resolution can never inherit its flakiness.
-	// Internal suffixes resolve to real corporate addresses via corp-dns.
-	dnsServers := []dnsServer{{
-		Type:       "fakeip",
-		Tag:        "fakeip",
-		Inet4Range: "198.18.0.0/15",
-		Inet6Range: "fc00::/18",
+	// which resolves names on the telecom egress. No A/AAAA traffic crosses
+	// the tunnel, so name resolution never inherits its flakiness. Internal
+	// suffixes resolve to real corporate addresses via corp-dns; the final
+	// server handles every other record type (sing-box 1.13 forbids fakeip
+	// as the default server).
+	dnsServers := []dnsServer{
+		{
+			Type:       "tcp",
+			Tag:        "remote-dns",
+			Server:     publicDNSOverTCPServer,
+			ServerPort: 53,
+			Detour:     "tunnel",
+		},
+		{
+			Type:       "fakeip",
+			Tag:        "fakeip",
+			Inet4Range: "198.18.0.0/15",
+			Inet6Range: "fc00::/18",
+		},
+	}
+	dnsRules := []dnsRule{{
+		QueryType: []string{"A", "AAAA"},
+		Server:    "fakeip",
 	}}
-	dnsRules := []dnsRule(nil)
 	if len(corporateDNS) > 0 {
 		dnsServers = append([]dnsServer{{
 			Type:       "udp",
@@ -137,13 +152,11 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			ServerPort: 53,
 			Detour:     "direct",
 		}}, dnsServers...)
-	}
-	if len(internalSuffixes) > 0 {
-		dnsRules = append(dnsRules, dnsRule{
+		dnsRules = append([]dnsRule{{
 			DomainSuffix: internalSuffixes,
 			Action:       "route",
 			Server:       "corp-dns",
-		})
+		}}, dnsRules...)
 	}
 
 	config := clientConfig{
@@ -201,7 +214,7 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		DNS: clientDNSConfig{
 			Servers:        dnsServers,
 			Rules:          dnsRules,
-			Final:          "fakeip",
+			Final:          "remote-dns",
 			ReverseMapping: true,
 		},
 	}
