@@ -31,8 +31,8 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if got := stringValue(t, inbound["interface_name"]); got != "RegenBioOverseasAccess" {
 		t.Fatalf("interface_name = %q, want RegenBioOverseasAccess", got)
 	}
-	if got, ok := inbound["auto_route"].(bool); !ok || got {
-		t.Fatalf("auto_route = %#v, want false", inbound["auto_route"])
+	if got, ok := inbound["auto_route"].(bool); !ok || !got {
+		t.Fatalf("auto_route = %#v, want true (sing-box owns routing)", inbound["auto_route"])
 	}
 
 	if len(config.Outbounds) != 2 {
