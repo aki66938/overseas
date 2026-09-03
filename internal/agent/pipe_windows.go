@@ -24,7 +24,10 @@ const (
 	PipeName               = `\\.\pipe\RegenBioOverseasAccess`
 	MaxPipeFrameBytes      = 64 * 1024
 	PipeOperationTimeout   = 5 * time.Second
-	PipeDisconnectTimeout  = 30 * time.Second
+	// Disconnect runs the full reverse-order restoration (multiple PowerShell
+	// transactions, 3-12s each on the pilot machine); 30s repeatedly expired
+	// before the zero-residue proof and misreported failed_safe.
+	PipeDisconnectTimeout = 90 * time.Second
 	PipeConnectTimeout     = 120 * time.Second
 	PipeSecurityDescriptor = "D:P(D;;GA;;;AN)(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
 

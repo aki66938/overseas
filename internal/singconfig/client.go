@@ -51,21 +51,31 @@ type clientRouteConfig struct {
 }
 
 type clientDNSConfig struct {
-	Servers        []dnsServer `json:"servers"`
-	Rules          []dnsRule   `json:"rules,omitempty"`
-	Final          string      `json:"final"`
-	ReverseMapping bool        `json:"reverse_mapping"`
+	Servers          []dnsServer `json:"servers"`
+	Rules            []dnsRule   `json:"rules,omitempty"`
+	Final            string      `json:"final"`
+	ReverseMapping   bool        `json:"reverse_mapping"`
+	IndependentCache bool        `json:"independent_cache"`
+	FakeIP           *dnsFakeIP  `json:"fakeip,omitempty"`
+}
+
+type dnsFakeIP struct {
+	Enabled    bool   `json:"enabled"`
+	Inet4Range string `json:"inet4_range"`
+	Inet6Range string `json:"inet6_range"`
 }
 
 type dnsServer struct {
 	Type       string              `json:"type"`
 	Tag        string              `json:"tag"`
-	Server     string              `json:"server"`
+	Server     string              `json:"server,omitempty"`
 	ServerPort int                 `json:"server_port,omitempty"`
 	Path       string              `json:"path,omitempty"`
 	Headers    map[string][]string `json:"headers,omitempty"`
 	TLS        *dnsTLSConfig       `json:"tls,omitempty"`
 	Detour     string              `json:"detour,omitempty"`
+	Inet4Range string              `json:"inet4_range,omitempty"`
+	Inet6Range string              `json:"inet6_range,omitempty"`
 }
 
 type dnsTLSConfig struct {
@@ -115,15 +125,16 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		corpDirectTargets = append(corpDirectTargets, dnsAddress+"/32")
 	}
 
+	// FakeIP design: tun-side queries are answered instantly from the
+	// fake-ip pool and connections are routed by DOMAIN through the proxy,
+	// which resolves names on the telecom egress. No DNS traffic crosses
+	// the tunnel, so name resolution can never inherit its flakiness.
+	// Internal suffixes resolve to real corporate addresses via corp-dns.
 	dnsServers := []dnsServer{{
-		// Plain DNS-over-TCP through the tunnel: the http-connect tunnel
-		// cannot carry UDP, and DoH adds a TLS handshake to every cold
-		// lookup that exceeds the Windows resolver timeout.
-		Type:       "tcp",
-		Tag:        "public-dns",
-		Server:     publicDNSOverTCPServer,
-		ServerPort: 53,
-		Detour:     "tunnel",
+		Type:       "fakeip",
+		Tag:        "fakeip",
+		Inet4Range: "198.18.0.0/15",
+		Inet6Range: "fc00::/18",
 	}}
 	dnsRules := []dnsRule(nil)
 	if len(corporateDNS) > 0 {
@@ -196,10 +207,16 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Final: "tunnel",
 		},
 		DNS: clientDNSConfig{
-			Servers:        dnsServers,
-			Rules:          dnsRules,
-			Final:          "public-dns",
-			ReverseMapping: true,
+			Servers:          dnsServers,
+			Rules:            dnsRules,
+			Final:            "fakeip",
+			ReverseMapping:   true,
+			IndependentCache: true,
+			FakeIP: &dnsFakeIP{
+				Enabled:    true,
+				Inet4Range: "198.18.0.0/15",
+				Inet6Range: "fc00::/18",
+			},
 		},
 	}
 	if len(internalSuffixes) > 0 {

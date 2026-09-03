@@ -1,6 +1,7 @@
 package singconfig_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
@@ -88,8 +89,11 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if got := stringValue(t, config.DNS.Servers[0]["tag"]); got != "corp-dns" {
 		t.Fatalf("dns.servers[0].tag = %q, want corp-dns", got)
 	}
-	if got := stringValue(t, config.DNS.Servers[1]["tag"]); got != "public-dns" {
-		t.Fatalf("dns.servers[1].tag = %q, want public-dns", got)
+	if got := stringValue(t, config.DNS.Servers[1]["tag"]); got != "fakeip" {
+		t.Fatalf("dns.servers[1].tag = %q, want fakeip", got)
+	}
+	if got := stringValue(t, config.DNS.Servers[1]["inet4_range"]); got != "198.18.0.0/15" {
+		t.Fatalf("fakeip inet4_range = %q", got)
 	}
 	if len(config.DNS.Rules) != 1 {
 		t.Fatalf("dns.rules = %d, want 1", len(config.DNS.Rules))
@@ -105,8 +109,8 @@ func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	if got := stringValue(t, rule["server"]); got != "corp-dns" {
 		t.Fatalf("dns rule server = %q, want corp-dns", got)
 	}
-	if config.DNS.Final != "public-dns" {
-		t.Fatalf("dns.final = %q, want public-dns", config.DNS.Final)
+	if config.DNS.Final != "fakeip" {
+		t.Fatalf("dns.final = %q, want fakeip", config.DNS.Final)
 	}
 }
 
@@ -197,6 +201,52 @@ func TestRenderClientOmitsInternalSuffixDirectRuleWhenNoSuffixesConfigured(t *te
 		if _, ok := rule["domain_suffix"]; ok {
 			t.Fatalf("unexpected domain_suffix direct rule in %#v", rule)
 		}
+	}
+}
+
+func TestClientDNSFakeIPConfigPresent(t *testing.T) {
+	contents := mustRenderClient(t, singconfig.ClientInput{
+		Node:             accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080},
+		CorporateCIDRs:   []string{"172.20.8.0/22"},
+		CorporateDNS:     []string{"172.20.10.1"},
+		InternalSuffixes: []string{"ad.intra.regen-bio.com"},
+	})
+	var root struct {
+		DNS json.RawMessage `json:"dns"`
+	}
+	if err := json.Unmarshal(contents, &root); err != nil {
+		t.Fatal(err)
+	}
+	var dns struct {
+		Servers []struct {
+			Tag        string `json:"tag"`
+			Type       string `json:"type"`
+			Inet4Range string `json:"inet4_range"`
+		} `json:"servers"`
+		Final            string `json:"final"`
+		IndependentCache bool   `json:"independent_cache"`
+		FakeIP           *struct {
+			Enabled    bool   `json:"enabled"`
+			Inet4Range string `json:"inet4_range"`
+		} `json:"fakeip"`
+	}
+	if err := json.Unmarshal(root.DNS, &dns); err != nil {
+		t.Fatal(err)
+	}
+	if dns.Final != "fakeip" || dns.FakeIP == nil || !dns.FakeIP.Enabled || dns.FakeIP.Inet4Range != "198.18.0.0/15" {
+		t.Fatalf("fakeip dns config = final %q fakeip %#v", dns.Final, dns.FakeIP)
+	}
+	if !dns.IndependentCache {
+		t.Fatal("dns.independent_cache must be true")
+	}
+	found := false
+	for _, server := range dns.Servers {
+		if server.Type == "fakeip" && server.Inet4Range == "198.18.0.0/15" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fakeip server missing in %#v", dns.Servers)
 	}
 }
 
