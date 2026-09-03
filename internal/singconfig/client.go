@@ -46,8 +46,9 @@ type clientOutbound struct {
 }
 
 type clientRouteConfig struct {
-	Rules []routeRule `json:"rules"`
-	Final string      `json:"final"`
+	Rules               []routeRule `json:"rules"`
+	Final               string      `json:"final"`
+	AutoDetectInterface bool        `json:"auto_detect_interface"`
 }
 
 type clientDNSConfig struct {
@@ -214,6 +215,9 @@ func RenderClient(input ClientInput) ([]byte, error) {
 				},
 			},
 			Final: "tunnel",
+			// Bind outbounds to the physical default interface: without it
+			// the tun's own default routes loop outbound dials back inside.
+			AutoDetectInterface: true,
 		},
 		DNS: clientDNSConfig{
 			Servers:        dnsServers,
