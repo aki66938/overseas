@@ -151,8 +151,11 @@ func TestWindowsNetworkPreparedFirewallOperationsUseExactRuleSets(t *testing.T) 
 	if prepare.PreparedGeneration != state.Generation || prepare.RuleDefinitionVersion != windowsFirewallRuleDefinitionVersion || len(prepare.PreparedRules) != len(state.Rules) {
 		t.Fatalf("prepare input = %+v", prepare)
 	}
+	// The arm input carries the full pool (including the emergency rule):
+	// the script arms only the normal rules but ends by proving the
+	// emergency rule is still disabled.
 	arm := runner.inputFor(t, networkOperationFirewallArm)
-	if len(arm.FirewallRuleNames) != len(state.Rules)-1 || containsString(arm.FirewallRuleNames, windowsEmergencyBlockRule) {
+	if len(arm.FirewallRuleNames) != len(state.Rules) || !containsString(arm.FirewallRuleNames, windowsEmergencyBlockRule) {
 		t.Fatalf("arm names = %v", arm.FirewallRuleNames)
 	}
 	disable := runner.inputFor(t, networkOperationFirewallDisable)
