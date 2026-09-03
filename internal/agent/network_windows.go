@@ -49,6 +49,10 @@ const (
 	networkOperationFirewallAudit   = "firewall_audit"
 
 	windowsTUNInterface           = "RegenBioOverseasAccess"
+	// windowsFakeIPRoutePrefix must mirror the fakeip inet4_range rendered by
+	// internal/singconfig: tun-side fake-ip destinations only reach the core
+	// when this route exists.
+	windowsFakeIPRoutePrefix      = "198.18.0.0/15"
 	windowsTUNAddress             = "172.19.0.1/30"
 	windowsTUNDNS                 = "172.19.0.2"
 	windowsTCPBlockRule           = "RegenBioOverseasAccess.BlockPublicTCP"
@@ -580,7 +584,8 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %w", errTUNIdentityMismatch, err)
 	}
-	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes))
+	ownedRoutes := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+1)
+	ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: windowsFakeIPRoutePrefix, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
 	for _, value := range m.blockedPrefixes {
 		if addressFamilyForPrefix(value) == "IPv4" {
 			ownedRoutes = append(ownedRoutes, WindowsOwnedRoute{AddressFamily: "IPv4", DestinationPrefix: value, InterfaceIndex: identity.InterfaceIndex, NextHop: "0.0.0.0", RouteMetric: windowsOwnedRouteMetric})
@@ -1037,7 +1042,14 @@ func (m *WindowsNetworkManager) validateWindowsSnapshot(snapshot WindowsNetworkS
 			return errors.New("captured physical interface identity collides with the owned TUN")
 		}
 	}
-	expectedOwned := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+len(snapshot.NodeRoutes))
+	expectedOwned := make([]WindowsOwnedRoute, 0, len(m.blockedPrefixes)+len(snapshot.NodeRoutes)+1)
+	expectedOwned = append(expectedOwned, WindowsOwnedRoute{
+		AddressFamily:     "IPv4",
+		DestinationPrefix: windowsFakeIPRoutePrefix,
+		InterfaceIndex:    snapshot.OwnedTUN.InterfaceIndex,
+		NextHop:           "0.0.0.0",
+		RouteMetric:       windowsOwnedRouteMetric,
+	})
 	for _, value := range m.blockedPrefixes {
 		if addressFamilyForPrefix(value) != "IPv4" {
 			continue
