@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	dnsapi                     = windows.NewLazySystemDLL("dnsapi.dll")
-	procDnsFlushResolverCache  = dnsapi.NewProc("DnsFlushResolverCache")
-	procSetInterfaceDnsSettings = dnsapi.NewProc("SetInterfaceDnsSettings")
+	dnsapi                      = windows.NewLazySystemDLL("dnsapi.dll")
+	procDnsFlushResolverCache   = dnsapi.NewProc("DnsFlushResolverCache")
+	procSetInterfaceDnsSettings = iphlpapi.NewProc("SetInterfaceDnsSettings")
 )
 
 const (
@@ -125,7 +125,7 @@ func (m *WindowsNetworkManager) restoreSnapshotResolvers(ctx context.Context) er
 			continue
 		}
 		// not in the snapshot but still pointing at the tun resolver — reset
-		if containsString(adapter.DNSServers, windowsTUNDNS) {
+		if resolverListHasServer(adapter.DNSServers, windowsTUNDNS) {
 			if err := setInterfaceDNS(adapter.InterfaceGuid, ""); err != nil {
 				return err
 			}
@@ -138,7 +138,14 @@ func canonicalGuid(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-
+func resolverListHasServer(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
 
 // Minimal (PoC) routing: sing-box auto_route owns the routes and tun DNS,
 // the product builds no firewall pool, owns no route table, and never

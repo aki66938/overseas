@@ -66,6 +66,23 @@ func (r *scriptedNativeReader) Fingerprint(ctx context.Context, nodes []string) 
 	return fingerprintNativeNetwork(baseline)
 }
 
+func (r *scriptedNativeReader) Adapters(_ context.Context) ([]ipHelperAdapter, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.baselines) == 0 {
+		return nil, errors.New("no scripted baseline")
+	}
+	adapters := make([]ipHelperAdapter, 0, len(r.baselines[0].Adapters))
+	for _, adapter := range r.baselines[0].Adapters {
+		adapters = append(adapters, ipHelperAdapter{
+			InterfaceIndex: adapter.InterfaceIndex, InterfaceGuid: adapter.InterfaceGuid,
+			InterfaceAlias: adapter.InterfaceAlias, Status: adapter.Status,
+			DNSServers: adapter.DNSServers, DNSAutomatic: adapter.DNSAutomatic,
+		})
+	}
+	return adapters, nil
+}
+
 func (r *scriptedNativeReader) TUNReady(_ context.Context, alias, address string, _ []string) (WindowsTUNIdentity, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
