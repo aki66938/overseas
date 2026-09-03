@@ -190,16 +190,19 @@ foreach ($previous in $previousRules) {
   if ($owned.Count -gt 1) { throw ('prepared_firewall: previous rule is ambiguous: ' + $name) }
   if ($owned.Count -eq 0) { continue }
   if ([string]$owned[0].Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: previous rule is unowned: ' + $name) }
-  if ([string]$owned[0].Enabled -eq 'True') { throw ('prepared_firewall: previous rule is enabled: ' + $name) }
+  # An ENABLED previous EMERGENCY is the legitimate armed state left by an
+  # earlier failure: inherit it untouched (the swap at the end replaces it).
+  if ([string]$owned[0].Enabled -eq 'True' -and -not [bool]$previous.Emergency) { throw ('prepared_firewall: previous rule is enabled: ' + $name) }
   $drifted = $false
-  try { Assert-PreparedRuleFor $previous 'PersistentStore' 'False' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ }) } catch { $drifted = $true }
+  if (-not [bool]$previous.Emergency) {
+    try { Assert-PreparedRuleFor $previous 'PersistentStore' 'False' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ }) } catch { $drifted = $true }
+  }
   if ($drifted) { Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction Stop; $previousDrifted += $previous } else { $previousValid += $previous }
 }
 $previousEmergency = @($previousValid | Where-Object { [bool]$_.Emergency })
 if ($previousEmergency.Count -gt 1) { throw 'prepared_firewall: previous emergency rule is ambiguous.' }
 if ($previousEmergency.Count -eq 1) {
   Enable-NetFirewallRule -PolicyStore PersistentStore -Name ([string]$previousEmergency[0].Name) -ErrorAction Stop
-  Assert-PreparedRuleFor $previousEmergency[0] 'ActiveStore' 'True' ([uint64]$i.PreviousPreparedGeneration) ([int]$i.PreviousRuleDefinitionVersion) @($i.PreviousBlockedRemoteAddresses | Where-Object { $null -ne $_ }) @($i.PreviousDNSBlockedRemoteAddresses | Where-Object { $null -ne $_ })
 }
 # Remove every still-present previous normal rule. When the previous
 # emergency drifted away there is nothing to carry: the rebuild recreates
