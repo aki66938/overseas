@@ -97,3 +97,38 @@ Automated portion completed on the designated test machine:
 ## Real browsing acceptance
 
 Not claimed. No real overseas-site access was performed in this session; per the plan, the user performs the Connect/Disconnect clicks and site checks.
+
+
+## Addendum (2026-09-03): real-test findings and architecture fix
+
+The user's first real test exposed two failures, both root-caused and fixed:
+
+1. **Session died exactly 30s after connect** — the runtime monitor compared the live (TUN-up) fingerprint against the *prepared* fingerprint. The connection's own changes (TUN adapter, DNS overrides, owned routes) guaranteed a false positive on the first 30s tick. Fix: the monitor now baselines the **connected** state at StartMonitor (`d360c41` follow-up in `fd2453d`).
+2. **Pages would not load** — three stacked causes, fixed in sequence:
+   - the blanket `reject udp` route rule pre-matched UDP/53 before hijack-dns (hijack-dns moved to the first rule, `fd2453d`);
+   - DoH-via-tunnel cold start exceeded the Windows resolver timeout (replaced first with DNS-over-TCP, then with **FakeIP**: A/AAAA answered instantly from the fakeip pool, connections routed by domain, proxy resolves names on the telecom egress — no DNS traffic crosses the tunnel at all; `ee6b189`, `1541a72`);
+   - the fakeip pool (198.18.0.0/15) had no route into the TUN (it is IANA non-global and was excluded from the owned-route set); the range is now part of the owned TUN routes and snapshot validation (`cc02556`).
+   - sing-box 1.13 additionally rejects the deprecated top-level `dns.fakeip` block and fakeip-as-default-server; the rendered config now uses the compliant A/AAAA dns-rule form (`d7c9bda`, `1541a72`).
+
+Robustness fixes found during the same cycle:
+
+- restore now **skips adapters that vanished** instead of failing permanently (`96ee772`) — a reboot with changed adapters previously bricked startup recovery;
+- prepared-pool migration **tolerates drifted ledger rules** (renamed aliases etc.): drifted rules are materialized, removed and rebuilt instead of entering failed_safe (`96ee772`);
+- startup recovery budget raised 20s → 75s with SCM StartPending checkpoint pumping (`96ee772`);
+- disconnect pipe budget 30s → 90s (slow multi-step restore was misreported as failed_safe).
+
+### Live verification after fixes (this machine, service-driven)
+
+- connect → connected; **www.youtube.com 200 (0.67s)**, google 302, gstatic 204, intranet 200 simultaneously;
+- 90s hold: still connected, gstatic 204 (old build died at 30s);
+- disconnect → prepared, regular internet 204 immediately; second connect/disconnect cycle clean.
+
+### Environment changes made on the pilot machine (with revert commands)
+
+- **TCP dynamic port range restored to the Windows default** (was customized to 1024–14999, only ~14k ports, implicated in intermittent proxy-path SYN drops): revert with `netsh int ipv4 set dynamicport tcp start=1024 num=13977`.
+- **FlClash was stopped** for testing; it must remain fully exited during acceptance (its TUN adapter changes topology and fights over DNS).
+
+### Remaining (non-blocking)
+
+- Connect elapsed ~50s against the 15s budget: firewall enable+verify dominates (~25s) — PowerShell/WMI slowness on this machine (Huorong AV); optimization task, not functional.
+- The `failed_safe` after a mid-shutdown interrupted restore required manual state cleanup once; the retry path itself works.
