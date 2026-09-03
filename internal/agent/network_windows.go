@@ -1520,6 +1520,7 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 // the connection lifecycle. Routes are handled natively; this covers the
 // per-interface resolver and metric writes only.
 const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
+  Clear-DnsClientCache -ErrorAction SilentlyContinue
   Set-DnsClientServerAddress -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
   foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
     Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
@@ -1527,6 +1528,7 @@ const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
   Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$i.OwnedTUN.InterfaceIndex) -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction Stop
   [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
 } else {
+  Clear-DnsClientCache -ErrorAction SilentlyContinue
   foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
     if ([bool]$physical.DNSAutomatic) {
       Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ResetServerAddresses -ErrorAction Stop
