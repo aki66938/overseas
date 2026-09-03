@@ -278,12 +278,17 @@ foreach ($expected in $normal) {
   if ($null -eq $rule) { throw ('prepared_firewall: ' + $name + ' is not active.') }
   if ([string]$rule.Enabled -ne 'True' -or [string]$rule.Action -ne 'Block' -or [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Group -ne [string]$i.FirewallGroup) { throw ('prepared_firewall: ' + $name + ' metadata mismatch.') }
 }
-$addressFilters = @($rules | Get-NetFirewallAddressFilter -ErrorAction Stop)
-$aliases = @($rules | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
+# Pair filters with rules BY NAME: pipelined filter output order is not
+# guaranteed to match the piped rule order.
+$paired = @($rules | ForEach-Object {
+  $r = $_
+  $af = @($r | Get-NetFirewallAddressFilter)
+  $itf = @($r | Get-NetFirewallInterfaceFilter)
+  [pscustomobject]@{ Name = [string]$r.Name; Remote = @($af[0].RemoteAddress); Aliases = @($itf[0].InterfaceAlias) }
+})
 $addressByName = @{}
-for ($index = 0; $index -lt $rules.Count; $index++) { $addressByName[[string]$rules[$index].Name] = @($addressFilters[$index].RemoteAddress) }
 $aliasByName = @{}
-for ($index = 0; $index -lt $rules.Count; $index++) { $aliasByName[[string]$rules[$index].Name] = @($aliases[$index].InterfaceAlias) }
+foreach ($entry in $paired) { $addressByName[$entry.Name] = $entry.Remote; $aliasByName[$entry.Name] = $entry.Aliases }
 foreach ($expected in $normal) {
   $name = [string]$expected.Name
   $actualAddresses = @($addressByName[$name] | ForEach-Object { Normalize-PreparedToken $_ } | Sort-Object)
