@@ -33,7 +33,7 @@ $map = [ordered] @{
     AgentExe='overseas-agent.exe'; ClientExe='overseas-client.exe'
     InstallerVerifierFile='installer-verifier.exe'; InstallerHarnessFile='install-client.ps1'
     SingBoxExe='sing-box.exe'; CoreManifest='sing-box.manifest.json'; CronetRuntime='libcronet.dll'; TunDriver='wintun.dll'
-    SingBoxLicense='sing-box-LICENSE.txt'; WintunLicense='wintun-LICENSE.txt'; AgentPolicy='agent.yaml'; AgentPolicySignature='agent.yaml.p7s'
+    SingBoxLicense='sing-box-LICENSE.txt'; WintunLicense='wintun-LICENSE.txt'; PocRootCert='RegenBio-OverseasAccess-PoC-Root.cer'; AgentPolicy='agent.yaml'; AgentPolicySignature='agent.yaml.p7s'
     ArtifactManifest='artifact-manifest.json'; ArtifactManifestSignature='artifact-manifest.json.p7s'; ClientSbom='client-sbom.json'; PayloadChecksums='SHA256SUMS'
 }
 $extracted = Get-ChildItem -LiteralPath (Join-Path $output 'files\File') -File
