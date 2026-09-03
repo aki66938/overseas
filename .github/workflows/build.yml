@@ -1,0 +1,26 @@
+name: build
+on:
+  push:
+    branches: [main, feature/windows-forwarding-poc]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+      - name: Build agent and client
+        run: |
+          go build -trimpath -o bin/overseas-agent.exe ./cmd/overseas-agent
+          go build -trimpath -ldflags "-H windowsgui" -o bin/overseas-client.exe ./cmd/overseas-client
+      - name: Test
+        run: go test ./... -count=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overseas-access-windows
+          path: |
+            bin/overseas-agent.exe
+            bin/overseas-client.exe
