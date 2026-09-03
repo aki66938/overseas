@@ -610,37 +610,53 @@ func (m *WindowsNetworkManager) WaitTUNReady(ctx context.Context) error {
 	return nil
 }
 
-// ActivateTUNRoutes: routes and tun DNS are owned by sing-box auto_route;
-// the product only flushes the resolver cache so fresh fakeip mappings
-// replace any stale ones from a previous core instance.
+// ActivateTUNRoutes: sing-box auto_route owns the routes; the product
+// points every live interface's resolver at the tun so Windows' parallel
+// DNS racing can never answer with a polluted upstream result.
 func (m *WindowsNetworkManager) ActivateTUNRoutes(ctx context.Context) error {
 	m.mu.Lock()
 	if m.current == nil {
 		m.mu.Unlock()
 		return errors.New("network state was not captured")
 	}
+	snapshot := *m.current
 	m.mu.Unlock()
-	return minimalRouting{}.flushResolverCache()
+	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, true))
+	return err
 }
 
-// Restore: nothing persisted, no routes or resolver writes to undo — stop
-// is handled by the controller; flush the cache and clear the transaction.
-func (m *WindowsNetworkManager) Restore(ctx context.Context, _ any) error {
-	if err := (minimalRouting{}).flushResolverCache(); err != nil {
-		return err
-	}
+// Restore: sing-box routes die with the core; the product restores each
+// captured interface's resolver exactly and resets any straggler still
+// pointing at the tun resolver.
+func (m *WindowsNetworkManager) Restore(ctx context.Context, value any) error {
 	m.mu.Lock()
+	snapshot := WindowsNetworkSnapshot{}
 	if m.current != nil {
+		snapshot = *m.current
 		m.rememberOwnershipLocked(*m.current)
+	} else if value != nil {
+		if captured, ok := value.(WindowsNetworkSnapshot); ok {
+			snapshot = captured
+		}
 	}
 	m.current = nil
 	m.mu.Unlock()
-	return nil
+	if snapshot.OwnedTUN == nil {
+		return (minimalRouting{}).flushResolverCache()
+	}
+	_, err := m.run(ctx, networkOperationDNSMetric, dnsMetricInput(snapshot, false))
+	return err
 }
 
-// Reconcile: startup hygiene only.
+// Reconcile: startup hygiene only — routes died with the service's core;
+// resolvers cannot be restored without a snapshot, so stray tun DNS is
+// reset via the dns_metric script with an empty snapshot.
 func (m *WindowsNetworkManager) Reconcile(ctx context.Context) error {
-	return minimalRouting{}.flushResolverCache()
+	_, err := m.run(ctx, networkOperationDNSMetric, windowsNetworkInput{
+		DNSConnected: false, TUNDNS: windowsTUNDNS,
+		OwnedTUN: &WindowsTUNIdentity{InterfaceIndex: 0, InterfaceAlias: windowsTUNInterface},
+	})
+	return err
 }
 
 // Residue: the tun adapter is the only product footprint that can outlive
@@ -1328,26 +1344,24 @@ func standardNonPublicIPv6Prefixes() []netip.Prefix {
 // per-interface resolver and metric writes only.
 const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
   Clear-DnsClientCache -ErrorAction SilentlyContinue
-  # Deterministic resolution: every live IPv4 interface (including adapters
-  # that appeared after prepare) points at the tun resolver, so Windows'
-  # parallel DNS racing can never answer with a polluted corporate address.
   $tunIndex = [int]$i.OwnedTUN.InterfaceIndex
   $all = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.InterfaceIndex -ne $tunIndex -and $_.InterfaceIndex -gt 1 } | Select-Object -ExpandProperty InterfaceIndex -Unique)
   if ($all.Count -ne 0) { Set-DnsClientServerAddress -InterfaceIndex $all -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop }
   Set-DnsClientServerAddress -InterfaceIndex $tunIndex -ServerAddresses @([string]$i.TUNDNS) -ErrorAction Stop
-  Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $tunIndex -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction Stop
-  [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
+  [pscustomobject]@{Connected=$true}|ConvertTo-Json -Compress
 } else {
   Clear-DnsClientCache -ErrorAction SilentlyContinue
-  # Restore: every live interface returns to its own default resolver; the
-  # prepared interfaces also get their captured metrics back.
   $tunIndex = [int]$i.OwnedTUN.InterfaceIndex
-  $all = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.InterfaceIndex -ne $tunIndex -and $_.InterfaceIndex -gt 1 } | Select-Object -ExpandProperty InterfaceIndex -Unique)
-  if ($all.Count -ne 0) { Set-DnsClientServerAddress -InterfaceIndex $all -ResetServerAddresses -ErrorAction Stop }
   foreach ($physical in @($i.Interfaces | Where-Object { $null -ne $_ })) {
-    Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex ([int]$physical.Index) -AutomaticMetric $(if ([bool]$physical.AutomaticMetric) { 'Enabled' } else { 'Disabled' }) -InterfaceMetric $physical.InterfaceMetric -ErrorAction Stop
+    if ([bool]$physical.DNSAutomatic) {
+      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ResetServerAddresses -ErrorAction Stop
+    } else {
+      Set-DnsClientServerAddress -InterfaceIndex ([int]$physical.Index) -ServerAddresses @($physical.DNSServers) -ErrorAction Stop
+    }
   }
-  [pscustomobject]@{Connected=[bool]$i.DNSConnected}|ConvertTo-Json -Compress
+  $strays = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceIndex -ne $tunIndex -and ($_.ServerAddresses -contains [string]$i.TUNDNS) })
+  foreach ($stray in $strays) { Set-DnsClientServerAddress -InterfaceIndex $stray.InterfaceIndex -ResetServerAddresses -ErrorAction Stop }
+  [pscustomobject]@{Connected=$false}|ConvertTo-Json -Compress
 }`
 
 var networkPowerShellScripts = map[string]string{
