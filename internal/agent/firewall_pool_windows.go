@@ -74,7 +74,9 @@ func (m *WindowsNetworkManager) installPreparedEmergencyProtection(ctx context.C
 // armPreparedFirewall enables the pool and proves the active store in a
 // single PowerShell transaction.
 func (m *WindowsNetworkManager) armPreparedFirewall(ctx context.Context, state WindowsPreparedState) error {
-	_, err := m.run(ctx, networkOperationFirewallArm, m.preparedFirewallInput(state, false))
+	// includeEmergency: the script arms only the normal rules but ends by
+	// proving the emergency rule is present and still disabled.
+	_, err := m.run(ctx, networkOperationFirewallArm, m.preparedFirewallInput(state, true))
 	return err
 }
 
