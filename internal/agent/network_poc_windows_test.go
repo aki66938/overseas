@@ -251,3 +251,53 @@ func TestRuntimeMonitorRetainsFailClosedAuditForOwnedPreparedRules(t *testing.T)
 		}
 	}
 }
+
+func TestTunRecoveryScriptIsRestrictedToOneOwnedPhantom(t *testing.T) {
+	script, ok := networkPowerShellScripts["tun_recover"]
+	if !ok {
+		t.Fatal("tun_recover fixed operation is absent")
+	}
+	for _, required := range []string{
+		"Get-PnpDevice -PresentOnly:$false",
+		`SWD\WINTUN\`,
+		"CM_PROB_PHANTOM",
+		"CoreExecutable",
+		`Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}`,
+		"TUNInterface",
+		"ownership is ambiguous",
+		"pnputil.exe",
+		"/remove-device",
+		"removal was not proven",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("tun_recover script is missing %q", required)
+		}
+	}
+	if strings.Contains(script, "pnputil.exe /remove-device *") {
+		t.Fatal("tun_recover must never use wildcard device removal")
+	}
+}
+
+func TestPocPrepareRunsOwnedPhantomRecoveryBeforeBaseline(t *testing.T) {
+	runner := &fakeNetworkRunner{}
+	manager, err := newWindowsNetworkManager(
+		validPolicy(),
+		`C:\state.json`,
+		runner,
+		&fakeSnapshotStore{},
+		withWindowsNativeNetworkReader(&scriptedNativeReader{baselines: []WindowsNetworkBaseline{
+			validPreparedBaseline(), validPreparedBaseline(),
+		}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.ops) == 0 || runner.ops[0] != "tun_recover" {
+		t.Fatalf("prepare operations = %v, want tun_recover first", runner.ops)
+	}
+}
