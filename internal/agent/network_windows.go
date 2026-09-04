@@ -1387,7 +1387,7 @@ const recoverTUNPowerShell = `$managed = @(Get-CimInstance Win32_Process -Filter
 })
 if ($managed.Count -ne 0) { throw 'tun_recover: managed core is active.' }
 $networkClass = 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}'
-$matches = @()
+$ownedPhantoms = @()
 $candidates = @(Get-PnpDevice -PresentOnly:$false -ErrorAction Stop | Where-Object {
   [string]$_.InstanceId -like 'SWD\WINTUN\*' -and
   [string]$_.FriendlyName -eq 'sing-tun Tunnel' -and
@@ -1399,12 +1399,12 @@ foreach ($candidate in $candidates) {
   if ($guid -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { continue }
   $connection = Get-ItemProperty -LiteralPath (Join-Path (Join-Path $networkClass $guid) 'Connection') -ErrorAction SilentlyContinue
   if ($null -ne $connection -and [string]::Equals([string]$connection.Name, [string]$i.TUNInterface, [StringComparison]::OrdinalIgnoreCase)) {
-    $matches += $candidate
+    $ownedPhantoms += $candidate
   }
 }
-if ($matches.Count -gt 1) { throw 'tun_recover: ownership is ambiguous.' }
-if ($matches.Count -eq 1) {
-  $instanceId = [string]$matches[0].InstanceId
+if ($ownedPhantoms.Count -gt 1) { throw 'tun_recover: ownership is ambiguous.' }
+if ($ownedPhantoms.Count -eq 1) {
+  $instanceId = [string]$ownedPhantoms[0].InstanceId
   & "$env:SystemRoot\System32\pnputil.exe" /remove-device $instanceId | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'tun_recover: removal failed.' }
   $remaining = @(Get-PnpDevice -PresentOnly:$false -ErrorAction Stop | Where-Object {
@@ -1412,7 +1412,7 @@ if ($matches.Count -eq 1) {
   })
   if ($remaining.Count -ne 0) { throw 'tun_recover: removal was not proven.' }
 }
-[pscustomobject]@{Removed=($matches.Count -eq 1)} | ConvertTo-Json -Compress`
+[pscustomobject]@{Removed=($ownedPhantoms.Count -eq 1)} | ConvertTo-Json -Compress`
 
 const residueNetworkPowerShell = `$allRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
 $enabledRules = @($allRules | Where-Object { [string]$_.Enabled -eq 'True' })

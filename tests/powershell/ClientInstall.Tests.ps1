@@ -829,6 +829,15 @@ Describe 'Transactional Windows client installer' {
         $verifier | Should Match 'Cert:\\LocalMachine\\Root'
     }
 
+    It 'does not collide with the automatic PowerShell Matches variable during phantom recovery' {
+        $networkSource = Get-Content -LiteralPath (Join-Path $repoRoot 'internal\agent\network_windows.go') -Raw -Encoding UTF8
+        $start = $networkSource.IndexOf('const recoverTUNPowerShell')
+        $end = $networkSource.IndexOf('const residueNetworkPowerShell', $start)
+        $recovery = $networkSource.Substring($start, $end - $start)
+        $recovery | Should Match '\$ownedPhantoms'
+        $recovery | Should Not Match '\$matches'
+    }
+
     It 'creates only a validated release parent and atomically publishes after a clean-checkout proof' {
         $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw -Encoding UTF8
         $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw -Encoding UTF8
