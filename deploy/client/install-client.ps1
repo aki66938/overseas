@@ -12,7 +12,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ProductVersion = [version] '0.1.0'
+$ProductVersion = [version] '0.1.7'
 $TrustedManifestSignerThumbprint = '0000000000000000000000000000000000000000' # INSPECT_ONLY_REFUSES_INSTALL; release recipe replaces this copy.
 $ServiceName = 'RegenBioOverseasAccessAgent'
 $ServiceDisplayName = 'RegenBio Overseas Access Agent'
@@ -499,21 +499,6 @@ function Set-ServiceHardening {
     if (-not $configurationProof.DelayedAutoStart) { throw 'Delayed-auto start proof failed.' }
 }
 
-function Import-PocRootCertificate {
-    # The telecom assistant on VM101 MITMs proxied HTTPS with its own root
-    # ("Go MITM Root CA"); employee devices must trust it or every proxied
-    # site fails with CERT_AUTHORITY_INVALID.
-    foreach ($name in @('RegenBio-OverseasAccess-PoC-Root.cer', 'Telecom-GoMITM-Root.cer')) {
-        $certPath = Join-Path $InstallRoot $name
-        if (-not (Test-Path -LiteralPath $certPath -PathType Leaf)) { throw "Root certificate file is missing: $name" }
-        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
-        foreach ($storeName in @('Root', 'TrustedPublisher')) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-            try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close() }
-        }
-    }
-}
-
 function Ensure-OwnedService {
     $binaryPath = Join-Path $InstallRoot 'overseas-agent.exe'
     $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -902,8 +887,7 @@ function Install-ClientTransaction {
         }
         Write-OwnershipManifest -TransactionId $TransactionId -Manifest $Manifest
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingService' -PendingResource $ServiceName
-        Import-PocRootCertificate
-  Ensure-OwnedService
+        Ensure-OwnedService
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingFirewall' -PendingResource $OwnedFirewallGroup -CompletedResource $ServiceName
         Ensure-OwnedFirewallRules
         Write-TransactionPhase -Path $JournalPath -Phase 'CreatingShortcut' -PendingResource $ShortcutPath -CompletedResource $OwnedFirewallGroup

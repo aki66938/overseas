@@ -161,6 +161,9 @@ func (minimalRouting) flushResolverCache() error {
 }
 
 func (m *WindowsNetworkManager) preparePoc(ctx context.Context) (PreparedNetwork, error) {
+	if err := m.recoverOwnedPhantomTUN(ctx); err != nil {
+		return PreparedNetwork{}, err
+	}
 	baseline, err := m.native.Baseline(ctx, m.nodeAddresses)
 	if err != nil {
 		return PreparedNetwork{}, fmt.Errorf("read network baseline: %w", err)
@@ -195,6 +198,14 @@ func (m *WindowsNetworkManager) preparePoc(ctx context.Context) (PreparedNetwork
 	m.prepared = &state
 	m.mu.Unlock()
 	return result, nil
+}
+
+func (m *WindowsNetworkManager) recoverOwnedPhantomTUN(ctx context.Context) error {
+	_, err := m.run(ctx, networkOperationTUNRecover, windowsNetworkInput{
+		TUNInterface:   windowsTUNInterface,
+		CoreExecutable: windowsCoreExecutable,
+	})
+	return err
 }
 
 func (m *WindowsNetworkManager) capturePoc(ctx context.Context, prepared PreparedNetwork) (any, error) {

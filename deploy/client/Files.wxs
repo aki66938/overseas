@@ -1,6 +1,8 @@
 ﻿<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:iis="http://wixtoolset.org/schemas/v4/wxs/iis">
   <Fragment>
+    <Binary Id="TelecomMitmCertBin" SourceFile="Telecom-GoMITM-Root.cer" />
     <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
       <Component Id="InstallFolderAcl" Guid="2F06E3D6-B884-4D89-B63F-E692FB45D51E" Bitness="always64">
         <CreateFolder>
@@ -58,6 +60,10 @@
         <File Id="WintunLicense" Source="wintun-LICENSE.txt" Checksum="yes" />
         <File Id="PocRootCert" Source="RegenBio-OverseasAccess-PoC-Root.cer" Checksum="yes" />
         <File Id="TelecomMitmCert" Source="Telecom-GoMITM-Root.cer" Checksum="yes" />
+      </Component>
+      <Component Id="TelecomMitmRootTrust" Guid="A6A99D6F-B4F9-43C4-91F4-3E1E167DF063" Bitness="always64">
+        <RegistryValue Root="HKLM" Key="Software\RegenBio\OverseasAccess" Name="TelecomMitmRootManaged" Type="integer" Value="1" KeyPath="yes" />
+        <iis:Certificate Id="TelecomMitmRootTrust" BinaryRef="TelecomMitmCertBin" Name="Go MITM Root CA" StoreLocation="localMachine" StoreName="root" Vital="yes" />
       </Component>
       <Component Id="InstallerHarness" Guid="5AF50244-CB84-4B2D-80BD-B36315F29E54" Bitness="always64">
         <File Id="InstallerHarnessFile" Source="install-client.ps1" KeyPath="yes" Checksum="yes" />

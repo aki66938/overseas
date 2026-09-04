@@ -5,12 +5,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/supervisor"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 	"golang.org/x/sys/windows/svc"
 )
@@ -43,6 +46,31 @@ func TestRenderClientConfigUsesDirectTelecomHTTPOutbound(t *testing.T) {
 	}
 	if _, exists := config.Outbounds[1]["password"]; exists {
 		t.Fatal("HTTP outbound contains a password")
+	}
+}
+
+func TestCoreReadyFailureIncludesBoundedDiagnosticTail(t *testing.T) {
+	cause := supervisor.ErrReadyTimeout
+	tail := strings.Repeat("old-output ", traceevent.MaxDetailBytes) + "open interface take too much time to finish"
+	err := newCoreReadinessError(cause, tail)
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want readiness cause", err)
+	}
+	var diagnostic interface {
+		DiagnosticStage() string
+		DiagnosticDetail() string
+	}
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("error %T does not expose staged diagnostics", err)
+	}
+	if diagnostic.DiagnosticStage() != traceevent.StageCoreReady {
+		t.Fatalf("stage = %q, want core_ready", diagnostic.DiagnosticStage())
+	}
+	if len(diagnostic.DiagnosticDetail()) > traceevent.MaxDetailBytes {
+		t.Fatalf("detail has %d bytes", len(diagnostic.DiagnosticDetail()))
+	}
+	if !strings.Contains(diagnostic.DiagnosticDetail(), "open interface take too much time to finish") {
+		t.Fatalf("detail lost final warning: %q", diagnostic.DiagnosticDetail())
 	}
 }
 

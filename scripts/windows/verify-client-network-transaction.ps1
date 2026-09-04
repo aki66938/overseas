@@ -71,14 +71,14 @@ function Test-TerminalResidueZero {
 function Test-TraceLifecycle {
     param($TraceEvidence)
     if ($null -eq $TraceEvidence -or [int] $TraceEvidence.schema_version -ne 1) { return $false }
-    $beforePublish = @($TraceEvidence.before_publish)
-    $afterPublish = @($TraceEvidence.after_publish)
+    $afterPrepare = @($TraceEvidence.after_prepare)
+    $afterCapture = @($TraceEvidence.after_capture)
     $afterRestore = @($TraceEvidence.after_restore)
-    if ($beforePublish.Count -eq 0 -or $afterPublish.Count -le $beforePublish.Count -or $afterRestore.Count -le $afterPublish.Count) {
+    if ($afterPrepare.Count -eq 0 -or $afterCapture.Count -le $afterPrepare.Count -or $afterRestore.Count -le $afterCapture.Count) {
         return $false
     }
-    if ([uint64] $beforePublish[-1].sequence -ne [uint64] $afterPublish[$beforePublish.Count - 1].sequence -or
-        [uint64] $afterPublish[-1].sequence -ne [uint64] $afterRestore[$afterPublish.Count - 1].sequence) {
+    if ([uint64] $afterPrepare[-1].sequence -ne [uint64] $afterCapture[$afterPrepare.Count - 1].sequence -or
+        [uint64] $afterCapture[-1].sequence -ne [uint64] $afterRestore[$afterCapture.Count - 1].sequence) {
         return $false
     }
     $previousSequence = [uint64] 0
@@ -88,7 +88,7 @@ function Test-TraceLifecycle {
         }
         $previousSequence = [uint64] $event.sequence
     }
-    foreach ($stage in @('network_capture', 'adapter_scan', 'firewall_publish', 'active_store_verify', 'network_restore', 'residue_verify')) {
+    foreach ($stage in @('network_prepare', 'network_capture', 'network_restore', 'residue_verify')) {
         $started = @($afterRestore | Where-Object { $_.stage -eq $stage -and $_.event -eq 'started' })
         $succeeded = @($afterRestore | Where-Object { $_.stage -eq $stage -and $_.event -eq 'succeeded' })
         $failed = @($afterRestore | Where-Object { $_.stage -eq $stage -and $_.event -eq 'failed' })
@@ -120,6 +120,10 @@ try {
         $ErrorActionPreference = 'Continue'
         $output = (& $GoExecutable test ./internal/agent -run '^TestLiveWindowsPowerShellProtectionTransaction$' -count=1 -v 2>&1 | Out-String)
         $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0 -and $output -notmatch '(?m)^--- PASS: TestLiveWindowsPowerShellProtectionTransaction ') {
+            $exitCode = 1
+            $output += "`nexact live test did not run"
+        }
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference

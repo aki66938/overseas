@@ -406,8 +406,30 @@ func (s *supervisedCore) Start(ctx context.Context, executable, config string) (
 }
 
 func (s *supervisedProcessInstance) Ready(ctx context.Context) error {
-	return s.process.Ready(ctx)
+	err := s.process.Ready(ctx)
+	if err == nil {
+		return nil
+	}
+	return newCoreReadinessError(err, s.process.DiagnosticTail())
 }
+
+type coreReadinessError struct {
+	err    error
+	detail string
+}
+
+func newCoreReadinessError(err error, tail string) error {
+	if len(tail) > traceevent.MaxDetailBytes {
+		tail = tail[len(tail)-traceevent.MaxDetailBytes:]
+	}
+	detail, _ := traceevent.SanitizeDetail(tail)
+	return &coreReadinessError{err: err, detail: detail}
+}
+
+func (e *coreReadinessError) Error() string            { return "core readiness failed: " + e.err.Error() }
+func (e *coreReadinessError) Unwrap() error            { return e.err }
+func (e *coreReadinessError) DiagnosticStage() string  { return traceevent.StageCoreReady }
+func (e *coreReadinessError) DiagnosticDetail() string { return e.detail }
 
 func (s *supervisedProcessInstance) Stop(ctx context.Context) agent.ProcessTermination {
 	err := s.process.Stop(ctx)

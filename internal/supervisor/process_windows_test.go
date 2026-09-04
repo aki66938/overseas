@@ -176,6 +176,39 @@ func TestLogsRedactSecretsAndStayBounded(t *testing.T) {
 	}
 }
 
+func TestReadyTimeoutReturnsBoundedRedactedCoreTail(t *testing.T) {
+	const secret = "credential-value-never-log"
+	cfg, ready := writeFakeConfig(t, map[string]any{
+		"mode":           "write-secret",
+		"secret":         secret,
+		"log_repeat":     200,
+		"suppress_ready": true,
+	})
+	p := verifiedProcess(&Process{
+		ReadyTimeout: 150 * time.Millisecond,
+		StopTimeout:  50 * time.Millisecond,
+		ReadyProbe:   fileProbe(ready),
+		Secrets:      []string{secret},
+		MaxLogBytes:  1024,
+	})
+	if err := p.Start(context.Background(), fakeConnectEXE, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Ready(context.Background()); !errors.Is(err, ErrReadyTimeout) {
+		t.Fatalf("Ready() = %v, want timeout", err)
+	}
+	detail := p.DiagnosticTail()
+	if strings.Contains(detail, secret) {
+		t.Fatal("diagnostic tail contains configured secret")
+	}
+	if len(detail) > 1024 {
+		t.Fatalf("diagnostic tail has %d bytes, want at most 1024", len(detail))
+	}
+	if !strings.Contains(detail, "open interface take too much time to finish") {
+		t.Fatalf("diagnostic tail does not contain final warning: %q", detail)
+	}
+}
+
 func TestSecondStartIsRejected(t *testing.T) {
 	cfg, ready := writeFakeConfig(t, map[string]any{"mode": "ready"})
 	p := verifiedProcess(&Process{ReadyTimeout: time.Second, StopTimeout: 100 * time.Millisecond, ReadyProbe: fileProbe(ready)})

@@ -106,8 +106,12 @@ func (m *WindowsNetworkManager) StartMonitor(ctx context.Context, prepared Prepa
 func (m *WindowsNetworkManager) runMonitor(ctx context.Context, state WindowsPreparedState, config networkMonitorConfig, clock monitorClock, failures chan<- error) {
 	fingerprints := clock.NewTicker(config.FingerprintInterval)
 	defer fingerprints.Stop()
-	audits := clock.NewTicker(config.AuditInterval)
-	defer audits.Stop()
+	var auditTicks <-chan time.Time
+	if preparedFirewallMonitoringApplies(state) {
+		audits := clock.NewTicker(config.AuditInterval)
+		defer audits.Stop()
+		auditTicks = audits.Tick()
+	}
 	// The comparison baseline is the CONNECTED state (TUN up, DNS overrides,
 	// owned routes in place), captured when monitoring starts. Comparing
 	// against the prepared fingerprint would flag the connection's own
@@ -134,14 +138,16 @@ func (m *WindowsNetworkManager) runMonitor(ctx context.Context, state WindowsPre
 				continue
 			}
 			if baselineFingerprint != "" && fingerprint != baselineFingerprint {
-				m.armMonitorEmergency(ctx, state)
+				if preparedFirewallMonitoringApplies(state) {
+					m.armMonitorEmergency(ctx, state)
+				}
 				deliverMonitorFailure(failures, fmt.Errorf("%w: runtime fingerprint differs from the connected baseline", errNetworkChanged))
 				return
 			}
 			if baselineFingerprint == "" {
 				baselineFingerprint = fingerprint
 			}
-		case <-audits.Tick():
+		case <-auditTicks:
 			if ctx.Err() != nil {
 				return
 			}
@@ -155,6 +161,10 @@ func (m *WindowsNetworkManager) runMonitor(ctx context.Context, state WindowsPre
 			}
 		}
 	}
+}
+
+func preparedFirewallMonitoringApplies(state WindowsPreparedState) bool {
+	return len(state.Rules) > 0
 }
 
 func (m *WindowsNetworkManager) armMonitorEmergency(ctx context.Context, state WindowsPreparedState) {

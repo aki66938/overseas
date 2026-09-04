@@ -77,14 +77,12 @@ Describe 'Client LocalSystem network transaction gate' {
         $integrationSource = Get-Content -LiteralPath $integrationPath -Raw -Encoding UTF8
         foreach ($literal in @(
             'OVERSEAS_ACCESS_TRACE_EVIDENCE_PATH',
-            'BeforePublish',
-            'AfterPublish',
+            'AfterPrepare',
+            'AfterCapture',
             'AfterRestore',
             'TerminalResidue',
+            'network_prepare',
             'network_capture',
-            'adapter_scan',
-            'firewall_publish',
-            'active_store_verify',
             'network_restore',
             'residue_verify',
             "'started'",
@@ -97,6 +95,8 @@ Describe 'Client LocalSystem network transaction gate' {
         $source | Should Match 'TerminalResidueZero\s*=\s*\$terminalResidueZero'
         $integrationSource | Should Match ([regex]::Escape('traceevent.NewRecorder'))
         $integrationSource | Should Match ([regex]::Escape('.Batch(0,'))
+        $integrationSource | Should Match ([regex]::Escape('func TestLiveWindowsPowerShellProtectionTransaction'))
+        $source | Should Match ([regex]::Escape('exact live test did not run'))
     }
 
     It 'keeps the trace sidecar create-new bounded and removes it after evidence publication' {

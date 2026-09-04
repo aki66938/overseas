@@ -4,18 +4,21 @@
 <?ifndef PackageTrustMode ?>
   <?define PackageTrustMode = "INSPECT_ONLY_REFUSES_INSTALL" ?>
 <?endif?>
+<?ifndef ProductVersion ?>
+  <?define ProductVersion = "0.1.7" ?>
+<?endif?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
       Name="RegenBio Overseas Access"
       Manufacturer="RegenBio"
-      Version="0.1.0"
+      Version="$(var.ProductVersion)"
       UpgradeCode="A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1"
       Scope="perMachine"
       InstallerVersion="500"
       Compressed="yes">
     <SummaryInformation Description="RegenBio Overseas Access Windows client" Manufacturer="RegenBio" />
     <MajorUpgrade
-        AllowSameVersionUpgrades="no"
+        AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of RegenBio Overseas Access is already installed. Downgrades are not permitted."
         Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />

@@ -49,6 +49,7 @@ const (
 	networkOperationFirewallDisable = "firewall_disable"
 	networkOperationFirewallArm     = "firewall_arm"
 	networkOperationFirewallAudit   = "firewall_audit"
+	networkOperationTUNRecover      = "tun_recover"
 
 	windowsTUNInterface = "RegenBioOverseasAccess"
 	// windowsFakeIPRoutePrefix must mirror the fakeip inet4_range rendered by
@@ -234,6 +235,8 @@ func networkOperationMessages(operation string) (string, string) {
 		return "正在禁用预置防泄漏规则", "预置规则已禁用"
 	case networkOperationFirewallAudit:
 		return "正在审计预置防火墙定义", "预置防火墙定义审计通过"
+	case networkOperationTUNRecover:
+		return "正在检查残留虚拟网卡", "残留虚拟网卡已处理"
 	case networkOperationReady:
 		return "正在等待 sing-box TUN 网卡", "TUN 网卡已就绪"
 	case networkOperationActivate, networkOperationDNSMetric:
@@ -270,6 +273,8 @@ func networkStage(operation string) string {
 	case networkOperationEmergency:
 		return traceevent.StageEmergencyProtection
 	case networkOperationReady:
+		return traceevent.StageTUNReady
+	case networkOperationTUNRecover:
 		return traceevent.StageTUNReady
 	case networkOperationActivate:
 		return traceevent.StageRouteActivation
@@ -1359,6 +1364,7 @@ const dnsMetricPowerShell = `if ([bool]$i.DNSConnected) {
 }`
 
 var networkPowerShellScripts = map[string]string{
+	networkOperationTUNRecover:      recoverTUNPowerShell,
 	networkOperationCapture:         captureNetworkPowerShell,
 	networkOperationScan:            scanNetworkPowerShell,
 	networkOperationBlock:           blockNetworkPowerShell,
@@ -1375,6 +1381,38 @@ var networkPowerShellScripts = map[string]string{
 	networkOperationFirewallDisable: preparedFirewallDisablePowerShell,
 	networkOperationFirewallAudit:   preparedFirewallAuditPowerShell,
 }
+
+const recoverTUNPowerShell = `$managed = @(Get-CimInstance Win32_Process -Filter "Name='sing-box.exe'" -ErrorAction Stop | Where-Object {
+  [string]::Equals([string]$_.ExecutablePath, [string]$i.CoreExecutable, [StringComparison]::OrdinalIgnoreCase)
+})
+if ($managed.Count -ne 0) { throw 'tun_recover: managed core is active.' }
+$networkClass = 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}'
+$ownedPhantoms = @()
+$candidates = @(Get-PnpDevice -PresentOnly:$false -ErrorAction Stop | Where-Object {
+  [string]$_.InstanceId -like 'SWD\WINTUN\*' -and
+  [string]$_.FriendlyName -eq 'sing-tun Tunnel' -and
+  [string]$_.Problem -eq 'CM_PROB_PHANTOM'
+})
+foreach ($candidate in $candidates) {
+  $instanceId = [string]$candidate.InstanceId
+  $guid = $instanceId.Substring($instanceId.LastIndexOf('\') + 1)
+  if ($guid -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { continue }
+  $connection = Get-ItemProperty -LiteralPath (Join-Path (Join-Path $networkClass $guid) 'Connection') -ErrorAction SilentlyContinue
+  if ($null -ne $connection -and [string]::Equals([string]$connection.Name, [string]$i.TUNInterface, [StringComparison]::OrdinalIgnoreCase)) {
+    $ownedPhantoms += $candidate
+  }
+}
+if ($ownedPhantoms.Count -gt 1) { throw 'tun_recover: ownership is ambiguous.' }
+if ($ownedPhantoms.Count -eq 1) {
+  $instanceId = [string]$ownedPhantoms[0].InstanceId
+  & "$env:SystemRoot\System32\pnputil.exe" /remove-device $instanceId | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'tun_recover: removal failed.' }
+  $remaining = @(Get-PnpDevice -PresentOnly:$false -ErrorAction Stop | Where-Object {
+    [string]::Equals([string]$_.InstanceId, $instanceId, [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($remaining.Count -ne 0) { throw 'tun_recover: removal was not proven.' }
+}
+[pscustomobject]@{Removed=($ownedPhantoms.Count -eq 1)} | ConvertTo-Json -Compress`
 
 const residueNetworkPowerShell = `$allRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Group ([string]$i.FirewallGroup) -ErrorAction SilentlyContinue)
 $enabledRules = @($allRules | Where-Object { [string]$_.Enabled -eq 'True' })

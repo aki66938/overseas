@@ -71,6 +71,7 @@ func main() {
 			fmt.Fprintf(os.Stdout, "stdout secret=%s\n", cfg.Secret)
 			fmt.Fprintf(os.Stderr, "stderr secret=%s\n", cfg.Secret)
 		}
+		fmt.Fprintln(os.Stderr, "open interface take too much time to finish")
 		markReady(cfg)
 		waitForStop()
 	case "escape-immediately":
