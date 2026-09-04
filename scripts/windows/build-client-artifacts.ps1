@@ -6,7 +6,8 @@ param(
     [string] $OutputDirectory = 'build/msi',
     [string] $SigningCertificateThumbprint,
     [string] $SignToolPath = 'signtool.exe',
-    [string] $FirstPartyBinaryDirectory
+    [string] $FirstPartyBinaryDirectory,
+    [version] $ProductVersion = [version] '0.1.7'
 )
 
 Set-StrictMode -Version 2.0
@@ -169,7 +170,7 @@ foreach ($item in @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name)
 }
 $signerThumbprints = @($lock.wintun.dll_signer_thumbprint)
 if ($Mode -eq 'Release') { $signerThumbprints += $SigningCertificateThumbprint.ToLowerInvariant() }
-$manifest = [ordered] @{ schema_version = 1; product_version = '0.1.6'; source_commit = $sourceCommit; mode = $Mode.ToLowerInvariant(); signer_thumbprints = @($signerThumbprints); files = $files }
+$manifest = [ordered] @{ schema_version = 1; product_version = $ProductVersion.ToString(); source_commit = $sourceCommit; mode = $Mode.ToLowerInvariant(); signer_thumbprints = @($signerThumbprints); files = $files }
 $manifestPath = Join-Path $target 'artifact-manifest.json'
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
 $signaturePath = $manifestPath + '.p7s'

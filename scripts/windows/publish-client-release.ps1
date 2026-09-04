@@ -2,13 +2,18 @@
 param(
     [Parameter(Mandatory = $true)][string] $SigningCertificateThumbprint,
     [string] $SignToolPath = 'signtool.exe',
-    [string] $FinalMsiPath = 'dist/OverseasAccessSetup-RELEASE_SIGNED.msi'
+    [version] $ReleaseVersion = [version] '0.1.7',
+    [string] $FinalMsiPath
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
+$ReleaseVersion = [version] $ReleaseVersion
+if ([string]::IsNullOrWhiteSpace($FinalMsiPath)) {
+    $FinalMsiPath = 'dist/OverseasAccessSetup-v' + $ReleaseVersion.ToString() + '-poc-RELEASE_SIGNED.msi'
+}
 $final = [IO.Path]::GetFullPath((Join-Path $repo $FinalMsiPath))
 if (-not $final.StartsWith($repo + [IO.Path]::DirectorySeparatorChar) -or [IO.Path]::GetFileName($final) -notmatch 'RELEASE_SIGNED') { throw 'Unsafe release output path.' }
 if (Test-Path -LiteralPath $final) { throw 'Final release artifact already exists.' }
@@ -120,9 +125,9 @@ try {
         finally { $env:GOOS = $previousGoOS; $env:GOARCH = $previousGoArch }
         if ($LASTEXITCODE -ne 0) { throw "Locked Go build failed for '$($build[0])'." }
     }
-    & (Join-Path $PSScriptRoot 'build-client-artifacts.ps1') -Mode Release -OutputDirectory $payloadRelative -SigningCertificateThumbprint $SigningCertificateThumbprint -SignToolPath $signTool -FirstPartyBinaryDirectory $firstParty
+    & (Join-Path $PSScriptRoot 'build-client-artifacts.ps1') -Mode Release -OutputDirectory $payloadRelative -SigningCertificateThumbprint $SigningCertificateThumbprint -SignToolPath $signTool -FirstPartyBinaryDirectory $firstParty -ProductVersion $ReleaseVersion
     if ($LASTEXITCODE -ne 0) { throw 'Release payload build failed.' }
-    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
+    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -d ProductVersion=$ReleaseVersion -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
     if ($LASTEXITCODE -ne 0) { throw 'wix release build failed.' }
     & $signTool sign /fd SHA256 /sha1 $SigningCertificateThumbprint $temporaryMsi | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'signtool release signing failed.' }

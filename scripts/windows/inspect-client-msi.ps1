@@ -107,6 +107,12 @@ $aclRows = @(Get-MsiTableRows 'MsiLockPermissionsEx')
 $expectedSddl = @('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)', 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
 foreach ($sddl in $expectedSddl) { if (@($aclRows | Where-Object { $_[3] -eq $sddl }).Count -ne 1) { throw "Required ACL row is absent: $sddl" } }
 $propertyRows = @(Get-MsiTableRows 'Property')
+$productVersions = @($propertyRows | Where-Object { $_[0] -eq 'ProductVersion' } | ForEach-Object { [string] $_[1] })
+if ($productVersions.Count -ne 1 -or $productVersions[0] -ne [string] $manifest.product_version) { throw 'MSI and manifest product versions differ.' }
+$expectedUpgradeCode = 'A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1'
+$upgradeRows = @(Get-MsiTableRows 'Upgrade')
+$relatedUpgradeRows = @($upgradeRows | Where-Object { ([string] $_[0]).Trim('{}').ToUpperInvariant() -eq $expectedUpgradeCode })
+if ($upgradeRows.Count -eq 0 -or $relatedUpgradeRows.Count -ne $upgradeRows.Count) { throw 'MSI Upgrade table does not use the authoritative UpgradeCode.' }
 $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } | ForEach-Object { $_[1] })
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')

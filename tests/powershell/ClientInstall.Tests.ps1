@@ -8,6 +8,7 @@ $checksumsLockPath = Join-Path $repoRoot 'deploy\client\checksums.lock'
 $artifactBuilderPath = Join-Path $repoRoot 'scripts\windows\build-client-artifacts.ps1'
 $msiInspectorPath = Join-Path $repoRoot 'scripts\windows\inspect-client-msi.ps1'
 $releasePublisherPath = Join-Path $repoRoot 'scripts\windows\publish-client-release.ps1'
+$installedVerifierPath = Join-Path $repoRoot 'scripts\windows\verify-installed-client.ps1'
 $verifierWindowsPath = Join-Path $repoRoot 'cmd\installer-verifier\main_windows.go'
 $verifierMainPath = Join-Path $repoRoot 'cmd\installer-verifier\main.go'
 $runtimeOwnerPath = Join-Path $repoRoot 'internal\runtimeowner\owner.go'
@@ -797,10 +798,34 @@ Describe 'Transactional Windows client installer' {
         $inspector | Should Match 'UninstallCertificates'
     }
 
-    It 'keeps all installer and payload versions aligned at 0.1.6' {
-        (Get-Content -LiteralPath $productPath -Raw -Encoding UTF8) | Should Match 'Version="0\.1\.6"'
-        (Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8) | Should Match "ProductVersion\s*=\s*\[version\]\s*'0\.1\.6'"
-        (Get-Content -LiteralPath $artifactBuilderPath -Raw -Encoding UTF8) | Should Match "product_version\s*=\s*'0\.1\.6'"
+    It 'publishes 0.1.7 from an explicit release identity and permits authoritative same-version replacement' {
+        $product = Get-Content -LiteralPath $productPath -Raw -Encoding UTF8
+        $installer = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+        $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw -Encoding UTF8
+        $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw -Encoding UTF8
+        $product | Should Match '<\?define ProductVersion = "0\.1\.7"'
+        $product | Should Match 'Version="\$\(var\.ProductVersion\)"'
+        $product | Should Match '<MajorUpgrade[^>]*AllowSameVersionUpgrades="yes"'
+        $installer | Should Match "ProductVersion\s*=\s*\[version\]\s*'0\.1\.7'"
+        $builder | Should Match '\[version\]\s*\$ProductVersion\s*=\s*\[version\]\s*''0\.1\.7'''
+        $builder | Should Match 'product_version\s*=\s*\$ProductVersion\.ToString\(\)'
+        $publisher | Should Match '\[version\]\s*\$ReleaseVersion\s*=\s*\[version\]\s*''0\.1\.7'''
+        $publisher | Should Match 'OverseasAccessSetup-v.*ReleaseVersion.*-poc-RELEASE_SIGNED\.msi'
+        $publisher | Should Match '-d ProductVersion=\$ReleaseVersion'
+    }
+
+    It 'inspects upgrade identity and verifies exactly one installed release registration' {
+        $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw -Encoding UTF8
+        $inspector | Should Match ([regex]::Escape('A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1'))
+        $inspector | Should Match "Get-MsiTableRows 'Upgrade'"
+        $inspector | Should Match 'manifest\.product_version'
+        Test-Path -LiteralPath $installedVerifierPath -PathType Leaf | Should Be $true
+        if (-not (Test-Path -LiteralPath $installedVerifierPath -PathType Leaf)) { return }
+        $verifier = Get-Content -LiteralPath $installedVerifierPath -Raw -Encoding UTF8
+        $verifier | Should Match 'matchingRegistrations\.Count\s*-ne\s*1'
+        $verifier | Should Match 'DisplayVersion'
+        $verifier | Should Match 'artifact-manifest\.json'
+        $verifier | Should Match 'Cert:\\LocalMachine\\Root'
     }
 
     It 'creates only a validated release parent and atomically publishes after a clean-checkout proof' {

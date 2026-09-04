@@ -12,7 +12,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ProductVersion = [version] '0.1.6'
+$ProductVersion = [version] '0.1.7'
 $TrustedManifestSignerThumbprint = '0000000000000000000000000000000000000000' # INSPECT_ONLY_REFUSES_INSTALL; release recipe replaces this copy.
 $ServiceName = 'RegenBioOverseasAccessAgent'
 $ServiceDisplayName = 'RegenBio Overseas Access Agent'
