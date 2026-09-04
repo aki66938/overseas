@@ -121,6 +121,7 @@ Copy-Item -LiteralPath (Join-Path $coreRoot 'LICENSE') -Destination (Join-Path $
 Copy-Item -LiteralPath (Join-Path $scratch 'tun\wintun\bin\amd64\wintun.dll') -Destination (Join-Path $target 'wintun.dll')
 Copy-Item -LiteralPath (Join-Path $scratch 'tun\wintun\LICENSE.txt') -Destination (Join-Path $target 'wintun-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\deploy\client\RegenBio-OverseasAccess-PoC-Root.cer') -Destination (Join-Path $target 'RegenBio-OverseasAccess-PoC-Root.cer')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\deploy\client\Telecom-GoMITM-Root.cer') -Destination (Join-Path $target 'Telecom-GoMITM-Root.cer')
 
 $wintunSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $target 'wintun.dll')
 if ($wintunSignature.Status -ne 'Valid' -or $wintunSignature.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $lock.wintun.dll_signer_thumbprint) { throw 'Wintun signature mismatch.' }

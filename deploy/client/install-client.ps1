@@ -50,7 +50,8 @@ $RequiredPayloads = @(
     'SHA256SUMS',
     'sing-box-LICENSE.txt',
     'wintun-LICENSE.txt',
-    'RegenBio-OverseasAccess-PoC-Root.cer'
+    'RegenBio-OverseasAccess-PoC-Root.cer',
+    'Telecom-GoMITM-Root.cer'
 )
 
 function Assert-Elevated {
@@ -499,12 +500,17 @@ function Set-ServiceHardening {
 }
 
 function Import-PocRootCertificate {
-    $certPath = Join-Path $InstallRoot 'RegenBio-OverseasAccess-PoC-Root.cer'
-    if (-not (Test-Path -LiteralPath $certPath -PathType Leaf)) { throw 'The PoC root certificate file is missing.' }
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
-    foreach ($storeName in @('Root', 'TrustedPublisher')) {
-        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-        try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close() }
+    # The telecom assistant on VM101 MITMs proxied HTTPS with its own root
+    # ("Go MITM Root CA"); employee devices must trust it or every proxied
+    # site fails with CERT_AUTHORITY_INVALID.
+    foreach ($name in @('RegenBio-OverseasAccess-PoC-Root.cer', 'Telecom-GoMITM-Root.cer')) {
+        $certPath = Join-Path $InstallRoot $name
+        if (-not (Test-Path -LiteralPath $certPath -PathType Leaf)) { throw "Root certificate file is missing: $name" }
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+        foreach ($storeName in @('Root', 'TrustedPublisher')) {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+            try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close() }
+        }
     }
 }
 
