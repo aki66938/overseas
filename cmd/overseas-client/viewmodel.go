@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type clipboard interface {
 }
 
 type ViewState struct {
+	SpeedText         string
 	StatusText        string
 	DetailText        string
 	GenerationText    string
@@ -62,6 +64,8 @@ type ViewModel struct {
 	retryBlocked bool
 	traceCursor  uint64
 	traceEvents  []traceevent.Event
+	speedRunning bool
+	speedText    string
 	traceGap     bool
 	traceWarning bool
 	onChange     func(ViewState)
@@ -251,6 +255,78 @@ func (v *ViewModel) Restore(ctx context.Context) error {
 	return nil
 }
 
+// RunSpeedTest measures tun-path latency and download throughput, updating
+// SpeedText progressively. It only runs while connected (traffic must flow
+// through the tun for the numbers to be meaningful).
+func (v *ViewModel) RunSpeedTest() {
+	v.mu.Lock()
+	if v.speedRunning || v.status.State != accessmodel.StateConnected {
+		v.mu.Unlock()
+		return
+	}
+	v.speedRunning = true
+	v.mu.Unlock()
+	go func() {
+		defer func() {
+			v.mu.Lock()
+			v.speedRunning = false
+			v.mu.Unlock()
+			v.notify(v.State())
+		}()
+		report := func(text string) {
+			v.mu.Lock()
+			v.speedText = text
+			state := v.renderLocked()
+			v.mu.Unlock()
+			v.notify(state)
+		}
+		report("测速中：测量延迟…")
+		// Latency: 4 sequential 204 probes through the tun.
+		total, hits := time.Duration(0), 0
+		for i := 0; i < 4; i++ {
+			start := time.Now()
+			client := http.Client{Timeout: 6 * time.Second}
+			resp, err := client.Get("https://www.gstatic.com/generate_204")
+			if err == nil {
+				resp.Body.Close()
+				total += time.Since(start)
+				hits++
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		latency := ""
+		if hits > 0 {
+			latency = fmt.Sprintf("平均延迟 %d ms（%d/%d 成功）", total.Milliseconds()/int64(hits), hits, 4)
+		} else {
+			latency = "延迟测量失败"
+		}
+		report("测速中：下载 8MB…")
+		// Throughput: download up to 8MB from Cloudflare's speed endpoint.
+		start := time.Now()
+		var bytes int64
+		dlClient := http.Client{Timeout: 20 * time.Second}
+		resp, err := dlClient.Get("https://speed.cloudflare.com/__down?bytes=8000000")
+		if err == nil {
+			buf := make([]byte, 64*1024)
+			for bytes < 8<<20 {
+				n, rerr := resp.Body.Read(buf)
+				bytes += int64(n)
+				if rerr != nil || n == 0 {
+					break
+				}
+			}
+			resp.Body.Close()
+			elapsed := time.Since(start).Seconds()
+			if elapsed > 0.2 && bytes > 0 {
+				mbps := float64(bytes) * 8 / elapsed / 1e6
+				report(fmt.Sprintf("测速结果：下载 %.1f Mbps（%.1f MB / %.1f 秒）· %s", mbps, float64(bytes)/1e6, elapsed, latency))
+				return
+			}
+		}
+		report("测速结果：下载测速失败 · " + latency)
+	}()
+}
+
 func (v *ViewModel) CopyLogs() error {
 	if v.clipboard == nil {
 		return nil
@@ -351,12 +427,14 @@ func (v *ViewModel) notify(state ViewState) {
 
 func (v *ViewModel) renderLocked() ViewState {
 	state := ViewState{
+		SpeedText:       v.speedText,
 		GenerationText: generationSummary(v.traceEvents),
 		StageText:      stageSummary(v.traceEvents),
 		ProtectionText: protectionSummary(v.traceEvents, v.status),
 		LogText:        formatTraceTimeline(v.traceEvents, v.traceGap, v.traceWarning, time.Local),
 		CopyEnabled:    len(v.traceEvents) != 0,
 	}
+	speedLabel := v.speedText
 	if v.busy {
 		switch v.busyAction {
 		case busyActionDisconnect:
@@ -366,6 +444,7 @@ func (v *ViewModel) renderLocked() ViewState {
 		default:
 			state.StatusText, state.PrimaryButtonText = connectionPhaseText(v.status), "正在连接"
 		}
+		_ = speedLabel
 		return withCompatibility(state)
 	}
 	switch v.status.State {

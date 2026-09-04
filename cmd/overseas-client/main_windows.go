@@ -32,6 +32,7 @@ type windowControls struct {
 	primaryButton   *walk.PushButton
 	restoreButton   *walk.PushButton
 	copyButton      *walk.PushButton
+	speedButton     *walk.PushButton
 }
 
 func main() {
@@ -60,9 +61,22 @@ func run() error {
 		controls.primaryButton.SetEnabled(state.PrimaryEnabled)
 		controls.restoreButton.SetEnabled(state.RestoreEnabled)
 		controls.copyButton.SetEnabled(state.CopyEnabled)
+		if state.SpeedText != "" {
+			_ = controls.speedButton.SetText(state.SpeedText)
+		} else {
+			_ = controls.speedButton.SetText("测速")
+		}
+		controls.speedButton.SetEnabled(state.StatusText == "已连接" && state.SpeedText == "")
 	}
 	vm.SetOnChange(func(state ViewState) {
 		controls.window.Synchronize(func() { applyState(state) })
+	})
+	controls.speedButton.Clicked().Attach(func() {
+		controls.speedButton.SetEnabled(false)
+		go func() {
+			vm.RunSpeedTest()
+			controls.window.Synchronize(func() { controls.speedButton.SetEnabled(true) })
+		}()
 	})
 	controls.primaryButton.Clicked().Attach(func() {
 		go func() { _ = vm.Toggle(context.Background()) }()
@@ -189,18 +203,31 @@ func buildWindow() (*windowControls, error) {
 	if err != nil {
 		return fail(err)
 	}
+	speedButton, err := newButton(buttonRow, "测速")
+	if err != nil {
+		return fail(err)
+	}
 	restoreButton.SetEnabled(false)
 	copyButton.SetEnabled(false)
-	for _, button := range []*walk.PushButton{primaryButton, restoreButton, copyButton} {
+	speedButton.SetEnabled(false)
+	for _, button := range []*walk.PushButton{primaryButton, restoreButton, copyButton, speedButton} {
 		if err := buttonLayout.SetStretchFactor(button, 1); err != nil {
 			return fail(err)
 		}
 	}
 
 	return &windowControls{
-		window: window, statusLabel: statusLabel, detailLabel: detailLabel,
-		generationLabel: generationLabel, stageLabel: stageLabel, protectionLabel: protectionLabel,
-		logEdit: logEdit, primaryButton: primaryButton, restoreButton: restoreButton, copyButton: copyButton,
+		window:           window,
+		statusLabel:      statusLabel,
+		detailLabel:      detailLabel,
+		generationLabel:  generationLabel,
+		stageLabel:       stageLabel,
+		protectionLabel:  protectionLabel,
+		logEdit:          logEdit,
+		primaryButton:    primaryButton,
+		restoreButton:    restoreButton,
+		copyButton:       copyButton,
+		speedButton:      speedButton,
 	}, nil
 }
 
