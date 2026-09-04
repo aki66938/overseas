@@ -33,11 +33,13 @@ $goExecutable = Resolve-LockedPath $lock.go.executable_path
 $wixExecutable = Resolve-LockedPath $lock.wix.executable_path
 $utilExtension = Resolve-LockedPath $lock.wix.util_extension_path
 $firewallExtension = Resolve-LockedPath $lock.wix.firewall_extension_path
+$iisExtension = Resolve-LockedPath $lock.wix.iis_extension_path
 $dtf = Resolve-LockedPath $lock.wix.dtf_path
 Assert-LockedHash $goExecutable $lock.go.executable_sha256
 Assert-LockedHash $wixExecutable $lock.wix.executable_sha256
 Assert-LockedHash $utilExtension $lock.wix.util_extension_sha256
 Assert-LockedHash $firewallExtension $lock.wix.firewall_extension_sha256
+Assert-LockedHash $iisExtension $lock.wix.iis_extension_sha256
 Assert-LockedHash $dtf $lock.wix.dtf_sha256
 if ((& $goExecutable version) -ne ('go version go' + $lock.go.version + ' windows/amd64')) { throw 'Locked Go version output is mismatched.' }
 if ((& $wixExecutable --version) -notmatch ('^' + [regex]::Escape($lock.wix.version) + '\+')) { throw 'Locked WiX version output is mismatched.' }
@@ -52,7 +54,7 @@ if ($Tool -eq 'Wix') {
     if (@($ToolArguments | Where-Object { $_ -eq '-ext' }).Count -ne 0) {
         throw 'WiX extension paths are supplied only by the verified tool wrapper.'
     }
-    $ToolArguments = @($ToolArguments) + @('-ext', $utilExtension, '-ext', $firewallExtension)
+    $ToolArguments = @($ToolArguments) + @('-ext', $utilExtension, '-ext', $firewallExtension, '-ext', $iisExtension)
 }
 & $executable @ToolArguments
 exit $LASTEXITCODE

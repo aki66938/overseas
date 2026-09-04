@@ -8,7 +8,7 @@
   <Package
       Name="RegenBio Overseas Access"
       Manufacturer="RegenBio"
-      Version="0.1.0"
+      Version="0.1.6"
       UpgradeCode="A4D8477C-7F2D-46E6-9B5C-65BE7E8474E1"
       Scope="perMachine"
       InstallerVersion="500"

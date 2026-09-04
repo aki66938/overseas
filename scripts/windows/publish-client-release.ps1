@@ -20,6 +20,7 @@ $temporaryMsi = Join-Path $temporaryRoot 'candidate.msi'
 $wixExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.executable_path))
 $utilExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.util_extension_path))
 $firewallExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.firewall_extension_path))
+$iisExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.iis_extension_path))
 $dtf = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.dtf_path))
 $goExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.go.executable_path))
 $workingTreeStatus = @(& git -C $repo status --porcelain --untracked-files=normal)
@@ -35,6 +36,7 @@ Assert-Hash $goExecutable $lock.go.executable_sha256
 Assert-Hash $wixExecutable $lock.wix.executable_sha256
 Assert-Hash $utilExtension $lock.wix.util_extension_sha256
 Assert-Hash $firewallExtension $lock.wix.firewall_extension_sha256
+Assert-Hash $iisExtension $lock.wix.iis_extension_sha256
 Assert-Hash $dtf $lock.wix.dtf_sha256
 if ((& $goExecutable version) -ne ('go version go' + $lock.go.version + ' windows/amd64')) { throw 'Locked Go version is mismatched.' }
 if ((& $wixExecutable --version) -notmatch ('^' + [regex]::Escape($lock.wix.version) + '\+')) { throw 'Locked WiX version is mismatched.' }
@@ -120,7 +122,7 @@ try {
     }
     & (Join-Path $PSScriptRoot 'build-client-artifacts.ps1') -Mode Release -OutputDirectory $payloadRelative -SigningCertificateThumbprint $SigningCertificateThumbprint -SignToolPath $signTool -FirstPartyBinaryDirectory $firstParty
     if ($LASTEXITCODE -ne 0) { throw 'Release payload build failed.' }
-    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
+    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
     if ($LASTEXITCODE -ne 0) { throw 'wix release build failed.' }
     & $signTool sign /fd SHA256 /sha1 $SigningCertificateThumbprint $temporaryMsi | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'signtool release signing failed.' }

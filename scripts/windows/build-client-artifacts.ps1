@@ -23,6 +23,7 @@ $wixPackages = Join-Path $workspace ('.tools\wix' + $lock.wix.version)
 $wixExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.executable_path))
 $utilExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.util_extension_path))
 $firewallExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.firewall_extension_path))
+$iisExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.iis_extension_path))
 $dtf = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.dtf_path))
 $certificate = $null
 if ($Mode -eq 'Release') {
@@ -49,12 +50,14 @@ Assert-Hash -Path $goExecutable -Expected $lock.go.executable_sha256
 Assert-Hash -Path $wixExecutable -Expected $lock.wix.executable_sha256
 Assert-Hash -Path $utilExtension -Expected $lock.wix.util_extension_sha256
 Assert-Hash -Path $firewallExtension -Expected $lock.wix.firewall_extension_sha256
+Assert-Hash -Path $iisExtension -Expected $lock.wix.iis_extension_sha256
 Assert-Hash -Path $dtf -Expected $lock.wix.dtf_sha256
 if ((& $goExecutable version) -ne ('go version go' + $lock.go.version + ' windows/amd64')) { throw 'Locked Go toolchain is absent or mismatched.' }
 if ((& $wixExecutable --version) -notmatch ('^' + [regex]::Escape($lock.wix.version) + '\+')) { throw 'Locked WiX toolchain is absent or mismatched.' }
 Assert-Hash -Path (Join-Path $wixPackages ('WixToolset.Sdk.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.sdk_sha256
 Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.util.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.util_sha256
 Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.firewall.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.firewall_sha256
+Assert-Hash -Path (Join-Path $wixPackages ('wixtoolset.iis.wixext.' + $lock.wix.version + '.nupkg')) -Expected $lock.wix.iis_sha256
 
 function Assert-SafeReleaseParent([string] $Path) {
     $parent = [IO.Path]::GetFullPath((Split-Path -Parent $Path))
@@ -166,7 +169,7 @@ foreach ($item in @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name)
 }
 $signerThumbprints = @($lock.wintun.dll_signer_thumbprint)
 if ($Mode -eq 'Release') { $signerThumbprints += $SigningCertificateThumbprint.ToLowerInvariant() }
-$manifest = [ordered] @{ schema_version = 1; product_version = '0.1.0'; source_commit = $sourceCommit; mode = $Mode.ToLowerInvariant(); signer_thumbprints = @($signerThumbprints); files = $files }
+$manifest = [ordered] @{ schema_version = 1; product_version = '0.1.6'; source_commit = $sourceCommit; mode = $Mode.ToLowerInvariant(); signer_thumbprints = @($signerThumbprints); files = $files }
 $manifestPath = Join-Path $target 'artifact-manifest.json'
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
 $signaturePath = $manifestPath + '.p7s'
