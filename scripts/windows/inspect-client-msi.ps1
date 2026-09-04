@@ -46,7 +46,9 @@ if (Compare-Object @($coveredNames | Sort-Object -Unique) @($payloadNames | Sort
 foreach ($id in $map.Keys) {
     $source = Join-Path $StagingPath $map[$id]
     $packaged = Join-Path $output ('files\File\' + $id)
-    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $packaged -Algorithm SHA256).Hash) { throw "Extracted payload mismatch: $id" }
+    $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+    $pkgHash = (Get-FileHash -LiteralPath $packaged -Algorithm SHA256).Hash
+    if ($srcHash -ne $pkgHash) { Write-Output ("MISMATCH $id src=$srcHash pkg=$pkgHash srcSize=$((Get-Item $source).Length) pkgSize=$((Get-Item $packaged).Length)"); throw "Extracted payload mismatch: $id" }
 }
 foreach ($entry in @($manifest.files)) {
     $source = Join-Path $StagingPath ([string] $entry.name)
