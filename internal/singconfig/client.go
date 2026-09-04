@@ -32,6 +32,7 @@ type clientInbound struct {
 	InterfaceName string   `json:"interface_name"`
 	Address       []string `json:"address"`
 	AutoRoute     bool     `json:"auto_route"`
+	MTU           uint32   `json:"mtu,omitempty"`
 }
 
 type clientOutbound struct {
@@ -166,7 +167,8 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			Type:          "tun",
 			Tag:           "tun-in",
 			InterfaceName: tunInterfaceName,
-			Address:       []string{tunAddress},
+			Address: []string{tunAddress},
+			MTU:     tunMTU,
 			// auto_route: sing-box installs the two default-half routes and
 			// the tun DNS itself, and they vanish with the process. No
 			// product-owned route table to build, verify, or restore.

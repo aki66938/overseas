@@ -44,7 +44,7 @@
               Name="RegenBio Overseas Access"
               Description="Open RegenBio Overseas Access"
               WorkingDirectory="INSTALLFOLDER"
-              Advertise="yes" />
+              Advertise="no" />
         </File>
       </Component>
 

@@ -12,6 +12,7 @@ import (
 const (
 	DefaultMethod    = "2022-blake3-aes-128-gcm"
 	tunInterfaceName = "RegenBioOverseasAccess"
+	tunMTU          = 1420
 
 	// publicDNSOverTCPServer is the fallback resolver for non-A/AAAA record
 	// types; A/AAAA come from the fakeip pool so the tunnel carries no
