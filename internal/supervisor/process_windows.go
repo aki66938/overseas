@@ -115,6 +115,7 @@ type Process struct {
 	rootExited  bool
 	stopping    bool
 	redactor    *streamRedactor
+	diagnostic  *boundedTailWriter
 	ops         *processOps
 	cleanupDone chan struct{}
 	cleanupErr  error
@@ -154,7 +155,9 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 	if logLimit <= 0 {
 		logLimit = 64 * 1024
 	}
-	p.redactor = newStreamRedactor(p.LogWriter, p.Secrets, logLimit)
+	external := &boundedPrefixWriter{dst: p.LogWriter, max: logLimit}
+	p.diagnostic = newBoundedTailWriter(logLimit)
+	p.redactor = newStreamRedactor(io.MultiWriter(external, p.diagnostic), p.Secrets, 0)
 
 	ops := p.ops
 	if ops == nil {
@@ -359,6 +362,18 @@ func (p *Process) TerminationProven() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return !p.nativeCreated || p.terminationProven
+}
+
+// DiagnosticTail returns the bounded, already-redacted tail of child output.
+// It never reads the configuration or returns raw pipe data.
+func (p *Process) DiagnosticTail() string {
+	p.mu.Lock()
+	diagnostic := p.diagnostic
+	p.mu.Unlock()
+	if diagnostic == nil {
+		return ""
+	}
+	return diagnostic.String()
 }
 
 // rememberFailedStart is called with p.mu held. Cleanup that could not prove
@@ -943,13 +958,73 @@ func (r *streamRedactor) couldStartSecret(data []byte) bool {
 }
 
 func (r *streamRedactor) emit(data []byte) {
-	remaining := r.maxOutput - r.written
-	if remaining <= 0 {
-		return
-	}
-	if len(data) > remaining {
-		data = data[:remaining]
+	if r.maxOutput > 0 {
+		remaining := r.maxOutput - r.written
+		if remaining <= 0 {
+			return
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+		}
 	}
 	_, _ = r.dst.Write(data)
 	r.written += len(data)
+}
+
+type boundedPrefixWriter struct {
+	mu      sync.Mutex
+	dst     io.Writer
+	written int
+	max     int
+}
+
+func (w *boundedPrefixWriter) Write(data []byte) (int, error) {
+	original := len(data)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.dst == nil || w.max <= w.written {
+		return original, nil
+	}
+	remaining := w.max - w.written
+	if len(data) > remaining {
+		data = data[:remaining]
+	}
+	_, err := w.dst.Write(data)
+	w.written += len(data)
+	return original, err
+}
+
+type boundedTailWriter struct {
+	mu   sync.Mutex
+	data []byte
+	max  int
+}
+
+func newBoundedTailWriter(max int) *boundedTailWriter {
+	return &boundedTailWriter{max: max}
+}
+
+func (w *boundedTailWriter) Write(data []byte) (int, error) {
+	original := len(data)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.max <= 0 {
+		return original, nil
+	}
+	if len(data) >= w.max {
+		w.data = append(w.data[:0], data[len(data)-w.max:]...)
+		return original, nil
+	}
+	w.data = append(w.data, data...)
+	if excess := len(w.data) - w.max; excess > 0 {
+		copy(w.data, w.data[excess:])
+		w.data = w.data[:w.max]
+	}
+	return original, nil
+}
+
+func (w *boundedTailWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(append([]byte(nil), w.data...))
 }
