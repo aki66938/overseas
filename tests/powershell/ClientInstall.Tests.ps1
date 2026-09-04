@@ -760,6 +760,8 @@ Describe 'Transactional Windows client installer' {
         $lock.wix.executable_sha256 | Should Match '^[a-f0-9]{64}$'
         $lock.wix.util_extension_sha256 | Should Match '^[a-f0-9]{64}$'
         $lock.wix.firewall_extension_sha256 | Should Match '^[a-f0-9]{64}$'
+        $lock.wix.iis_extension_sha256 | Should Match '^[a-f0-9]{64}$'
+        $lock.wix.iis_sha256 | Should Match '^[a-f0-9]{64}$'
         $makefile | Should Match 'invoke-locked-client-tool\.ps1'
         $makefile | Should Not Match '(?m)^GO\s*\?='
         $makefile | Should Not Match '(?m)^WIX\s*\?='
@@ -767,6 +769,7 @@ Describe 'Transactional Windows client installer' {
         $publisher | Should Not Match '\[Parameter\(Mandatory\s*=\s*\$true\)\]\[string\]\s*\$(WixPath|UtilExtensionPath|DtfPath)'
         $publisher | Should Match 'executable_sha256'
         $publisher | Should Match 'util_extension_sha256'
+        $publisher | Should Match 'iis_extension_sha256'
         $publisher | Should Match '\$goExecutable\s+@arguments'
         $publisher | Should Match '-FirstPartyBinaryDirectory\s+\$firstParty'
         $publisher | Should Match 'git\s+-C\s+\$repo\s+status'
@@ -776,7 +779,28 @@ Describe 'Transactional Windows client installer' {
         $inspector | Should Match 'dtf_sha256'
         $wrapper = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\invoke-locked-client-tool.ps1') -Raw -Encoding UTF8
         $wrapper | Should Match "WiX extension paths are supplied only by the verified tool wrapper"
-        $wrapper | Should Match '\$ToolArguments\s*=\s*@\(\$ToolArguments\)[^\r\n]*\$utilExtension[^\r\n]*\$firewallExtension'
+        $wrapper | Should Match '\$ToolArguments\s*=\s*@\(\$ToolArguments\)[^\r\n]*\$utilExtension[^\r\n]*\$firewallExtension[^\r\n]*\$iisExtension'
+    }
+
+    It 'installs only the telecom MITM root transactionally through WiX IIS' {
+        $files = Get-Content -LiteralPath $filesPath -Raw -Encoding UTF8
+        $installer = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+        $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw -Encoding UTF8
+        $files | Should Match ([regex]::Escape('xmlns:iis="http://wixtoolset.org/schemas/v4/wxs/iis"'))
+        $files | Should Match 'iis:Certificate[\s\S]*BinaryRef="TelecomMitmCertificateBinary"[\s\S]*StoreLocation="localMachine"[\s\S]*StoreName="root"[\s\S]*Vital="yes"'
+        @([regex]::Matches($files, '<iis:Certificate\b')).Count | Should Be 1
+        $files | Should Not Match 'iis:Certificate[^>]+PocRootCert'
+        $installer | Should Not Match 'function\s+Import-PocRootCertificate|Import-PocRootCertificate'
+        $inspector | Should Match "Get-MsiTableRows 'Certificate'"
+        $inspector | Should Match 'TelecomMitmRootTrust'
+        $inspector | Should Match 'InstallCertificates'
+        $inspector | Should Match 'UninstallCertificates'
+    }
+
+    It 'keeps all installer and payload versions aligned at 0.1.6' {
+        (Get-Content -LiteralPath $productPath -Raw -Encoding UTF8) | Should Match 'Version="0\.1\.6"'
+        (Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8) | Should Match "ProductVersion\s*=\s*\[version\]\s*'0\.1\.6'"
+        (Get-Content -LiteralPath $artifactBuilderPath -Raw -Encoding UTF8) | Should Match "product_version\s*=\s*'0\.1\.6'"
     }
 
     It 'creates only a validated release parent and atomically publishes after a clean-checkout proof' {
