@@ -32,6 +32,7 @@ type clientInbound struct {
 	InterfaceName string   `json:"interface_name"`
 	Address       []string `json:"address"`
 	AutoRoute     bool     `json:"auto_route"`
+	StrictRoute   bool     `json:"strict_route"`
 	MTU           uint32   `json:"mtu,omitempty"`
 }
 
@@ -173,6 +174,11 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			// the tun DNS itself, and they vanish with the process. No
 			// product-owned route table to build, verify, or restore.
 			AutoRoute: true,
+			// strict_route adds the firewall rules that stop resolvers and
+			// processes bypassing the tun: without it Windows' parallel DNS
+			// (IPv6 RDNSS, per-adapter overrides) leaks real addresses and
+			// browsers connect directly into the corp MITM.
+			StrictRoute: true,
 		}},
 		Outbounds: []clientOutbound{
 			{
