@@ -822,6 +822,7 @@ Describe 'Transactional Windows client installer' {
         Test-Path -LiteralPath $installedVerifierPath -PathType Leaf | Should Be $true
         if (-not (Test-Path -LiteralPath $installedVerifierPath -PathType Leaf)) { return }
         $verifier = Get-Content -LiteralPath $installedVerifierPath -Raw -Encoding UTF8
+        $verifier | Should Match 'PSObject\.Properties\[''DisplayName''\]'
         $verifier | Should Match 'matchingRegistrations\.Count\s*-ne\s*1'
         $verifier | Should Match 'DisplayVersion'
         $verifier | Should Match 'artifact-manifest\.json'

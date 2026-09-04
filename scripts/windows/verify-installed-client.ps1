@@ -20,7 +20,10 @@ $dataRoot = 'C:\ProgramData\RegenBio\OverseasAccess'
 $manifestPath = Join-Path $dataRoot 'artifact-manifest.json'
 
 $matchingRegistrations = @(Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-    Where-Object { [string] $_.DisplayName -eq $displayName })
+    Where-Object {
+        $property = $_.PSObject.Properties['DisplayName']
+        $null -ne $property -and [string] $property.Value -eq $displayName
+    })
 if ($matchingRegistrations.Count -ne 1) {
     throw "Expected exactly one installed '$displayName' registration; found $($matchingRegistrations.Count)."
 }
