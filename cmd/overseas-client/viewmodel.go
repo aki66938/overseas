@@ -56,6 +56,7 @@ type ViewModel struct {
 
 	mu           sync.Mutex
 	status       clientapi.Status
+	proxies      *proxyGuard
 	busy         bool
 	busyAction   string
 	retryBlocked bool
@@ -75,6 +76,7 @@ func NewViewModel(client serviceClient, clipboard clipboard, options ...ViewMode
 		client: client, clipboard: clipboard,
 		pollInterval: 2 * time.Second, traceInterval: defaultTraceInterval,
 		status:    clientapi.Status{State: accessmodel.StatePrepared},
+		proxies:   &proxyGuard{},
 		closePoll: make(chan struct{}),
 	}
 	for _, option := range options {
@@ -124,6 +126,7 @@ func (v *ViewModel) Start() {
 func (v *ViewModel) Close() {
 	v.closeOnce.Do(func() { close(v.closePoll) })
 	v.pollers.Wait()
+	v.proxies.Restore()
 }
 
 func (v *ViewModel) Refresh(ctx context.Context) error {
@@ -319,11 +322,18 @@ func (v *ViewModel) pollTrace() {
 
 func (v *ViewModel) update(status clientapi.Status, busy, retryBlocked bool) {
 	v.mu.Lock()
+	wasConnected := v.status.State == accessmodel.StateConnected
 	v.status = status
 	v.busy = busy
 	v.retryBlocked = retryBlocked
 	if !busy {
 		v.busyAction = ""
+	}
+	connected := status.State == accessmodel.StateConnected
+	if connected && !wasConnected {
+		v.proxies.Take()
+	} else if !connected && wasConnected {
+		v.proxies.Restore()
 	}
 	state := v.renderLocked()
 	v.mu.Unlock()
