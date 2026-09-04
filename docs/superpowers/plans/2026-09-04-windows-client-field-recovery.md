@@ -26,7 +26,7 @@
 - Test: `internal/agent/network_poc_windows_test.go`
 
 **Interfaces:**
-- Consumes: `WindowsPreparedState.FirewallRuleNames`, `WindowsNetworkManager.auditPreparedFirewall`, and `WindowsNetworkManager.installPreparedEmergencyProtection`.
+- Consumes: `WindowsPreparedState.Rules`, `WindowsNetworkManager.auditPreparedFirewall`, and `WindowsNetworkManager.installPreparedEmergencyProtection`.
 - Produces: `preparedFirewallMonitoringApplies(WindowsPreparedState) bool`, used by the runtime monitor to decide whether firewall audit and emergency protection belong to the current generation.
 
 - [ ] **Step 1: Write the failing zero-rule monitor test**
@@ -37,7 +37,7 @@ Add a Windows test that creates a minimal prepared state with `FirewallRuleNames
 func TestRuntimeMonitorSkipsPreparedFirewallAuditForZeroRulePoc(t *testing.T) {
     manager, runner, clock, prepared := newMonitorTestManager(t)
     preparedState := *manager.prepared
-    preparedState.FirewallRuleNames = nil
+    preparedState.Rules = nil
     manager.prepared = &preparedState
 
     failures, err := manager.StartMonitor(context.Background(), prepared)
@@ -65,12 +65,12 @@ Expected: FAIL because `firewall_audit` is still invoked and delivers `errFirewa
 
 - [ ] **Step 3: Write the rule-owning regression test**
 
-Add a second test with the full six `windowsFirewallRuleNames()` values. Advance the audit ticker, inject membership drift, and assert one audit, one emergency attempt, and one terminal failure.
+Add a second test with a complete canonical prepared-rule set including its emergency rule. Advance the audit ticker, inject membership drift, and assert one audit, one emergency attempt, and one terminal failure.
 
 ```go
 func TestRuntimeMonitorRetainsFailClosedAuditForOwnedPreparedRules(t *testing.T) {
     manager, runner, clock, prepared := newMonitorTestManager(t)
-    manager.prepared.FirewallRuleNames = windowsFirewallRuleNames()
+    manager.prepared.Rules = validPreparedFirewallRules()
     runner.failOperation(networkOperationFirewallAudit, errors.New("membership drift"))
 
     failures, err := manager.StartMonitor(context.Background(), prepared)
@@ -90,7 +90,7 @@ Add:
 
 ```go
 func preparedFirewallMonitoringApplies(state WindowsPreparedState) bool {
-    return len(state.FirewallRuleNames) == len(windowsFirewallRuleNames())
+    return len(state.Rules) > 0
 }
 ```
 
