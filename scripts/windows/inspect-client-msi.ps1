@@ -110,6 +110,21 @@ $propertyRows = @(Get-MsiTableRows 'Property')
 $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } | ForEach-Object { $_[1] })
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')
+$certificateRows = @(Get-MsiTableRows 'Wix4Certificate')
+$telecomCertificateRows = @($certificateRows | Where-Object {
+    $_[0] -eq 'TelecomMitmRootTrust' -and $_[1] -eq 'TelecomMitmRootTrust' -and
+    $_[2] -eq 'Go MITM Root CA' -and $_[3] -eq '2' -and $_[4] -eq 'Root' -and
+    $_[5] -eq '10' -and $_[6] -eq 'TelecomMitmCertBin'
+})
+if ($certificateRows.Count -ne 1 -or $telecomCertificateRows.Count -ne 1) { throw 'Transactional telecom root certificate row is invalid.' }
+$certificateActions = @{
+    Wix4InstallCertificates_X64 = 'InstallCertificates'
+    Wix4UninstallCertificates_X64 = 'UninstallCertificates'
+}
+foreach ($action in $certificateActions.Keys) {
+    $rows = @($customActions | Where-Object { $_[0] -eq $action -and $_[2] -eq 'IisCA_X64' -and $_[3] -eq $certificateActions[$action] })
+    if ($rows.Count -ne 1 -or -not $sequence.ContainsKey($action)) { throw "Transactional certificate action '$action' is invalid." }
+}
 $packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackageTrust' -and $_[1] -eq '2' -and $_[2] -eq 'InstallerVerifierBinary' })
 $payloadDataActions = @($customActions | Where-Object { $_[1] -eq '51' -and $_[2] -eq 'VerifyInstalledPayload' })
 if ($packageTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 0) { throw 'First-party trust custom actions are invalid.' }

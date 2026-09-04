@@ -787,11 +787,11 @@ Describe 'Transactional Windows client installer' {
         $installer = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw -Encoding UTF8
         $files | Should Match ([regex]::Escape('xmlns:iis="http://wixtoolset.org/schemas/v4/wxs/iis"'))
-        $files | Should Match 'iis:Certificate[\s\S]*BinaryRef="TelecomMitmCertificateBinary"[\s\S]*StoreLocation="localMachine"[\s\S]*StoreName="root"[\s\S]*Vital="yes"'
+        $files | Should Match 'iis:Certificate[\s\S]*BinaryRef="TelecomMitmCertBin"[\s\S]*StoreLocation="localMachine"[\s\S]*StoreName="root"[\s\S]*Vital="yes"'
         @([regex]::Matches($files, '<iis:Certificate\b')).Count | Should Be 1
         $files | Should Not Match 'iis:Certificate[^>]+PocRootCert'
         $installer | Should Not Match 'function\s+Import-PocRootCertificate|Import-PocRootCertificate'
-        $inspector | Should Match "Get-MsiTableRows 'Certificate'"
+        $inspector | Should Match "Get-MsiTableRows 'Wix4Certificate'"
         $inspector | Should Match 'TelecomMitmRootTrust'
         $inspector | Should Match 'InstallCertificates'
         $inspector | Should Match 'UninstallCertificates'
