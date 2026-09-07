@@ -77,6 +77,8 @@ type PipeController interface {
 	Diagnostics() Diagnostics
 }
 
+type pipeV1SnapshotProvider interface{ LocalStatusSnapshot() LocalStatusSnapshot }
+
 type PipeOption func(*PipeServer)
 
 func WithPipeRedactions(values ...[]byte) PipeOption {
@@ -219,10 +221,14 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 	case localapi.ActionProbe, localapi.ActionDiagnosticEnable:
 		responseError = ErrorInvalidAction
 	}
-	diagnostics := s.controller.Diagnostics()
+	snapshot := v1SnapshotFor(s.controller)
+	connectedAt := ""
+	if !snapshot.ConnectedAt.IsZero() {
+		connectedAt = snapshot.ConnectedAt.UTC().Format(time.RFC3339)
+	}
 	projected := localapi.ProjectStatus(localapi.ProjectionInput{
-		State: string(diagnostics.State), Quality: localapi.QualityUnknown,
-		ErrorCode: diagnostics.ErrorCode, Generation: diagnostics.Generation,
+		State: string(snapshot.Status.State), Quality: snapshot.Quality,
+		ErrorCode: snapshot.Status.ErrorCode, Generation: snapshot.Generation, ConnectedAt: connectedAt,
 	})
 	data, err := localapi.EncodeResponse(localapi.Response{
 		Version: localapi.Version, ID: request.ID, Status: projected, ErrorCode: responseError,
@@ -234,6 +240,17 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 		return
 	}
 	_, _ = connection.Write(data)
+}
+
+func v1SnapshotFor(controller PipeController) LocalStatusSnapshot {
+	if provider, ok := controller.(pipeV1SnapshotProvider); ok {
+		return provider.LocalStatusSnapshot()
+	}
+	diagnostics := controller.Diagnostics()
+	return LocalStatusSnapshot{
+		Status:     Status{State: diagnostics.State, ErrorCode: diagnostics.ErrorCode},
+		Generation: diagnostics.Generation, Quality: LineQualityUnknown,
+	}
 }
 
 func PipeTimeoutForAction(action string) time.Duration {

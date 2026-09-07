@@ -115,6 +115,59 @@ func TestControllerConnectedStatusCarriesPhaseStepsAndElapsed(t *testing.T) {
 	controller.Disconnect(context.Background())
 }
 
+func TestControllerLifecycleSnapshotTracksConnectedTimeAndQualityByGeneration(t *testing.T) {
+	now := time.Date(2026, 9, 7, 8, 0, 0, 0, time.UTC)
+	deps := testDependencies(nil)
+	deps.Now = func() time.Time { return now }
+	deps.LoadCredential = func(context.Context, accessmodel.CredentialRef) (Credential, error) {
+		return Credential{Method: "2022-blake3-aes-128-gcm", Password: []byte("secret"), ExpiresAt: now.Add(24 * time.Hour)}, nil
+	}
+	controller := newTestController(newFakeNetwork(), newFakeProcess(), deps)
+
+	if status := controller.Connect(context.Background()); status.State != accessmodel.StateConnected {
+		t.Fatalf("connect = %#v", status)
+	}
+	first := controller.LocalStatusSnapshot()
+	if first.Generation != 1 || first.ConnectedAt != now || first.Quality != LineQualityUnknown {
+		t.Fatalf("first snapshot = %#v", first)
+	}
+	now = now.Add(time.Minute)
+	controller.Connect(context.Background())
+	if repeated := controller.LocalStatusSnapshot(); repeated.ConnectedAt != first.ConnectedAt || repeated.Generation != first.Generation {
+		t.Fatalf("repeated connect reset lifecycle: %#v", repeated)
+	}
+	if !controller.UpdateLineQuality(first.Generation, LineQualitySlow) {
+		t.Fatal("current connected quality rejected")
+	}
+	if got := controller.LocalStatusSnapshot(); got.Status.State != accessmodel.StateConnected || got.Quality != LineQualitySlow || got.ConnectedAt != first.ConnectedAt {
+		t.Fatalf("quality changed lifecycle fields: %#v", got)
+	}
+	if controller.UpdateLineQuality(first.Generation-1, LineQualityGood) {
+		t.Fatal("stale quality accepted")
+	}
+	if controller.UpdateLineQuality(first.Generation, "excellent") {
+		t.Fatal("invalid quality accepted")
+	}
+
+	now = now.Add(time.Hour)
+	controller.Disconnect(context.Background())
+	disconnected := controller.LocalStatusSnapshot()
+	if disconnected.ConnectedAt != (time.Time{}) || disconnected.Quality != LineQualityUnknown {
+		t.Fatalf("disconnect snapshot = %#v", disconnected)
+	}
+	if controller.UpdateLineQuality(disconnected.Generation, LineQualityGood) {
+		t.Fatal("disconnected quality accepted")
+	}
+
+	now = now.Add(time.Hour)
+	controller.Connect(context.Background())
+	reconnected := controller.LocalStatusSnapshot()
+	if reconnected.Generation != 3 || reconnected.ConnectedAt != now || reconnected.Quality != LineQualityUnknown {
+		t.Fatalf("reconnect snapshot = %#v", reconnected)
+	}
+	controller.Disconnect(context.Background())
+}
+
 func TestControllerEmptyNetworkDetailStillEmitsDiagnosticFailure(t *testing.T) {
 	sink := &recordingTraceSink{}
 	network := newFakeNetwork()

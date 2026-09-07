@@ -87,5 +87,11 @@ Cancellation/error/coherence follow-ups were also test-first: the client test in
 
 ## Concerns
 
-- `ConnectedAt` remains empty and quality remains `unknown` until the later line-probe/lifecycle tasks provide those independent projection inputs.
+- Quality remains `unknown` until Task 3 publishes a valid current-generation probe result through `UpdateLineQuality`.
 - Future action implementations must replace the current explicit `invalid_action` adapter response without changing the v1 action strings.
+
+## Review follow-up
+
+The first review found that the Windows adapter always projected `quality=unknown` and an empty `connected_at`. The fix adds an atomic controller `LocalStatusSnapshot`, records the successful connection time once using `Dependencies.Now`, resets lifecycle metadata on every new generation/automatic restore, and exposes a generation-guarded `UpdateLineQuality` method for Task 3. Invalid, stale, or disconnected quality updates are rejected without changing connection state. The existing `Diagnostics` shape and legacy pipe response remain unchanged.
+
+TDD RED: `go test ./internal/agent -run 'TestControllerLifecycleSnapshot|TestPipeV1ProjectsController' -count=1` failed to compile because `LocalStatusSnapshot`, quality constants, and controller methods did not exist. After adding the initial types, the focused controller test exposed its fixed-clock credential setup (`credential_expired`); the fixture was corrected to use the injected clock. GREEN: the same focused command passed, including connected+slow adapter projection and timestamp formatting.

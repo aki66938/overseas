@@ -266,6 +266,27 @@ func TestPipeV1ProjectsOneCoherentDiagnosticSnapshot(t *testing.T) {
 	}
 }
 
+func TestPipeV1ProjectsControllerQualityAndConnectedTime(t *testing.T) {
+	connectedAt := time.Date(2026, 9, 7, 8, 30, 0, 0, time.UTC)
+	controller := &fakeV1SnapshotController{
+		fakePipeController: fakePipeController{status: Status{State: accessmodel.StateConnected}},
+		snapshot:           LocalStatusSnapshot{Status: Status{State: accessmodel.StateConnected}, Generation: 21, Quality: LineQualitySlow, ConnectedAt: connectedAt},
+	}
+	request := localapi.Request{Version: localapi.Version, ID: "quality", Action: localapi.ActionStatus}
+	data, _ := json.Marshal(request)
+	line, ok := rawVersionedPipeLine(t, NewPipeServer(controller), append(data, '\n'))
+	if !ok {
+		t.Fatal("no response")
+	}
+	response, err := localapi.DecodeResponse(line, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status.State != localapi.StateConnected || response.Status.Quality != localapi.QualitySlow || response.Status.ConnectedAt != connectedAt.Format(time.RFC3339) || response.Status.Generation != 21 {
+		t.Fatalf("status = %#v", response.Status)
+	}
+}
+
 func TestPipeV1LeavesLegacyConnectCompatible(t *testing.T) {
 	controller := &fakePipeController{status: Status{State: accessmodel.StatePrepared}}
 	legacy, ok := pipeTransaction(t, NewPipeServer(controller), Request{ID: "legacy", Action: ActionConnect})
@@ -488,6 +509,13 @@ type fakePipeController struct {
 	diagnostics Diagnostics
 	called      []string
 }
+
+type fakeV1SnapshotController struct {
+	fakePipeController
+	snapshot LocalStatusSnapshot
+}
+
+func (f *fakeV1SnapshotController) LocalStatusSnapshot() LocalStatusSnapshot { return f.snapshot }
 
 func (f *fakePipeController) Connect(context.Context) Status {
 	return f.call(ActionConnect)

@@ -59,6 +59,22 @@ type Status struct {
 	ElapsedMS  int64                       `json:"elapsed_ms,omitempty"`
 }
 
+const (
+	LineQualityUnknown = "unknown"
+	LineQualityGood    = "good"
+	LineQualitySlow    = "slow"
+	LineQualityFailed  = "failed"
+)
+
+// LocalStatusSnapshot is the atomic lifecycle view consumed by versioned IPC.
+// It is separate from Diagnostics so legacy wire JSON remains unchanged.
+type LocalStatusSnapshot struct {
+	Status      Status
+	Generation  uint64
+	Quality     string
+	ConnectedAt time.Time
+}
+
 type Diagnostics struct {
 	State      accessmodel.ConnectionState `json:"state"`
 	ErrorCode  string                      `json:"error_code,omitempty"`
@@ -171,6 +187,8 @@ type Controller struct {
 	reconciled       bool
 	diagnosticStage  string
 	diagnosticDetail string
+	lineQuality      string
+	connectedAt      time.Time
 }
 
 func NewController(policy accessmodel.Policy, network NetworkManager, process ProcessSupervisor, options ...Option) *Controller {
@@ -188,11 +206,12 @@ func NewController(policy accessmodel.Policy, network NetworkManager, process Pr
 		dependencies.Now = time.Now
 	}
 	return &Controller{
-		policy:  clonePolicy(policy),
-		network: network,
-		process: process,
-		deps:    dependencies,
-		status:  Status{State: accessmodel.StateDisconnected},
+		policy:      clonePolicy(policy),
+		network:     network,
+		process:     process,
+		deps:        dependencies,
+		status:      Status{State: accessmodel.StateDisconnected},
+		lineQuality: LineQualityUnknown,
 	}
 }
 
@@ -224,6 +243,8 @@ func (c *Controller) Connect(ctx context.Context) Status {
 
 		c.generation++
 		generation := c.generation
+		c.lineQuality = LineQualityUnknown
+		c.connectedAt = time.Time{}
 		operationContext, cancel := context.WithCancel(traceevent.WithGeneration(ctx, generation))
 		active := &transition{kind: "connect", done: make(chan struct{}), cancel: cancel}
 		c.transition = active
@@ -240,6 +261,9 @@ func (c *Controller) Connect(ctx context.Context) Status {
 		c.mu.Lock()
 		if c.generation == generation {
 			c.status = outcome.status
+			if outcome.status.State == accessmodel.StateConnected {
+				c.connectedAt = c.deps.Now()
+			}
 			c.processStarted = outcome.processStarted
 			c.processInstance = outcome.instance
 			c.snapshot = outcome.snapshot
@@ -316,6 +340,8 @@ func (c *Controller) disconnect(ctx context.Context, recovery bool) Status {
 
 		c.generation++
 		generation := c.generation
+		c.lineQuality = LineQualityUnknown
+		c.connectedAt = time.Time{}
 		operationContext, cancel := context.WithCancel(traceevent.WithGeneration(ctx, generation))
 		active := &transition{kind: "disconnect", done: make(chan struct{}), cancel: cancel}
 		c.transition = active
@@ -362,6 +388,27 @@ func (c *Controller) Diagnostics() Diagnostics {
 		Stage:      c.diagnosticStage,
 		Detail:     c.diagnosticDetail,
 	}
+}
+
+func (c *Controller) LocalStatusSnapshot() LocalStatusSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return LocalStatusSnapshot{Status: c.status, Generation: c.generation, Quality: c.lineQuality, ConnectedAt: c.connectedAt}
+}
+
+// UpdateLineQuality publishes probe results only for the currently connected
+// generation. It cannot change connection state or revive stale results.
+func (c *Controller) UpdateLineQuality(generation uint64, quality string) bool {
+	if quality != LineQualityUnknown && quality != LineQualityGood && quality != LineQualitySlow && quality != LineQualityFailed {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if generation != c.generation || c.status.State != accessmodel.StateConnected {
+		return false
+	}
+	c.lineQuality = quality
+	return true
 }
 
 func (c *Controller) recordDiagnostic(fallbackStage string, err error) (string, string) {
@@ -921,6 +968,8 @@ func (c *Controller) automaticRestore(generation uint64, code string, reason err
 	active := &transition{kind: "restore", done: make(chan struct{})}
 	c.transition = active
 	c.status = Status{State: accessmodel.StateRestoring, Message: "正在恢复普通网络"}
+	c.lineQuality = LineQualityUnknown
+	c.connectedAt = time.Time{}
 	monitorCancel := c.monitorCancel
 	c.monitorCancel = nil
 	c.monitorDone = nil
