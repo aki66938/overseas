@@ -57,4 +57,4 @@ flutter-3.47.2/bin/flutter.bat --version
 - Windows C++ 工具链和 release 构建成功记录。
 - 原生 Linux 测试机器，macOS arm64/Xcode/签名身份。
 - Apple 最小 System Extension 验证、嵌入构建与许可清单。
-- 五台/平台、100 次循环、72 小时稳定性及卸载恢复证据。
+- [实施计划任务 13](../superpowers/plans/2026-09-07-cross-platform-delivery.md)规定的五台/平台、100 次循环、72 小时稳定性及卸载恢复证据。
