@@ -245,11 +245,13 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 	response := localapi.Response{
 		Version: localapi.Version, ID: request.ID, Status: projected, ErrorCode: responseError,
 	}
-	if s.lineProbe != nil && snapshot.Status.State == accessmodel.StateConnected {
+	if s.lineProbe != nil && snapshot.Status.State != accessmodel.StateConnecting {
 		probes := s.lineProbe.Snapshot()
-		if probes.Generation == snapshot.Generation && len(probes.Results) > 0 {
+		connected := snapshot.Status.State == accessmodel.StateConnected
+		if len(probes.Results) > 0 && probes.Generation <= snapshot.Generation && (!connected || probes.Generation == snapshot.Generation) {
 			response.ProbeGeneration = probes.Generation
 			response.ProbeResults = probes.Results
+			response.ProbeHistorical = !connected
 		}
 	}
 	if request.Action == localapi.ActionProbe && len(response.ProbeResults) == 0 {

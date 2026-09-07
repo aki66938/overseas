@@ -29,3 +29,23 @@ func TestProbeV1ReturnsBoundedResults(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
+
+func TestStatusDetailsV1ReturnsExplicitHistoricalResults(t *testing.T) {
+	server, connection := net.Pipe()
+	defer connection.Close()
+	go func() {
+		defer server.Close()
+		line, _ := bufio.NewReader(server).ReadBytes('\n')
+		r, _ := localapi.DecodeRequest(line)
+		if r.Action != "status" {
+			t.Error(r)
+		}
+		frame, _ := localapi.EncodeResponse(localapi.Response{Version: 1, ID: r.ID, Status: localapi.Status{State: localapi.StateIdle, Quality: localapi.QualityUnknown, Generation: 3}, ProbeGeneration: 2, ProbeHistorical: true, ProbeResults: []lineprobe.Result{{ID: "google", Reachable: true, HTTPStatus: 200, CheckedAt: time.Now()}}})
+		server.Write(frame)
+	}()
+	client := New(WithDialPipe(func(context.Context, string) (net.Conn, error) { return connection, nil }))
+	got, err := client.StatusDetailsV1(context.Background())
+	if err != nil || len(got.ProbeResults) != 1 || got.ProbeGeneration != 2 || !got.ProbeHistorical {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

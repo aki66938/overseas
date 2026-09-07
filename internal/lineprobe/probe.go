@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"time"
@@ -42,14 +41,17 @@ func NewProber(transport http.RoundTripper, now func() time.Time) *Prober {
 }
 
 func (p *Prober) Probe(ctx context.Context, target Target) Result {
-	started := p.now()
-	result := Result{ID: target.ID, CheckedAt: started}
+	result := Result{ID: target.ID}
 	// Also bound callers outside the scheduler. The shared round context can
 	// cancel earlier; fallback GET shares this same deadline.
 	ctx, cancel := context.WithTimeout(ctx, RoundBudget)
 	defer cancel()
 	client := &http.Client{Transport: p.transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		// Report the selected request's DNS-to-headers measurement, not the
+		// sum of HEAD and fallback GET. Both share the outer budget.
+		started := p.now()
+		result.CheckedAt = started
 		request, err := http.NewRequestWithContext(ctx, method, target.URL, nil)
 		if err != nil || request.URL.Scheme != "https" || request.URL.User != nil {
 			result.ErrorCode = "invalid_target"
@@ -74,9 +76,8 @@ func (p *Prober) Probe(ctx context.Context, target Target) Result {
 		if !result.Reachable {
 			result.ErrorCode = "http_server_error"
 		}
-		if method == http.MethodGet {
-			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
-		}
+		// Headers finish the measurement. Reading zero response-body bytes
+		// stays within the 1024-byte cap and cannot wait on a stalled body.
 		response.Body.Close()
 		if response.StatusCode != http.StatusMethodNotAllowed || method == http.MethodGet {
 			return result

@@ -50,11 +50,13 @@ type Status struct {
 // Response deliberately has no message, detail, log, path, command, or URL
 // field. Detailed diagnostics travel through a separately authorized mode.
 type Response struct {
-	Version         int                `json:"version"`
-	ID              string             `json:"id"`
-	Status          Status             `json:"status"`
-	ErrorCode       string             `json:"error_code,omitempty"`
-	ProbeGeneration uint64             `json:"probe_generation,omitempty"`
+	Version         int    `json:"version"`
+	ID              string `json:"id"`
+	Status          Status `json:"status"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	ProbeGeneration uint64 `json:"probe_generation,omitempty"`
+	// Historical results describe a prior completed round, never current health.
+	ProbeHistorical bool               `json:"probe_historical,omitempty"`
 	ProbeResults    []lineprobe.Result `json:"probe_results,omitempty"`
 }
 
@@ -120,9 +122,16 @@ func EncodeResponse(response Response) ([]byte, error) {
 
 func validProbeResults(response Response) bool {
 	if len(response.ProbeResults) == 0 {
-		return response.ProbeGeneration == 0
+		return response.ProbeGeneration == 0 && !response.ProbeHistorical
 	}
-	if len(response.ProbeResults) > 5 || response.ProbeGeneration != response.Status.Generation || response.Status.State != StateConnected {
+	if len(response.ProbeResults) > 5 || response.ProbeGeneration > response.Status.Generation {
+		return false
+	}
+	if response.Status.State == StateConnected {
+		if response.ProbeHistorical || response.ProbeGeneration != response.Status.Generation {
+			return false
+		}
+	} else if !response.ProbeHistorical {
 		return false
 	}
 	ids := make(map[string]bool)

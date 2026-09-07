@@ -4,11 +4,11 @@
 
 ## 指标与协议
 
-测量固定五个站点的 HTTPS 首响应耗时（DNS、TCP、TLS、响应头），不是带宽。HEAD 不携带 Cookie、凭据或正文，不跟随重定向；405 时可限长 GET，读取上限 1024 字节。每次独立连接，禁用环境 HTTP(S) 代理，保留标准 TLS 证书验证。2xx–4xx 表示探测可达，403/429 不表示账号或 AI 功能可用；5xx、超时和 TLS 失败均不成功。原始 HTTP 状态码保留。
+测量固定五个站点的 HTTPS 首响应耗时（DNS、TCP、TLS、响应头），不是带宽。HEAD 不携带 Cookie、凭据或正文，不跟随重定向；405 时改用 GET，响应头到达即完成测量，不读取正文（零字节在 1024 字节上限内）。GET 耗时只计该次请求，HEAD 与 GET 仍共享五秒总预算。每次独立连接，禁用环境 HTTP(S) 代理，保留标准 TLS 证书验证。2xx–4xx 表示探测可达，403/429 不表示账号或 AI 功能可用；5xx、超时和 TLS 失败均不成功。原始 HTTP 状态码保留。
 
 连接成功立即一轮，此后每 30 秒一轮；一轮并发五目标，总预算 5 秒。手动 `probe` 与正在执行的轮次合并。超过半数目标分别连续失败三次后 quality=failed；单目标恢复成功清零，健康多数恢复正常判断。正常/较慢按成功目标的中位数划分：<1000ms 为 good，1000–5000ms 为 slow。失败只改变质量，不改变路由或连接状态。
 
-版本 1 请求为一行 JSON：`{"version":1,"id":"route-check-1","action":"probe"}`，只能发送到本机受 ACL 保护的 `\\.\pipe\RegenBioOverseasAccess`。建议调用方上下文至少 10 秒；网络预算是 5 秒，服务端另留最多 5 秒 IPC 响应时间。响应包含 `probe_generation` 和最多五条 `probe_results`；`status` 同样携带当前代次最新结果。断开返回 `probe_unavailable`，不产生流量；重连后旧结果不作为新连接结果返回。旧 Walk JSON 协议不变。
+版本 1 请求为一行 JSON：`{"version":1,"id":"route-check-1","action":"probe"}`，只能发送到本机受 ACL 保护的 `\\.\pipe\RegenBioOverseasAccess`。建议调用方上下文至少 10 秒；网络预算是 5 秒，服务端另留最多 5 秒 IPC 响应时间。响应包含 `probe_generation` 和最多五条 `probe_results`；`status` 同样携带最新结果。断开后 `status`/StatusDetailsV1 保留上次结果的原始代次，并明确设置 `probe_historical:true`：仅供回看，不能作为当前连接健康状态。历史代次只能小于或等于当前代次；连接状态下只能提供同代次非历史结果。断开时 `probe` 返回 `probe_unavailable`，可附相同历史结果，不产生流量。重连建立期间隐藏旧结果，建立成功后清除旧结果，等待新一轮。旧 Walk JSON 协议不变。
 
 ## 试点证据
 

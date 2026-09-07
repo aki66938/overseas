@@ -29,3 +29,29 @@ func TestProbeResponseBoundedAndGenerationChecked(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoricalProbeResponseRequiresExplicitFlagAndOlderGeneration(t *testing.T) {
+	response := Response{Version: 1, ID: "history", Status: Status{State: StateIdle, Quality: QualityUnknown, Generation: 4}, ProbeGeneration: 3, ProbeHistorical: true, ProbeResults: []lineprobe.Result{{ID: "google", Reachable: true, HTTPStatus: 200, CheckedAt: time.Now()}}}
+	data, _ := json.Marshal(response)
+	if _, err := DecodeResponse(data, "history"); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Response){
+		func(r *Response) { r.ProbeHistorical = false },
+		func(r *Response) { r.ProbeGeneration = 5 },
+		func(r *Response) { r.Status.State = StateConnected },
+		func(r *Response) { r.ProbeResults = nil; r.ProbeGeneration = 0 },
+	} {
+		copy := response
+		mutate(&copy)
+		data, _ := json.Marshal(copy)
+		if _, err := DecodeResponse(data, "history"); err == nil {
+			t.Fatalf("accepted %+v", copy)
+		}
+	}
+	response.ProbeGeneration = 4
+	data, _ = json.Marshal(response)
+	if _, err := DecodeResponse(data, "history"); err != nil {
+		t.Fatalf("same-generation automatic restore history: %v", err)
+	}
+}

@@ -84,8 +84,37 @@ func TestProbe405BoundedFallbackAndLatency(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: body, Header: make(http.Header)}, nil
 	}), func() time.Time { return now })
 	got := p.Probe(context.Background(), Target{ID: "google", URL: "https://www.google.com/"})
-	if calls != 2 || body.n > 1024 || got.HTTPStatus != 200 || got.LatencyMS != 2400 {
+	if calls != 2 || body.n != 0 || got.HTTPStatus != 200 || got.LatencyMS != 1200 {
 		t.Fatalf("result=%+v read=%d calls=%d", got, body.n, calls)
+	}
+}
+
+func TestFallbackCompletesAtTLSResponseHeadersWithoutBody(t *testing.T) {
+	flushed := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(flushed)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := NewProber(server.Client().Transport, nil)
+	done := make(chan Result, 1)
+	go func() { done <- p.Probe(ctx, Target{ID: "google", URL: server.URL}) }()
+	await(t, flushed)
+	select {
+	case got := <-done:
+		if !got.Reachable || got.HTTPStatus != 200 || got.ErrorCode != "" {
+			t.Fatal(got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GET headers arrived, but probe is waiting for response body")
 	}
 }
 

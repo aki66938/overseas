@@ -7,6 +7,7 @@ import (
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/lineprobe"
 	"corp.example/overseas-access-gateway/internal/localapi"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,7 +15,9 @@ import (
 func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 	deps := testDependencies(nil)
 	var c *Controller
+	var calls atomic.Int32
 	scheduler := lineprobe.NewScheduler(func(_ context.Context, target lineprobe.Target) lineprobe.Result {
+		calls.Add(1)
 		return lineprobe.Result{ID: target.ID, Reachable: true, HTTPStatus: 403, CheckedAt: time.Now()}
 	}, nil, func(g uint64, q string) bool { return c.UpdateLineQuality(g, q) })
 	deps.ConnectedLifetime = scheduler.Start
@@ -45,9 +48,23 @@ func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 			t.Fatal(got)
 		}
 	}
+	oldGeneration := c.LocalStatusSnapshot().Generation
 	c.Disconnect(context.Background())
-	if got := request("probe"); got.ErrorCode != "probe_unavailable" || len(got.ProbeResults) != 0 {
+	before := calls.Load()
+	if got := request("probe"); got.ErrorCode != "probe_unavailable" || len(got.ProbeResults) != 5 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration {
 		t.Fatal(got)
+	}
+	if got := request("status"); len(got.ProbeResults) != 5 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration || got.ProbeGeneration >= got.Status.Generation {
+		t.Fatal(got)
+	}
+	if calls.Load() != before {
+		t.Fatal("disconnected history started traffic")
+	}
+	if c.Connect(context.Background()).State != accessmodel.StateConnected {
+		t.Fatal(c.Status())
+	}
+	if got := request("status"); got.ProbeHistorical || (len(got.ProbeResults) > 0 && got.ProbeGeneration != got.Status.Generation) {
+		t.Fatal("reconnect exposed old results", got)
 	}
 }
 
