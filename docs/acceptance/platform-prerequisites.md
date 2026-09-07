@@ -64,7 +64,8 @@ Windows `flutter build windows --release` 已成功生成独立 SDK 样例 `rege
 
 ## 待补证据
 
-- 产品 Windows release 构建成功记录（SDK 样例已通过）。
-- 原生 Linux 测试机器，macOS arm64/Xcode/签名身份。
+- 产品 Flutter Windows release 已通过（`480789c`，54 项测试、10 张固定样例图、analyze 通过）；尚未完成原生托盘/服务集成验收。
+- Ubuntu 24.04 专用 VM 116 已就绪，共享核心原生全量测试、构建和五包 race 检测通过，见 [Ubuntu 验证](ubuntu24-shared-core.md)。Ubuntu 22.04、Rocky 9 仍待实测。
+- macOS 使用 EC 中唯一的受管 Apple 设备，用户将在开发完成后实测；Xcode/签名身份与原生构建仍未验证。
 - Apple 最小 System Extension 验证、嵌入构建与许可清单。
 - [实施计划任务 13](../superpowers/plans/2026-09-07-cross-platform-delivery.md)规定的五台/平台、100 次循环、72 小时稳定性及卸载恢复证据。
