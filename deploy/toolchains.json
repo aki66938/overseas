@@ -12,7 +12,9 @@
     "engine_commit": "a804b261645ef8c13eb3d5c44a5c2fb0340c5539",
     "dart_version": "3.13.2",
     "windows_version_command_verified": true,
-    "windows_desktop_build_verified": false
+    "windows_desktop_build_verified": true,
+    "windows_build_evidence": "generated SDK smoke application, not product release",
+    "windows_engine_download_base": "https://storage.flutter-io.cn"
   },
   "sing_box": {
     "version": "1.13.19",

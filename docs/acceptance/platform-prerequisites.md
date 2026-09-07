@@ -13,7 +13,7 @@
 
 | 平台 | 当前条件 | 发布门槛 |
 |---|---|---|
-| Windows | Go/PowerShell/Flutter 已可运行；VS BuildTools 17.14.39 C++ 安装完成，无需重启 | Flutter release 构建、签名 MSI、新终端生命周期测试 |
+| Windows | Go/PowerShell/Flutter 可运行；VS BuildTools 17.14.39；Flutter 原生 Release 样例构建通过 | 产品 Release 构建、签名 MSI、新终端生命周期测试 |
 | Ubuntu 22.04/24.04 | 尚未指定专用测试机 | 原生 CLI、网络 namespace 与 DEB 生命周期测试 |
 | Rocky 9 | 尚未指定专用测试机 | 原生 CLI、网络 namespace 与 RPM 生命周期测试 |
 | macOS arm64 | 未提供 Mac、Xcode 与 Developer ID 身份 | 最小扩展签名/安装/启停成功后再接入完整隧道 |
@@ -32,7 +32,9 @@ git -C flutter-3.47.2 rev-parse HEAD
 flutter-3.47.2/bin/flutter.bat --version
 ```
 
-提交值见 `deploy/toolchains.json`。已验证 SDK 版本输出，基础 Flutter Widget 样例测试通过；VS BuildTools 17.14.39 经 winget 校验安装器哈希后静默安装，`vswhere` 确认 C++ 组件、isComplete=true、isLaunchable=true、无需重启。实际 Windows release 样例构建仍待完成。
+提交值见 `deploy/toolchains.json`。基础 Flutter Widget 样例测试通过；VS BuildTools 17.14.39 经 winget 校验安装器哈希后静默安装，`vswhere` 确认 C++ 组件、isComplete=true、isLaunchable=true、无需重启。
+
+Windows `flutter build windows --release` 已成功生成独立 SDK 样例 `regen_build_smoke.exe`（构建阶段 39.7 秒）。它只证明工具链可用，不是产品 UI 或产品发布包。Google Storage 引擎下载停滞后，使用 [Flutter 中国网络说明](https://docs.flutter.dev/community/china)列出的 `storage.flutter-io.cn` 镜像完成下载；仅本次构建进程设置变量，未改全局网络或 SDK 版本。
 
 ## macOS 企业直发
 
@@ -54,7 +56,7 @@ flutter-3.47.2/bin/flutter.bat --version
 
 ## 待补证据
 
-- Windows release 构建成功记录。
+- 产品 Windows release 构建成功记录（SDK 样例已通过）。
 - 原生 Linux 测试机器，macOS arm64/Xcode/签名身份。
 - Apple 最小 System Extension 验证、嵌入构建与许可清单。
 - [实施计划任务 13](../superpowers/plans/2026-09-07-cross-platform-delivery.md)规定的五台/平台、100 次循环、72 小时稳定性及卸载恢复证据。
