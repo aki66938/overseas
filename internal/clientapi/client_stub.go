@@ -1,12 +1,15 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package clientapi
 
 import (
 	"context"
+	"corp.example/overseas-access-gateway/internal/agent"
 	"fmt"
 	"net"
 )
+
+const controlEndpoint = agent.PipeName
 
 // Shared protocol decoding remains available; only this native transport
 // capability is unsupported until a platform-specific adapter is supplied.

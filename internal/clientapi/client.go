@@ -152,7 +152,7 @@ func (c *Client) requestV1Response(ctx context.Context, action string, durationM
 	if action == localapi.ActionDiagnosticEnable {
 		dial = c.dialAdminPipe
 	}
-	connection, err := dial(ctx, agent.PipeName)
+	connection, err := dial(ctx, controlEndpoint)
 	if err != nil {
 		return localapi.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
