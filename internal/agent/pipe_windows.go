@@ -22,8 +22,6 @@ import (
 	"github.com/Microsoft/go-winio"
 )
 
-type pipeV1SnapshotProvider interface{ LocalStatusSnapshot() LocalStatusSnapshot }
-
 type PipeOption func(*PipeServer)
 
 func WithPipeRedactions(values ...[]byte) PipeOption {
@@ -161,51 +159,8 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
 
-	responseError := ""
-	switch request.Action {
-	case localapi.ActionConnect:
-		_ = s.controller.Connect(ctx)
-	case localapi.ActionDisconnect:
-		_ = s.controller.Disconnect(ctx)
-	case localapi.ActionStatus:
-		// Diagnostics below supplies one coherent state/generation snapshot.
-	case localapi.ActionProbe:
-		if s.lineProbe == nil || v1SnapshotFor(s.controller).Status.State != accessmodel.StateConnected {
-			responseError = "probe_unavailable"
-		} else {
-			s.lineProbe.Manual(ctx)
-		}
-	case localapi.ActionDiagnosticEnable:
-		if !pipeAdministrator(connection) {
-			responseError = "permission_denied"
-		} else if s.diagnosticMode == nil || s.diagnosticMode.Enable(time.Now(), time.Duration(request.DurationMinutes)*time.Minute) != nil {
-			responseError = "diagnostic_unavailable"
-		}
-	}
-	snapshot := v1SnapshotFor(s.controller)
-	connectedAt := ""
-	if !snapshot.ConnectedAt.IsZero() {
-		connectedAt = snapshot.ConnectedAt.UTC().Format(time.RFC3339)
-	}
-	projected := localapi.ProjectStatus(localapi.ProjectionInput{
-		State: string(snapshot.Status.State), Quality: snapshot.Quality,
-		ErrorCode: snapshot.Status.ErrorCode, Generation: snapshot.Generation, ConnectedAt: connectedAt,
-	})
-	response := localapi.Response{
-		Version: localapi.Version, ID: request.ID, Status: projected, ErrorCode: responseError,
-	}
-	if s.lineProbe != nil && snapshot.Status.State != accessmodel.StateConnecting {
-		probes := s.lineProbe.Snapshot()
-		connected := snapshot.Status.State == accessmodel.StateConnected
-		if len(probes.Results) > 0 && probes.Generation <= snapshot.Generation && (!connected || probes.Generation == snapshot.Generation) {
-			response.ProbeGeneration = probes.Generation
-			response.ProbeResults = probes.Results
-			response.ProbeHistorical = !connected
-		}
-	}
-	if request.Action == localapi.ActionProbe && len(response.ProbeResults) == 0 {
-		response.ErrorCode = "probe_unavailable"
-	}
+	administrator := request.Action == localapi.ActionDiagnosticEnable && pipeAdministrator(connection)
+	response := NewLocalHandler(s.controller, s.lineProbe, s.diagnosticMode).Dispatch(ctx, request, administrator)
 	data, err := localapi.EncodeResponse(response)
 	if err != nil {
 		return
@@ -214,17 +169,6 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 		return
 	}
 	_, _ = connection.Write(data)
-}
-
-func v1SnapshotFor(controller PipeController) LocalStatusSnapshot {
-	if provider, ok := controller.(pipeV1SnapshotProvider); ok {
-		return provider.LocalStatusSnapshot()
-	}
-	diagnostics := controller.Diagnostics()
-	return LocalStatusSnapshot{
-		Status:     Status{State: diagnostics.State, ErrorCode: diagnostics.ErrorCode},
-		Generation: diagnostics.Generation, Quality: LineQualityUnknown,
-	}
 }
 
 func readPipeFrame(connection io.Reader) ([]byte, error) {

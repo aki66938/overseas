@@ -67,3 +67,18 @@ The final matrix was rerun after the last review batch before commit; exact resu
 ## External gate
 
 After the four code prerequisites are green, Task 10 must stage signed/ACL-protected artifacts on the authorized disposable physical Windows host, run elevated dry-run/preflight, obtain stop/go approval, execute all nine scenarios plus 20 repetitions, and preserve nonce/leak and exact zero-drift evidence. Until then, neither Task 9 nor Task 10 may claim live acceptance.
+
+## Cross-platform Task 9 — Linux implementation, 2026-09-07
+
+This section concerns current task-9-brief.md; preceding sections describe historical Windows work and remain intact. Review base: `32123ac4131aaec46504256c49d999ca13fe0837`. Linux native and distribution gates remain pending.
+
+### Slice 1: portable CLI and API v1 dispatch
+
+- Added fixed connect/disconnect/status/probe commands using the existing v1 client, bounded action deadlines, concise state/quality/duration/target latency output and exit codes 0 success, 1 operation failure, 2 usage. Existing administrator diagnostic syntax retained; raw client error details are not printed.
+- Extracted LocalHandler from Windows v1 processing, retaining authenticated peer authority at the transport. Windows named-pipe authentication and legacy dispatch unchanged.
+- RED: Go 1.27.0 `test ./cmd/regen-access -run 'TestCommandsGolden|TestCommandFailureGolden' -count=1` failed: all new commands returned usage/2. GREEN: `test ./cmd/regen-access -count=1` passed after implementation.
+- RED: `test ./cmd/regen-access -run TestStatusDurationAndProbeGolden -count=1` failed: duration/probes absent. GREEN: package passed after implementation; deterministic clock used in golden.
+- RED: `test ./internal/agent -run TestLocalDispatchAuthorizationAndProjection -count=1` failed because NewLocalHandler did not exist. GREEN: `test ./internal/agent -run 'TestLocalDispatch|TestPipe' -count=1` passed.
+- Full Windows `test ./... -count=1`: all packages except existing internal/supervisor passed. `TestReadyTimeoutReturnsBoundedRedactedCoreTail` did not capture final stderr warning before its short deadline; no supervisor production code changed. Focused repetition recorded below. This full run is not claimed green.
+- No network/service/remote operations performed. Next slices: native socket, process ownership, trust, journal and network transaction implementation with parent-coordinated VM116 tests.
+- Focused `test ./internal/supervisor -run TestReadyTimeoutReturnsBoundedRedactedCoreTail -count=5` passed all five; this supports a timing-sensitive failure without erasing the full-run result.

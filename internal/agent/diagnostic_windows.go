@@ -5,14 +5,9 @@ package agent
 import (
 	"net"
 	"runtime"
-	"time"
 
 	"golang.org/x/sys/windows"
 )
-
-type diagnosticEnabler interface {
-	Enable(time.Time, time.Duration) error
-}
 
 func WithDiagnosticMode(mode diagnosticEnabler) PipeOption {
 	return func(server *PipeServer) { server.diagnosticMode = mode }
