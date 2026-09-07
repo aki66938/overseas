@@ -47,7 +47,7 @@ std::wstring Executable() {
 std::wstring StartupCommand(const std::wstring& executable) {
   return executable.empty() ? L"" : L"\"" + executable + L"\" --startup";
 }
-TrayController::TrayController(HWND window, std::function<void()> action,
+TrayController::TrayController(HWND window, std::function<void(const std::string&)> action,
     std::function<void(bool)> navigate)
     : window_(window), icon_(MakeIcon()),
       taskbar_created_(RegisterWindowMessage(L"TaskbarCreated")),
@@ -79,11 +79,12 @@ bool TrayController::Add() {
   return added_;
 }
 void TrayController::Update(const std::wstring& label, bool enabled,
-    const std::wstring& summary, bool details) {
+    const std::wstring& summary, bool details, const std::string& action) {
   label_ = label;
   summary_ = summary;
   enabled_ = enabled;
   details_ = details;
+  action_name_ = action;
 }
 void TrayController::Focus() {
   ShowWindow(window_, IsIconic(window_) ? SW_RESTORE : SW_SHOW);
@@ -135,6 +136,9 @@ bool TrayController::SetStartup(bool enabled) {
   return status == ERROR_SUCCESS || (!enabled && status == ERROR_FILE_NOT_FOUND);
 }
 void TrayController::Menu() {
+  // TrackPopupMenu pumps updates; preserve the command displayed at open.
+  const std::string intent = action_name_;
+  const bool was_enabled = enabled_;
   HMENU menu = CreatePopupMenu();
   if (!menu) return;
   AppendMenu(menu, MF_STRING | MF_GRAYED, 0, summary_.c_str());
@@ -155,9 +159,9 @@ void TrayController::Menu() {
   if (selected == 1 || (selected == 2 && details_)) {
     if (navigate_) navigate_(selected == 2);
     Focus();
-  } else if (selected == 3 && enabled_) {
+  } else if (selected == 3 && was_enabled && enabled_ && intent == action_name_) {
     enabled_ = false;
-    action_();
+    action_(intent);
   } else if (selected == 4) {
     if (!SetStartup(!StartupEnabled())) MessageBox(window_, L"无法保存开机启动设置。", L"RegenBio 海外访问", MB_OK | MB_ICONINFORMATION);
   } else if (selected == 5) {

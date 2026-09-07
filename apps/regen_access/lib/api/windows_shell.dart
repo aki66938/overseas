@@ -4,9 +4,15 @@ import '../model/tray_state.dart';
 
 class WindowsShell {
   static const _channel = MethodChannel('regen_access/shell');
-  void attach(Future<void> Function() action, {void Function(bool)? navigate}) {
+  void attach(
+    Future<void> Function(String) action, {
+    void Function(bool)? navigate,
+  }) {
     _channel.setMethodCallHandler((call) async {
-      if (call.method == 'action') await action();
+      if (call.method == 'action' &&
+          const ['connect', 'disconnect', 'restore'].contains(call.arguments)) {
+        await action(call.arguments as String);
+      }
       if (call.method == 'home') navigate?.call(false);
       if (call.method == 'details') navigate?.call(true);
     });

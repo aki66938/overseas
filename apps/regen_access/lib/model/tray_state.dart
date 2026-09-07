@@ -2,11 +2,18 @@ import 'status.dart';
 
 /// The tray projects the page's state; it never owns a second lifecycle.
 class TrayState {
-  const TrayState(this.label, this.enabled, this.summary, this.details);
+  const TrayState(
+    this.label,
+    this.enabled,
+    this.summary,
+    this.details,
+    this.action,
+  );
   final String label;
   final bool enabled;
   final String summary;
   final bool details;
+  final String action;
 
   factory TrayState.fromStatus(
     Status? status, {
@@ -59,6 +66,13 @@ class TrayState {
           !status.configurationUnavailable,
       summary,
       status != null,
+      status == null
+          ? ''
+          : status.connected
+          ? 'disconnect'
+          : status.needsRestore
+          ? 'restore'
+          : 'connect',
     );
   }
   Map<String, Object> toMap() => {
@@ -66,5 +80,6 @@ class TrayState {
     'enabled': enabled,
     'summary': summary,
     'details': details,
+    'action': action,
   };
 }

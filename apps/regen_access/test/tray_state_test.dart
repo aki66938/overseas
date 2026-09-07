@@ -34,7 +34,7 @@ void main() {
         messenger.handlePlatformMessage(
           channel.name,
           const StandardMethodCodec().encodeMethodCall(
-            const MethodCall('action'),
+            const MethodCall('action', 'connect'),
           ),
           (_) {},
         ),
@@ -59,6 +59,62 @@ void main() {
     expect(client.connects, 1);
     await tester.pumpWidget(const SizedBox());
   });
+  for (final initial in ['connected', 'idle']) {
+    testWidgets(
+      'stale $initial menu intent never inverts after status changes',
+      (tester) async {
+        const channel = MethodChannel('regen_access/shell');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(channel, (_) async => null);
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        final client = FakeClient(snapshot(initial));
+        await tester.pumpWidget(MyApp(client: client, shell: WindowsShell()));
+        await tester.pump();
+        // This is the explicit command the menu displayed when it opened.
+        final displayedAction = initial == 'connected'
+            ? 'disconnect'
+            : 'connect';
+        client.value = snapshot(initial == 'connected' ? 'idle' : 'connected');
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+        unawaited(
+          messenger.handlePlatformMessage(
+            channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('action', displayedAction),
+            ),
+            (_) {},
+          ),
+        );
+        await tester.pump();
+        expect(
+          client.connects,
+          0,
+          reason: 'a stale menu command must be rejected',
+        );
+        expect(
+          client.disconnects,
+          0,
+          reason: 'a stale menu command must be rejected',
+        );
+        final currentAction = initial == 'connected' ? 'connect' : 'disconnect';
+        unawaited(
+          messenger.handlePlatformMessage(
+            channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('action', currentAction),
+            ),
+            (_) {},
+          ),
+        );
+        await tester.pump();
+        expect(client.connects, initial == 'connected' ? 1 : 0);
+        expect(client.disconnects, initial == 'idle' ? 1 : 0);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
   test('tray derives the same actions for every service state', () {
     for (final state in [
       'idle',
@@ -71,6 +127,14 @@ void main() {
       final status = Status(state: state);
       final tray = TrayState.fromStatus(status);
       expect(tray.enabled, !status.transitioning);
+      expect(
+        tray.action,
+        state == 'connected'
+            ? 'disconnect'
+            : state == 'needs_action'
+            ? 'restore'
+            : 'connect',
+      );
       expect(
         tray.label,
         state == 'needs_action'

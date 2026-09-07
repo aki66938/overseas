@@ -76,7 +76,7 @@ int main() {
     }
     int actions = 0;
     {
-      TrayController tray(window, [&] { ++actions; });
+      TrayController tray(window, [&](const std::string&) { ++actions; });
       LRESULT value = 0;
       ShowWindow(window, SW_SHOWNOACTIVATE);
       Check(tray.HandleMessage(WM_CLOSE, 0, 0, &value) && !IsWindowVisible(window), "close hides");

@@ -55,14 +55,15 @@ class _DesktopState extends State<_Desktop> {
   void initState() {
     super.initState();
     widget.shell?.attach(
-      () async {
-        if (TrayState.fromStatus(
+      (intent) async {
+        final current = TrayState.fromStatus(
           status,
           busy: busy,
           polling: polling,
           uncertain: uncertain,
-        ).enabled) {
-          await act();
+        );
+        if (current.enabled && current.action == intent) {
+          await act(intent: intent);
         }
       },
       navigate: (value) {
@@ -153,7 +154,7 @@ class _DesktopState extends State<_Desktop> {
     }
   }
 
-  Future<void> act({bool probe = false}) async {
+  Future<void> act({bool probe = false, String? intent}) async {
     if (!mounted ||
         busy ||
         polling ||
@@ -162,6 +163,9 @@ class _DesktopState extends State<_Desktop> {
       return;
     }
     final previous = status;
+    final action = TrayState.fromStatus(previous).action;
+    if (intent != null && intent != action) return;
+    final restore = action == 'disconnect' || action == 'restore';
     if (!probe && previous?.configurationUnavailable == true) {
       return;
     }
@@ -169,19 +173,14 @@ class _DesktopState extends State<_Desktop> {
     setState(() {
       busy = true;
       if (!probe) {
-        status = Status(
-          state: previous?.connected == true || previous?.needsRestore == true
-              ? 'restoring'
-              : 'connecting',
-        );
+        status = Status(state: restore ? 'restoring' : 'connecting');
       }
     });
     try {
       if (probe) {
         // The following status carries authoritative quality/history/counters.
         await observe(widget.client.probe(), probeBudget);
-      } else if (previous?.connected == true ||
-          previous?.needsRestore == true) {
+      } else if (restore) {
         await observe(widget.client.disconnect(), disconnectBudget);
       } else {
         await observe(widget.client.connect(), connectBudget);

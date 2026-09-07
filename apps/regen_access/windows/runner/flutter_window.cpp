@@ -32,27 +32,31 @@ bool FlutterWindow::OnCreate() {
   access_bridge_ = std::make_unique<AccessBridge>(GetHandle(), messenger);
   shell_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "regen_access/shell", &flutter::StandardMethodCodec::GetInstance());
-  tray_ = std::make_unique<TrayController>(GetHandle(), [this] {
-    shell_->InvokeMethod("action", nullptr);
+  tray_ = std::make_unique<TrayController>(GetHandle(), [this](const std::string& intent) {
+    shell_->InvokeMethod("action", std::make_unique<flutter::EncodableValue>(intent));
   }, [this](bool details) {
     shell_->InvokeMethod(details ? "details" : "home", nullptr);
   });
   shell_->SetMethodCallHandler([this](const auto& call, auto result) {
     if (call.method_name() != "update") { result->NotImplemented(); return; }
     const auto* args = call.arguments() ? std::get_if<flutter::EncodableMap>(call.arguments()) : nullptr;
-    if (!args || args->size() != 4) { result->Error("invalid_state"); return; }
+    if (!args || args->size() != 5) { result->Error("invalid_state"); return; }
     const auto label = args->find(flutter::EncodableValue("label"));
     const auto summary = args->find(flutter::EncodableValue("summary"));
     const auto enabled = args->find(flutter::EncodableValue("enabled"));
     const auto details = args->find(flutter::EncodableValue("details"));
-    if (label == args->end() || summary == args->end() || enabled == args->end() || details == args->end()) {
+    const auto action = args->find(flutter::EncodableValue("action"));
+    if (label == args->end() || summary == args->end() || enabled == args->end() || details == args->end() || action == args->end()) {
       result->Error("invalid_state"); return;
     }
     const auto* text = std::get_if<std::string>(&label->second);
     const auto* status = std::get_if<std::string>(&summary->second);
     const auto* action_enabled = std::get_if<bool>(&enabled->second);
     const auto* details_enabled = std::get_if<bool>(&details->second);
-    if (!text || !status || !action_enabled || !details_enabled || text->size() > 128 || status->size() > 256) {
+    const auto* intent = std::get_if<std::string>(&action->second);
+    if (!text || !status || !action_enabled || !details_enabled || !intent ||
+        (*intent != "" && *intent != "connect" && *intent != "disconnect" && *intent != "restore") ||
+        text->size() > 128 || status->size() > 256) {
       result->Error("invalid_state"); return;
     }
     const auto wide = [](const std::string& value) {
@@ -61,7 +65,7 @@ bool FlutterWindow::OnCreate() {
       MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), output.data(), size);
       return output;
     };
-    tray_->Update(wide(*text), *action_enabled, wide(*status), *details_enabled);
+    tray_->Update(wide(*text), *action_enabled, wide(*status), *details_enabled, *intent);
     result->Success();
   });
 
