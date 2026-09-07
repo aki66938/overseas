@@ -14,7 +14,7 @@
 | 平台 | 当前条件 | 发布门槛 |
 |---|---|---|
 | Windows | Go/PowerShell/Flutter 可运行；VS BuildTools 17.14.39；Flutter 原生 Release 样例构建通过 | 产品 Release 构建、签名 MSI、新终端生命周期测试 |
-| Ubuntu 22.04/24.04 | 新建 Ubuntu 24.04.4 测试 VM 116，172.20.8.48；原生共享测试进行中 | CLI、网络 namespace 与 DEB 生命周期测试；22.04 仍待验证 |
+| Ubuntu 22.04/24.04 | 新建 Ubuntu 24.04.4 测试 VM 116，172.20.8.48；原生 Go 全量测试及构建通过 | CLI、网络 namespace 与 DEB 生命周期测试；22.04 仍待验证 |
 | Rocky 9 | 尚未指定专用测试机 | 原生 CLI、网络 namespace 与 RPM 生命周期测试 |
 | macOS arm64 | 用户指定 EC 唯一受管 Apple 设备，开发后由用户测试；Xcode/Developer ID 未核验 | 最小扩展签名/安装/启停和签名分发仍待验证 |
 
