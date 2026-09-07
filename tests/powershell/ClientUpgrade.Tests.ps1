@@ -11,7 +11,7 @@ Describe 'Client upgrade restoration protocol' {
     BeforeEach {
         $tokens = $null; $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$tokens, [ref]$errors)
-        foreach ($name in @('Assert-RestorationResponse', 'Read-BoundedPipeFrame', 'Request-ControlledDisconnect')) {
+        foreach ($name in @('Assert-RestorationResponse', 'Read-BoundedPipeFrame', 'Request-ControlledDisconnect','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-NetworkRestored')) {
             $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
             if ($null -ne $definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
         }
@@ -75,7 +75,7 @@ Describe 'Client upgrade restoration protocol' {
 
     It 'proves a stopped service baseline without starting a replacement service during old removal' {
         $ServiceName = 'RegenBioInstallerTest-Stopped'
-        Mock Get-Service { [pscustomobject]@{Status='Stopped'} }
+        Mock Get-Service { [pscustomobject]@{Name='RegenBioInstallerTest-Stopped';Status='Stopped'} }
         Mock Start-Service { throw 'must not start replacement service' }
         function Assert-NetworkRestored { $script:proofCalled = $true }
         $script:proofCalled = $false
@@ -84,5 +84,28 @@ Describe 'Client upgrade restoration protocol' {
         function Assert-NetworkRestored { throw 'residue remains' }
         (Get-UpgradeFailure { Request-ControlledDisconnect }) | Should Match 'residue remains'
         Assert-MockCalled Start-Service -Times 0 -Exactly
+    }
+
+    It 'rejects every network enumeration failure instead of treating it as zero residue' {
+        $TunAlias = 'RegenBioInstallerTest'; $RuntimeFirewallGroup = 'RegenBioInstallerTest'
+        $DataRoot = $TestDrive
+        foreach ($command in @('Get-NetAdapter','Get-NetRoute','Get-DnsClientServerAddress','Get-NetFirewallRule')) { Mock $command { return @() } }
+        foreach ($command in @('Get-NetAdapter','Get-NetRoute','Get-DnsClientServerAddress','Get-NetFirewallRule')) {
+            Mock $command {
+                param($ErrorAction)
+                if ($ErrorAction -eq 'Stop') { throw 'enumeration failed' }
+                return @()
+            }
+            (Get-UpgradeFailure { Assert-NetworkRestored }) | Should Match 'enumeration failed'
+            Mock $command { return @() }
+        }
+    }
+
+    It 'keeps every embedded restoration function byte equivalent to the authoritative harness' {
+        $embedded = [IO.File]::ReadAllText((Join-Path $repoRoot 'cmd/installer-verifier/upgrade_restore_windows.go')).Replace("`r`n", "`n")
+        foreach ($name in @('Assert-RestorationResponse','Read-BoundedPipeFrame','Request-ControlledDisconnect','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-NetworkRestored')) {
+            $definition = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
+            $embedded.Contains($definition.Extent.Text.Replace("`r`n", "`n")) | Should Be $true
+        }
     }
 }

@@ -274,3 +274,27 @@ certificate changes are intentionally not included in this first slice. Native a
 Self-review: first slice is coherent for inspect-only packaging; no claim that normal
 upgrade works yet. MSI extraction still to run after a clean scoped commit because the
 builder requires a clean source tree. Additional full Go/platform checks follow final slice.
+
+## 2026-09-07 — first review remediation
+
+First-slice commits: `671dd83`, report append `8a0026c`. Review identified inherited
+`SilentlyContinue` discovery as a false zero-residue proof and missing enforcement of
+the embedded/harness synchronization comment. Both verified and corrected together.
+Service and adapter/route/DNS/firewall discovery now enumerate with ErrorAction Stop;
+selection filters ordinary empty results without interpreting query failure as absence.
+Every embedded restoration function is compared byte-for-byte (newline normalized) with
+its authoritative harness definition by the new mandatory Pester contract test.
+
+RED: focused ClientUpgrade test **8/9** (injected enumeration error accepted).
+After authoritative harness repair, **8/9** (synchronization contract caught stale embed).
+After synchronizing the embed, **9/9 on both PowerShell7 and Windows PowerShell5.1**,
+same explicit Import-Module and Invoke-Pester commands as above. These tests include
+four individually injected discovery failures, absent/stopped-service behavior and a
+real isolated asynchronous named-pipe timeout. No real product lifecycle actions.
+
+First inspect attempt refused dirty tree because the appended report had not been
+committed; guard was preserved. Next clean attempt discovered absent upstream archives.
+Official GitHub sing-box archive fetched and SHA matched the lock. Official Wintun
+download from this workstation timed out; parent fetched the same official archive via
+test VM116 and verified the locked SHA both remotely and locally. No alternate version
+or checksum change. MSI extraction still pending the next clean-source build.

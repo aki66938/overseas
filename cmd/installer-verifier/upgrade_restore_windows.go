@@ -61,7 +61,9 @@ function Read-BoundedPipeFrame {
 }
 
 function Request-ControlledDisconnect {
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $service = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq $ServiceName })
+    if ($service.Count -gt 1) { throw 'Agent service discovery is ambiguous.' }
+    $service = $service | Select-Object -First 1
     if ($null -eq $service) { return }
     if ($service.Status -ne 'Running') {
         # During a major upgrade the new payload is installed but must remain
@@ -90,19 +92,19 @@ function Request-ControlledDisconnect {
 }
 
 function Assert-TunAbsent {
-    if (@(Get-NetAdapter -InterfaceAlias $TunAlias -IncludeHidden -ErrorAction SilentlyContinue).Count -ne 0) {
+    if (@(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { $_.InterfaceAlias -eq $TunAlias }).Count -ne 0) {
         throw 'The owned TUN adapter remains.'
     }
 }
 
 function Assert-OwnedRoutesAbsent {
-    if (@(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -eq $TunAlias }).Count -ne 0) {
+    if (@(Get-NetRoute -ErrorAction Stop | Where-Object { $_.InterfaceAlias -eq $TunAlias }).Count -ne 0) {
         throw 'Routes owned by the TUN adapter remain.'
     }
 }
 
 function Assert-DnsRestored {
-    if (@(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { @($_.ServerAddresses) -contains '172.19.0.2' }).Count -ne 0) {
+    if (@(Get-DnsClientServerAddress -ErrorAction Stop | Where-Object { @($_.ServerAddresses) -contains '172.19.0.2' }).Count -ne 0) {
         throw 'The temporary TUN DNS server remains configured.'
     }
 }
@@ -111,7 +113,7 @@ function Assert-NetworkRestored {
     Assert-TunAbsent
     Assert-OwnedRoutesAbsent
     Assert-DnsRestored
-    $groupRules = @(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+    $groupRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.Group -eq $RuntimeFirewallGroup })
     $enabledRules = @($groupRules | Where-Object { [string]$_.Enabled -eq 'True' })
     if ($enabledRules.Count -ne 0) {
         throw 'Agent restoration could not be proven because runtime firewall rules remain.'
