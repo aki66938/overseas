@@ -44,6 +44,12 @@ Windows `flutter build windows --release` 已成功生成独立 SDK 样例 `rege
 
 官方发布清单再次确认相同 Flutter/Dart 版本及提交，并提供 Windows 完整归档 SHA-256，已记录到工具锁。本机采用 Git 源码加 SDK 缓存方式安装，未下载该完整归档，不把发布方提供的哈希当作本机归档校验结果。
 
+## Windows 发布签名门槛
+
+2026-09-07 只读检查发现现有 `RegenBio Overseas Access PoC Code Signing` 身份于 **2026-09-30** 到期。当前发布脚本没有时间戳参数；不能据此承诺长期可安装。任务 8 需验证发布签名、可信时间戳及目标机证书链，明确正式签名身份。未导出私钥或更换证书。
+
+已确认本机 Windows SDK `10.0.26100.0/x64/signtool.exe` 的 Authenticode 状态为 Valid、签署者 Microsoft；锁定 WiX 4.0.6 可执行文件哈希匹配。
+
 ## macOS 企业直发
 
 [Apple TN3134](https://developer.apple.com/documentation/technotes/tn3134-network-extension-provider-deployment)明确：macOS Packet Tunnel 的普通 App Extension 仅限 App Store；Developer ID 直发应使用 **System Extension**。这是已批准 Packet Tunnel 方案的具体打包形式，不改变界面或数据面选择。
