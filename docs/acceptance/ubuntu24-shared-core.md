@@ -15,6 +15,8 @@ go test ./... -count=1   PASS
 go build ./...          PASS
 ```
 
+同一提交的并发检测亦通过：`go test -race -p 2 ./internal/lineprobe ./internal/diagnosticmode ./internal/traceevent ./internal/agent ./internal/clientapi -count=1`，共 5 个包。证据：`outputs/regen-access-testvm-20260907/race-3f1d7f1.log`。此结果为 Linux 原生检测，不代表 Windows 专属授权逻辑的 race 验证。
+
 源码归档 SHA-256：`c8e1661fc7f26de4f2e4d97160b999ff0d4d050ce69c077e33dfe2258cd6eb94`。工作区证据：`outputs/regen-access-testvm-20260907/native-red.log`、`native-3f1d7f1.log`。归档在传入 VM 后再次校验。
 
 修正保留 Windows 路径原始值及策略哈希，保持 Windows 专属测试；共享协议和行为测试仍在 Ubuntu 原生执行。单独代码审查通过。
