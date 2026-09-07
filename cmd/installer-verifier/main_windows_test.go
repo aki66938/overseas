@@ -34,6 +34,28 @@ foreach($name in @('../foreign','data/../foreign','data\\font','data//font','dat
 	}
 }
 
+func TestBundleInventoryCoversFlutterAndRejectsUnlistedFiles(t *testing.T) {
+	start := strings.Index(verifyBundleScript, "$expectedPayloadNames=")
+	end := strings.Index(verifyBundleScript, "$programDataNames=")
+	if start < 0 || end <= start {
+		t.Fatal("bundle inventory boundary missing")
+	}
+	script := safePayloadPathScript + `
+$release=[pscustomobject]@{files=@()}
+$base=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll','RegenBio-OverseasAccess-PoC-Root.cer','Telecom-GoMITM-Root.cer','flutter_windows.dll','data/app.so','data/icudtl.dat','data/flutter_assets/AssetManifest.bin')
+foreach($name in $base){$release.files+= [pscustomobject]@{name=$name}}
+` + verifyBundleScript[start:end] + `
+foreach($bad in @('data/../foreign','data/NUL.txt','data/flutter_assets/font.','unexpected.exe','DATA/APP.SO')){
+  $release.files+= [pscustomobject]@{name=$bad};$failed=$false
+  try{ & ([scriptblock]::Create($args[0])) }catch{$failed=$true}
+  if(-not $failed){throw 'unlisted payload accepted'}
+  $release.files=@($release.files|Where-Object{$_.name -cne $bad})
+}
+`
+	if err := runPowerShell(script, verifyBundleScript[start:end]); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestRunPowerShellReceivesExactArguments(t *testing.T) {
 	err := runPowerShell(`if($args.Count-ne 2-or$args[0]-cne'path with spaces'-or$args[1]-cne'ABC123'){exit 19}`, "path with spaces", "ABC123")
 	if err != nil {
@@ -85,7 +107,8 @@ func TestVerifyBundleScriptContainsCompletePreInstallTrustGate(t *testing.T) {
 		"Get-AuthenticodeSignature", "SignedCms", "CheckSignature", "Get-FileHash",
 		"schema_version", "product_version", "source_commit", "mode", "release",
 		"signer_thumbprints", "authenticode_required", "authenticode_thumbprints",
-		"artifact-manifest.json", "fixture-manifest", "expected commit", "exact payload allowlist",
+		"artifact-manifest.json", "fixture-manifest", "expected commit", "payload allowlist",
+		"required payload absent", "duplicate Windows payload name", "Resolve-VerifierPayloadPath",
 		"fixture artifact hash mismatch", "Get-SHA256 ([string]$artifact.path)",
 		"FileMode]::CreateNew", "installer-verifier.json",
 	} {

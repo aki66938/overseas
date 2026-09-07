@@ -33,10 +33,25 @@ type trustVerifier interface {
 	uninstallFirewall() error
 	cleanupRuntime() error
 	prepareUpgrade() error
+	snapshotUpgrade(mode string) error
+	ensureSharedRoot() error
 }
 
 func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 	switch {
+	case len(args) == 1 && args[0] == "shared-root-install":
+		if err := verifier.ensureSharedRoot(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "pinned shared trust could not be installed or verified")
+			return 1
+		}
+		return 0
+	case len(args) == 1 && (args[0] == "upgrade-backup" || args[0] == "upgrade-restore" || args[0] == "upgrade-rollback" || args[0] == "upgrade-commit"):
+		modes := map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit"}
+		if err := verifier.snapshotUpgrade(modes[args[0]]); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "upgrade snapshot operation failed; protected recovery evidence retained")
+			return 1
+		}
+		return 0
 	case len(args) == 1 && args[0] == "prepare-upgrade":
 		if err := verifier.prepareUpgrade(); err != nil {
 			_, _ = fmt.Fprintln(errorOutput, "upgrade restoration could not be proven")

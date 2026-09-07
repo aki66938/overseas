@@ -111,9 +111,12 @@ foreach ($row in @(Get-MsiTableRows 'InstallExecuteSequence')) { $sequence[[stri
 if ($sequence.VerifyPackageTrust -ge $sequence.InstallInitialize) { throw 'VerifyPackageTrust must precede InstallInitialize.' }
 if ($sequence.MsiSafeRemove -ge $sequence.StopServices) { throw 'MsiSafeRemove must precede StopServices.' }
 if ($sequence.VerifyInstalledPayload -ge $sequence.InstallServices -or $sequence.VerifyInstalledPayload -le $sequence.InstallFiles) { throw 'VerifyInstalledPayload must follow InstallFiles and precede InstallServices.' }
-if ($sequence.InstallClientFirewall -le $sequence.VerifyInstalledPayload -or $sequence.InstallClientFirewall -ge $sequence.InstallServices) { throw 'InstallClientFirewall must follow VerifyInstalledPayload and precede InstallServices.' }
+if ($sequence.InstallSharedRoot -le $sequence.VerifyInstalledPayload -or $sequence.InstallSharedRoot -ge $sequence.InstallServices) { throw 'Shared trust must follow verified payload and precede service installation.' }
 if ($sequence.RemoveClientFirewall -le $sequence.StopServices -or $sequence.CleanupOwnedRuntime -le $sequence.RemoveClientFirewall) { throw 'Uninstall firewall and runtime cleanup ordering is unsafe.' }
-if ($sequence.RemoveExistingProducts -le $sequence.InstallInitialize) { throw 'Major upgrade removal ordering is unsafe.' }
+if ($sequence.PrepareClientUpgrade -ge $sequence.StopServices -or $sequence.BackupUpgradeSnapshot -le $sequence.StopServices -or $sequence.BackupUpgradeSnapshot -ge $sequence.InstallFiles) { throw 'Upgrade preparation/snapshot ordering is unsafe.' }
+if ($sequence.RollbackUpgradeSnapshot -le $sequence.StopServices -or $sequence.RollbackUpgradeSnapshot -ge $sequence.BackupUpgradeSnapshot) { throw 'Snapshot rollback must precede backup and follow StopServices.' }
+if ($sequence.RemoveExistingProducts -ne ($sequence.InstallExecute + 1)) { throw 'Old removal must immediately follow the first transaction flush.' }
+if ($sequence.RestoreUpgradeSnapshot -le $sequence.RemoveExistingProducts -or $sequence.InstallClientFirewall -le $sequence.RestoreUpgradeSnapshot -or $sequence.StartServices -le $sequence.InstallClientFirewall -or $sequence.InstallExecuteAgain -le $sequence.StartServices -or $sequence.InstallExecuteAgain -ge $sequence.InstallFinalize) { throw 'Second-phase restoration/start/flush ordering is unsafe.' }
 $aclRows = @(Get-MsiTableRows 'MsiLockPermissionsEx')
 $expectedSddl = @('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)', 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
 foreach ($sddl in $expectedSddl) { if (@($aclRows | Where-Object { $_[3] -eq $sddl }).Count -ne 1) { throw "Required ACL row is absent: $sddl" } }
@@ -127,21 +130,12 @@ if ($upgradeRows.Count -eq 0 -or $relatedUpgradeRows.Count -ne $upgradeRows.Coun
 $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } | ForEach-Object { $_[1] })
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')
-$certificateRows = @(Get-MsiTableRows 'Wix4Certificate')
-$telecomCertificateRows = @($certificateRows | Where-Object {
-    $_[0] -eq 'TelecomMitmRootTrust' -and $_[1] -eq 'TelecomMitmRootTrust' -and
-    $_[2] -eq 'Go MITM Root CA' -and $_[3] -eq '2' -and $_[4] -eq 'Root' -and
-    $_[5] -eq '10' -and $_[6] -eq 'TelecomMitmCertBin'
-})
-if ($certificateRows.Count -ne 1 -or $telecomCertificateRows.Count -ne 1) { throw 'Transactional telecom root certificate row is invalid.' }
-$certificateActions = @{
-    Wix4InstallCertificates_X64 = 'InstallCertificates'
-    Wix4UninstallCertificates_X64 = 'UninstallCertificates'
-}
-foreach ($action in $certificateActions.Keys) {
-    $rows = @($customActions | Where-Object { $_[0] -eq $action -and $_[2] -eq 'IisCA_X64' -and $_[3] -eq $certificateActions[$action] })
-    if ($rows.Count -ne 1 -or -not $sequence.ContainsKey($action)) { throw "Transactional certificate action '$action' is invalid." }
-}
+$tables = @(Get-MsiTableRows '_Tables' | ForEach-Object { [string]$_[0] })
+if ($tables -contains 'Wix4Certificate' -or @($customActions | Where-Object { $_[3] -match 'InstallCertificates|UninstallCertificates' }).Count) { throw 'Shared company trust must not have an IIS uninstall action.' }
+$sharedRootActions = @($customActions | Where-Object { $_[0] -eq 'InstallSharedRoot' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq 'shared-root-install' })
+if ($sharedRootActions.Count -ne 1) { throw 'Pinned install-only company root action is absent.' }
+$legacyTrustComponent = @(Get-MsiTableRows 'Component' | Where-Object { $_[0] -eq 'TelecomMitmRootTrust' -and ([string]$_[1]).Trim('{}') -eq 'A6A99D6F-B4F9-43C4-91F4-3E1E167DF063' })
+if ($legacyTrustComponent.Count -ne 1 -or ([int]$legacyTrustComponent[0][3] -band 16)) { throw 'Legacy trust component identity must remain non-permanent.' }
 $packageTrustActions = @($customActions | Where-Object { $_[0] -eq 'VerifyPackageTrust' -and $_[1] -eq '2' -and $_[2] -eq 'InstallerVerifierBinary' })
 $payloadDataActions = @($customActions | Where-Object { $_[1] -eq '51' -and $_[2] -eq 'VerifyInstalledPayload' })
 if ($packageTrustActions.Count -ne 1 -or $payloadDataActions.Count -ne 0) { throw 'First-party trust custom actions are invalid.' }

@@ -8,18 +8,45 @@ import (
 )
 
 type fakeTrustVerifier struct {
-	packageCalls   int
-	payloadCalls   int
-	bundleCalls    int
-	bundleInput    bundleInput
-	installCalls   int
-	rollbackCalls  int
-	uninstallCalls int
-	prepareCalls   int
-	err            error
+	packageCalls    int
+	payloadCalls    int
+	bundleCalls     int
+	bundleInput     bundleInput
+	installCalls    int
+	rollbackCalls   int
+	uninstallCalls  int
+	prepareCalls    int
+	snapshotMode    string
+	sharedRootCalls int
+	err             error
 }
 
-func (f *fakeTrustVerifier) prepareUpgrade() error { f.prepareCalls++; return f.err }
+func (f *fakeTrustVerifier) prepareUpgrade() error             { f.prepareCalls++; return f.err }
+func (f *fakeTrustVerifier) snapshotUpgrade(mode string) error { f.snapshotMode = mode; return f.err }
+func (f *fakeTrustVerifier) ensureSharedRoot() error           { f.sharedRootCalls++; return f.err }
+
+func TestRunRoutesSharedTrustInstallOnly(t *testing.T) {
+	fake := &fakeTrustVerifier{}
+	if result := run([]string{"shared-root-install"}, fake, io.Discard); result != 0 || fake.sharedRootCalls != 1 {
+		t.Fatalf("root install exit=%d calls=%d", result, fake.sharedRootCalls)
+	}
+	if result := run([]string{"shared-root-uninstall"}, fake, io.Discard); result == 0 {
+		t.Fatal("shared root removal command must not exist")
+	}
+}
+
+func TestRunRoutesUpgradeSnapshotLifecycle(t *testing.T) {
+	for command, mode := range map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit"} {
+		fake := &fakeTrustVerifier{}
+		if result := run([]string{command}, fake, io.Discard); result != 0 || fake.snapshotMode != mode {
+			t.Fatalf("%s exit=%d mode=%s", command, result, fake.snapshotMode)
+		}
+		fake.err = errors.New("snapshot failure")
+		if result := run([]string{command}, fake, io.Discard); result == 0 {
+			t.Fatal("snapshot failure accepted")
+		}
+	}
+}
 
 func TestRunPreparesUpgradeAndPropagatesRestorationFailure(t *testing.T) {
 	for _, failure := range []error{nil, errors.New("restoration residue")} {

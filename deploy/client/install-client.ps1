@@ -388,6 +388,11 @@ function Assert-PayloadSignatures {
     foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe', 'wintun.dll')) {
         Assert-AuthenticodePayload -Path $Paths[$name] -AllowedThumbprints $thumbprints
     }
+    foreach ($entry in @($Manifest.files)) {
+        if ([string]$entry.name -cmatch '^(flutter_windows\.dll|[A-Za-z0-9_]+_plugin\.dll)$') {
+            Assert-AuthenticodePayload -Path $Paths[[string]$entry.name] -AllowedThumbprints $thumbprints
+        }
+    }
     Assert-DetachedPolicySignature -PolicyPath $Paths['agent.yaml'] -SignaturePath $Paths['agent.yaml.p7s'] -AllowedThumbprints $thumbprints
 }
 
@@ -879,18 +884,19 @@ function Assert-DnsRestored {
 }
 
 function Assert-OwnedFirewallAbsent {
-    if (@(Get-NetFirewallRule -Group $RuntimeFirewallGroup -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)
+    if (@($rules | Where-Object { $_.Group -eq $RuntimeFirewallGroup }).Count -ne 0) {
         throw 'Runtime firewall residue remains.'
     }
     foreach ($name in $OwnedFirewallRules) {
-        if (@(Get-NetFirewallRule -Name $name -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
+        if (@($rules | Where-Object { $_.Name -eq $name }).Count -ne 0) {
             throw "Installer firewall residue '$name' remains."
         }
     }
 }
 
 function Assert-ServiceAbsent {
-    if ($null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { throw 'The client service remains.' }
+    if (@(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq $ServiceName }).Count -ne 0) { throw 'The client service remains.' }
 }
 
 function Assert-NetworkRestored {

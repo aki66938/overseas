@@ -11,7 +11,7 @@ Describe 'Client upgrade restoration protocol' {
     BeforeEach {
         $tokens = $null; $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$tokens, [ref]$errors)
-        foreach ($name in @('Assert-RestorationResponse', 'Read-BoundedPipeFrame', 'Request-ControlledDisconnect','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-NetworkRestored')) {
+        foreach ($name in @('Assert-RestorationResponse', 'Read-BoundedPipeFrame', 'Request-ControlledDisconnect','Assert-TunAbsent','Assert-OwnedRoutesAbsent','Assert-DnsRestored','Assert-NetworkRestored','Assert-ServiceAbsent','Assert-OwnedFirewallAbsent')) {
             $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
             if ($null -ne $definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
         }
@@ -107,5 +107,29 @@ Describe 'Client upgrade restoration protocol' {
             $definition = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
             $embedded.Contains($definition.Extent.Text.Replace("`r`n", "`n")) | Should Be $true
         }
+    }
+
+    It 'rejects terminal service and firewall discovery failures while permitting proven empty stores' {
+        $ServiceName = 'RegenBioInstallerTest'; $RuntimeFirewallGroup = 'RegenBioInstallerTest'; $OwnedFirewallRules = @('RegenBioInstallerTest-Rule')
+        Mock Get-Service { param($ErrorAction); if ($ErrorAction -eq 'Stop') { throw 'service enumeration failed' }; return @() }
+        Mock Get-NetFirewallRule { param($ErrorAction); if ($ErrorAction -eq 'Stop') { throw 'firewall enumeration failed' }; return @() }
+        (Get-UpgradeFailure { Assert-ServiceAbsent }) | Should Match 'service enumeration failed'
+        (Get-UpgradeFailure { Assert-OwnedFirewallAbsent }) | Should Match 'firewall enumeration failed'
+        Mock Get-Service { return @() }; Mock Get-NetFirewallRule { return @() }
+        (Get-UpgradeFailure { Assert-ServiceAbsent }) | Should Be ''
+        (Get-UpgradeFailure { Assert-OwnedFirewallAbsent }) | Should Be ''
+    }
+
+    It 'flushes verified replacement files before old cleanup and restores state before any new service start' {
+        [xml]$product = Get-Content (Join-Path $repoRoot 'deploy/client/Product.wxs') -Raw
+        $package = $product.Wix.Package
+        $package.MajorUpgrade.Schedule | Should Be 'afterInstallExecute'
+        $sequence = $package.InstallExecuteSequence
+        @($sequence.Custom | Where-Object { $_.Action -eq 'PrepareClientUpgrade' })[0].Before | Should Be 'StopServices'
+        @($sequence.Custom | Where-Object { $_.Action -eq 'BackupUpgradeSnapshot' })[0].After | Should Be 'RollbackUpgradeSnapshot'
+        @($sequence.Custom | Where-Object { $_.Action -eq 'RestoreUpgradeSnapshot' })[0].After | Should Be 'RemoveExistingProducts'
+        $sequence.StartServices.After | Should Be 'InstallClientFirewall'
+        $sequence.InstallExecuteAgain.After | Should Be 'CommitUpgradeSnapshot'
+        $sequence.InstallExecuteAgain.Condition | Should Be 'NOT REMOVE~="ALL"'
     }
 }

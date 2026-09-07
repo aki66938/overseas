@@ -20,7 +20,7 @@
     <MajorUpgrade
         AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of RegenBio Overseas Access is already installed. Downgrades are not permitted."
-        Schedule="afterInstallInitialize" />
+        Schedule="afterInstallExecute" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPCONTACT" Value="RegenBio IT" />
@@ -49,6 +49,12 @@
     <CustomAction Id="InstallClientFirewall" BinaryRef="InstallerVerifierBinary" ExeCommand="firewall-install" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="RemoveClientFirewall" BinaryRef="InstallerVerifierBinary" ExeCommand="firewall-uninstall" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="CleanupOwnedRuntime" BinaryRef="InstallerVerifierBinary" ExeCommand="runtime-cleanup" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="PrepareClientUpgrade" BinaryRef="InstallerVerifierBinary" ExeCommand="prepare-upgrade" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RollbackUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-rollback" Execute="rollback" Impersonate="no" Return="check" />
+    <CustomAction Id="BackupUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-backup" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RestoreUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-restore" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="CommitUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-commit" Execute="commit" Impersonate="no" Return="check" />
+    <CustomAction Id="InstallSharedRoot" BinaryRef="InstallerVerifierBinary" ExeCommand="shared-root-install" Execute="deferred" Impersonate="no" Return="check" />
 
     <SetProperty
         Id="MsiSafeRemove"
@@ -64,6 +70,12 @@
         Impersonate="no"
         Return="check" />
     <InstallExecuteSequence>
+      <!-- The old cached MSI must see verified replacement files while the
+           replacement service is still stopped. Backup occurs after StopServices;
+           its rollback is therefore before service restart in the reverse script. -->
+      <Custom Action="PrepareClientUpgrade" Before="StopServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RollbackUpgradeSnapshot" After="StopServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="BackupUpgradeSnapshot" After="RollbackUpgradeSnapshot" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
       <Custom
           Action="MsiSafeRemove"
           Before="StopServices"
@@ -78,8 +90,16 @@
           Action="VerifyInstalledPayload"
           Before="InstallServices"
           Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="RollbackClientFirewall" After="VerifyInstalledPayload" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="InstallSharedRoot" After="VerifyInstalledPayload" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <InstallExecute />
+      <!-- No script-generating action may intervene between this first flush
+           and RemoveExistingProducts (MajorUpgrade afterInstallExecute). -->
+      <Custom Action="RestoreUpgradeSnapshot" After="RemoveExistingProducts" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RollbackClientFirewall" After="RestoreUpgradeSnapshot" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="InstallClientFirewall" After="RollbackClientFirewall" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <StartServices After="InstallClientFirewall" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="CommitUpgradeSnapshot" After="StartServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <InstallExecuteAgain After="CommitUpgradeSnapshot" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RemoveClientFirewall" After="StopServices" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="CleanupOwnedRuntime" After="RemoveClientFirewall" Condition="REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>

@@ -537,7 +537,7 @@ Describe 'Transactional Windows client installer' {
         $builder | Should Match 'Wintun Prebuilt Binaries License'
         $inspector | Should Match 'trustRootNames'
         $inspector | Should Match 'Compare-Object[^\r\n]*coveredNames[^\r\n]*payloadNames'
-        $inspector | Should Match 'InstallClientFirewall.*InstallServices'
+        $inspector | Should Match 'StartServices.*InstallClientFirewall'
         (Test-Path -LiteralPath $releasePublisherPath -PathType Leaf) | Should Be $true
         if (Test-Path -LiteralPath $releasePublisherPath) {
             $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw -Encoding UTF8
@@ -600,7 +600,7 @@ Describe 'Transactional Windows client installer' {
         $script:createCount = 0
         $script:failAt = 0
         $script:publishConcurrentRuleOnFailure = $false
-        function Test-Get-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); if ($script:firewallState.ContainsKey($Name)) { return ($script:firewallState[$Name].Rule) } }
+        function Test-Get-NetFirewallRule { param($Name,$PolicyStore,$ErrorAction); if (-not $Name) { return @($script:firewallState.Values | ForEach-Object { $_.Rule }) }; if ($script:firewallState.ContainsKey($Name)) { return ($script:firewallState[$Name].Rule) } }
         function Test-Get-NetFirewallApplicationFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.App) } }
         function Test-Get-NetFirewallPortFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Port) } }
         function Test-Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Address) } }
@@ -787,16 +787,15 @@ Describe 'Transactional Windows client installer' {
         $wrapper | Should Match '\$ToolArguments\s*=\s*@\(\$ToolArguments\)[^\r\n]*\$utilExtension[^\r\n]*\$firewallExtension[^\r\n]*\$iisExtension'
     }
 
-    It 'installs only the telecom MITM root transactionally through WiX IIS' {
+    It 'preserves the legacy component identity while managing company shared trust as install-only' {
         $files = Get-Content -LiteralPath $filesPath -Raw -Encoding UTF8
         $installer = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $inspector = Get-Content -LiteralPath $msiInspectorPath -Raw -Encoding UTF8
-        $files | Should Match ([regex]::Escape('xmlns:iis="http://wixtoolset.org/schemas/v4/wxs/iis"'))
-        $files | Should Match 'iis:Certificate[\s\S]*BinaryRef="TelecomMitmCertBin"[\s\S]*StoreLocation="localMachine"[\s\S]*StoreName="root"[\s\S]*Vital="yes"'
-        @([regex]::Matches($files, '<iis:Certificate\b')).Count | Should Be 1
-        $files | Should Not Match 'iis:Certificate[^>]+PocRootCert'
+        $files | Should Match 'A6A99D6F-B4F9-43C4-91F4-3E1E167DF063'
+        $files | Should Match 'TelecomMitmRootManaged'
+        @([regex]::Matches($files, '<iis:Certificate\b')).Count | Should Be 0
         $installer | Should Not Match 'function\s+Import-PocRootCertificate|Import-PocRootCertificate'
-        $inspector | Should Match "Get-MsiTableRows 'Wix4Certificate'"
+        $inspector | Should Match 'shared-root-install'
         $inspector | Should Match 'TelecomMitmRootTrust'
         $inspector | Should Match 'InstallCertificates'
         $inspector | Should Match 'UninstallCertificates'

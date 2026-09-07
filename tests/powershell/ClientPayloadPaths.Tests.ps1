@@ -10,7 +10,7 @@ Describe 'Nested Flutter payload ownership' {
     BeforeEach {
         $tokens = $null; $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$tokens, [ref]$errors)
-        foreach ($name in @('Get-CanonicalPath','Resolve-OwnedPayloadPath','Resolve-PayloadPath','Assert-PayloadInventory','Copy-PayloadFile','Remove-OwnedPayloadFiles')) {
+        foreach ($name in @('Get-CanonicalPath','Resolve-OwnedPayloadPath','Resolve-PayloadPath','Assert-PayloadInventory','Copy-PayloadFile','Remove-OwnedPayloadFiles','Assert-PayloadSignatures')) {
             $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
             if ($null -ne $definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
         }
@@ -21,6 +21,18 @@ Describe 'Nested Flutter payload ownership' {
 
     It 'resolves nested payloads below the owned root' {
         (Resolve-PayloadPath -Root $root -Name 'data/flutter_assets/fonts/font.otf') | Should Be (Join-Path $root 'data\flutter_assets\fonts\font.otf')
+    }
+
+    It 'verifies Flutter engine and plugin Authenticode alongside the fixed first party executables' {
+        $script:signatureChecks = @()
+        function Assert-AuthenticodePayload { param($Path,$AllowedThumbprints); $script:signatureChecks += $Path }
+        function Assert-DetachedPolicySignature { param($PolicyPath,$SignaturePath,$AllowedThumbprints) }
+        $names = @('overseas-agent.exe','overseas-client.exe','installer-verifier.exe','wintun.dll','flutter_windows.dll','tray_manager_plugin.dll')
+        $paths = @{}; foreach ($name in $names) { $paths[$name]=$name }
+        $manifest = [pscustomobject]@{signer_thumbprints=@('A'*40);files=@($names | ForEach-Object { [pscustomobject]@{name=$_} })}
+        Assert-PayloadSignatures $manifest $paths
+        $script:signatureChecks.Count | Should Be 6
+        ($script:signatureChecks -contains 'tray_manager_plugin.dll') | Should Be $true
     }
 
     It 'rejects ambiguous and escaping Windows relative names before touching disk' {

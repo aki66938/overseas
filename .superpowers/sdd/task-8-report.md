@@ -298,3 +298,79 @@ Official GitHub sing-box archive fetched and SHA matched the lock. Official Wint
 download from this workstation timed out; parent fetched the same official archive via
 test VM116 and verified the locked SHA both remotely and locally. No alternate version
 or checksum change. MSI extraction still pending the next clean-source build.
+
+## 2026-09-07 Task 8 second slice: protected migration candidate
+
+Implemented two-flush upgrade sequencing: controlled disconnect before StopServices;
+rollback snapshot queued after StopServices but before InstallFiles; backup before
+replacement files; verified payload/shared-root import before InstallServices;
+InstallExecute immediately followed by RemoveExistingProducts; snapshot restore,
+new firewall and StartServices only afterward; InstallExecuteAgain before finalize.
+Commit removes the exact protected backup. This is an implementation candidate,
+not a claim that the signed product/native lifecycle gate passed.
+
+Snapshot boundary: SYSTEM/Administrators-only directory and owner checks, reparse
+ancestry refusal, bounded exact runtime ownership journal and file inventory,
+random transaction entropy, LocalMachine DPAPI envelope for every backed-up file,
+hashes and original ACL restoration. credential.bin is never decrypted; legacy
+sing-box.json containing a synthetic secret was verified absent in backup plaintext.
+Stale/incomplete/tampered/foreign snapshot contents refuse continuation and remain
+for explicit recovery. Only exact successfully created files are cleaned on an
+early backup failure. Runtime ledger is published last after restored file hashes.
+Installer firewall baseline records all exact normalized definitions plus original
+presence/enabled states; rollback restores only that baseline, never adds originally
+absent rules or accepts foreign same-name semantic drift. New phase-two ownership
+journal is removed on rollback only after validating it and proving the baseline.
+
+Shared company trust is explicitly persistent and shared: no IIS Certificate row,
+no uninstall/rollback certificate deletion, no Permanent component. Legacy shared
+component GUID/keypath remains. Install-only adapter pins exact DER SHA256 and
+thumbprint, verifies an existing match, imports only if absent, verifies afterward.
+Abstract-store tests made no change to the workstation's actual certificate stores.
+
+Focused RED/GREEN receipts (Pester 3.4.0 explicitly imported):
+- Snapshot initial missing implementation RED 0/4 -> GREEN 4/4; backup failure,
+  interrupted phase-two restoration, parent ACL and junction tests expanded to 7/7.
+- Missing phase-two journal cleanup RED 7/8 -> GREEN 8/8.
+- User-writable source ownership journal RED 8/9 -> GREEN 9/9.
+- Terminal service/firewall enumeration failure RED 10/11 -> GREEN 11/11.
+- Flutter DLL Authenticode coverage RED 7/8 -> GREEN 8/8.
+- Firewall exact-state adapter 2/2; shared-root abstract store 3/3.
+- Go bundle Flutter inventory test RED (old flat allowlist) -> GREEN; old static
+  allowlist wording assertion subsequently updated to require the strengthened
+  required-file, Windows duplicate, and safe-path boundaries.
+
+Fresh full validation commands:
+```powershell
+Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'
+$r = Invoke-Pester tests/powershell -PassThru -Quiet
+# PowerShell 7: Passed=180 Failed=0
+& 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe' -NoProfile -Command "Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'; Invoke-Pester tests/powershell -EnableExit"
+# Windows PowerShell 5.1: Passed=180 Failed=0, exit 0, 21.84 seconds
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' test ./... -count=1
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' vet ./...
+```
+Go vet exit 0. Full Go tests were rerun after the final bundle contract edit;
+its final receipt is recorded in the next append before packaging.
+
+Self-review boundaries and remaining acceptance:
+- Parent's isolated per-user MSI fixture proves shared component Action Null and
+  the two-execute native MSI transaction ordering. Its embedded-cab phase-two
+  deferred failure restored old file bytes BEFORE early RollbackOne read them.
+  These are MSI built-in transaction observations, not proof of product custom
+  action service/network/certificate rollback effects.
+- Rollback network baseline is verified controlled-disconnected ordinary network;
+  restoring prior service running state must NOT reconnect a former active tunnel.
+- Native clean install, old 0.1.7 active/prepared/idle/missing service/duplicate
+  registration upgrade, service running-state rollback, actual shared root retention,
+  GUI click-through and final zero residue still require the parent's isolated pilot.
+- Legacy disabled installer firewall rules may cause the immutable old strict
+  uninstaller to refuse removal; the snapshot preserves disabled state on failure,
+  but no claim that this native old-package edge case upgrades successfully.
+- Signing identity and short-lived signing/timestamp/release acceptance remain
+  pending user choice. No certificate issuance/private-key export, actual installed
+  client operation, manual SCM deletion, permanent safety bypass or release occurred.
+
+Final second-slice full Go test command above exited 0, all packages passed;
+installer-verifier 14.454s. No signed-MSI integration inputs were supplied, so that
+existing explicit native integration test remains skipped, not silently accepted.

@@ -96,26 +96,33 @@ foreach($role in $artifactRoles){
 $releaseBytes=[IO.File]::ReadAllBytes($releasePath);Assert-Detached $releaseBytes $releaseSignature $releaseSigner
 $release=[Text.Encoding]::UTF8.GetString($releaseBytes)|ConvertFrom-Json
 Assert-ExactProperties $release @('schema_version','product_version','source_commit','mode','signer_thumbprints','files') 'release manifest'
-if($release.schema_version-ne 1-or[string]$release.product_version-cne'0.1.0'-or[string]$release.source_commit-cne$expectedCommit-or[string]$release.mode-cne'release'){throw 'release expected commit/schema mismatch'}
+if($release.schema_version-ne 1-or[string]$release.product_version-cnotmatch '^\d+\.\d+\.\d+$'-or[version]$release.product_version-lt[version]'0.1.8'-or[string]$release.source_commit-cne$expectedCommit-or[string]$release.mode-cne'release'){throw 'release expected commit/schema mismatch'}
 $manifestSigners=@($release.signer_thumbprints|ForEach-Object{([string]$_).ToUpperInvariant()})
 if($manifestSigners.Count-eq 0-or@($manifestSigners|Sort-Object -Unique).Count-ne$manifestSigners.Count-or$manifestSigners-notcontains$releaseSigner-or@($manifestSigners|Where-Object{$_-cnotmatch'^[A-F0-9]{40}$'}).Count-ne 0){throw 'release signer_thumbprints invalid'}
-$expectedPayloadNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll')
+$expectedPayloadNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json','install-client.ps1','installer-verifier.exe','libcronet.dll','overseas-agent.exe','overseas-client.exe','sing-box-LICENSE.txt','sing-box.exe','sing-box.manifest.json','wintun-LICENSE.txt','wintun.dll','RegenBio-OverseasAccess-PoC-Root.cer','Telecom-GoMITM-Root.cer','flutter_windows.dll','data/app.so','data/icudtl.dat')
 $names=@($release.files|ForEach-Object{[string]$_.name})
-if($names.Count-ne$expectedPayloadNames.Count-or@($names|Sort-Object -Unique).Count-ne$expectedPayloadNames.Count-or(Compare-Object -ReferenceObject ($expectedPayloadNames|Sort-Object) -DifferenceObject ($names|Sort-Object))){throw 'release manifest exact payload allowlist mismatch'}
+$seen=@{}
+foreach($name in $names){
+  $null=Resolve-VerifierPayloadPath 'C:\RegenBioBundlePathValidation' $name
+  if($seen.ContainsKey($name)){throw 'duplicate Windows payload name'};$seen[$name]=$true
+  if($expectedPayloadNames-cnotcontains$name-and$name-cnotmatch '^([A-Za-z0-9_]+_plugin\.dll|native_assets\.json|data/flutter_assets/[A-Za-z0-9_][A-Za-z0-9_./-]*)$'){throw 'release manifest payload allowlist mismatch'}
+}
+foreach($required in $expectedPayloadNames){if($names-cnotcontains$required){throw 'release manifest required payload absent'}}
 $programDataNames=@('SHA256SUMS','agent.yaml','agent.yaml.p7s','client-sbom.json')
 $authenticodeNames=@('installer-verifier.exe','overseas-agent.exe','overseas-client.exe','wintun.dll')
 foreach($entry in @($release.files)){
   Assert-ExactProperties $entry @('name','destination','sha256','authenticode_required','authenticode_thumbprints') 'release payload entry'
-  $name=[string]$entry.name;if($name-cnotmatch'^[A-Za-z0-9][A-Za-z0-9._-]*$'-or$name.Contains('..')-or[string]$entry.sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'release payload entry invalid'}
+  $name=[string]$entry.name;if([string]$entry.sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'release payload entry invalid'}
   $expectedDestination=if($programDataNames-contains$name){'program-data'}else{'program-files'}
-  if([string]$entry.destination-cne$expectedDestination-or[bool]$entry.authenticode_required-ne($authenticodeNames-contains$name)){throw 'release payload policy mismatch'}
-  $path=Join-Path $bundle $name;Assert-OrdinaryFile $path
+  $mustSign=($authenticodeNames-contains$name-or$name-eq'flutter_windows.dll'-or$name-cmatch'^[A-Za-z0-9_]+_plugin\.dll$')
+  if([string]$entry.destination-cne$expectedDestination-or$entry.authenticode_required-isnot[bool]-or$entry.authenticode_required-ne$mustSign){throw 'release payload policy mismatch'}
+  $path=Resolve-VerifierPayloadPath $bundle $name;Assert-OrdinaryFile $path
   if((Get-SHA256 $path)-cne[string]$entry.sha256){throw 'release payload hash mismatch'}
   $allowed=@($entry.authenticode_thumbprints|ForEach-Object{([string]$_).ToUpperInvariant()})
   if([bool]$entry.authenticode_required){if($allowed.Count-eq 0-or@($allowed|Where-Object{$manifestSigners-notcontains$_}).Count-ne 0){throw 'payload signer allowlist mismatch'};Assert-Authenticode $path $allowed}elseif($allowed.Count-ne 0){throw 'unsigned payload declares signers'}
 }
-$bundleNames=@(Get-ChildItem -LiteralPath $bundle -File -Force|ForEach-Object{$_.Name})
-$expectedBundleNames=@($expectedPayloadNames)+@('artifact-manifest.json','artifact-manifest.json.p7s')
+$bundleNames=@(Get-ChildItem -LiteralPath $bundle -Recurse -File -Force|ForEach-Object{$relative=$_.FullName.Substring($bundle.TrimEnd('\').Length+1).Replace('\','/');$null=Resolve-VerifierPayloadPath $bundle $relative;$relative})
+$expectedBundleNames=@($names)+@('artifact-manifest.json','artifact-manifest.json.p7s')
 if($bundleNames.Count-ne$expectedBundleNames.Count-or(Compare-Object -ReferenceObject ($expectedBundleNames|Sort-Object) -DifferenceObject ($bundleNames|Sort-Object))){throw 'bundle contains unmanifested files'}
 if([IO.Path]::GetFullPath($releasePath)-cne[IO.Path]::GetFullPath((Join-Path $bundle 'artifact-manifest.json'))-or[IO.Path]::GetFullPath($releaseSignature)-cne[IO.Path]::GetFullPath((Join-Path $bundle 'artifact-manifest.json.p7s'))){throw 'release trust roots are outside bundle'}
 $evidenceDirectory=Split-Path -Parent $evidence;Assert-OrdinaryDirectory $evidenceDirectory
@@ -125,7 +132,7 @@ try{$writer=New-Object IO.StreamWriter($stream,(New-Object Text.UTF8Encoding($fa
 `
 
 func (windowsTrustVerifier) verifyBundle(input bundleInput) error {
-	return runPowerShell(verifyBundleScript, input.Bundle, input.MSI, input.FixtureManifest, input.FixtureSignature, input.ReleaseManifest, input.ReleaseSignature, input.ExpectedCommit, input.ExpectedMSISHA256, input.ExpectedFixtureSHA256, input.ExpectedReleaseSHA256, input.FixtureSigner, input.ReleaseSigner, input.MSISigner, input.Evidence)
+	return runPowerShell(safePayloadPathScript+verifyBundleScript, input.Bundle, input.MSI, input.FixtureManifest, input.FixtureSignature, input.ReleaseManifest, input.ReleaseSignature, input.ExpectedCommit, input.ExpectedMSISHA256, input.ExpectedFixtureSHA256, input.ExpectedReleaseSHA256, input.FixtureSigner, input.ReleaseSigner, input.MSISigner, input.Evidence)
 }
 
 const safePayloadPathScript = `
@@ -216,8 +223,8 @@ function Write-FirewallJournal($value){
     Move-Item -LiteralPath $temporary -Destination $journal -Force
   }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
 }
-function Get-ExactFirewallRule($definition){
-  $rules=@(Get-NetFirewallRule -Name $definition.name -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
+function Get-ExactFirewallRule($definition,[switch]$AllowDisabled){
+  $rules=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop|Where-Object{$_.Name -eq $definition.name})
   if($rules.Count -eq 0){return $null}
   if($rules.Count -ne 1){throw 'Firewall rule name is ambiguous.'}
   $rule=$rules[0]
@@ -233,7 +240,7 @@ function Get-ExactFirewallRule($definition){
   if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or $security.Count -ne 1 -or
     $rule.Group -ne $group -or $rule.DisplayName -ne $definition.display_name -or
     [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Allow' -or
-    [string]$rule.Enabled -ne 'True' -or [string]$rule.Profile -ne 'Any' -or
+    ((-not $AllowDisabled -and [string]$rule.Enabled -ne 'True') -or [string]$rule.Enabled -notin @('True','False')) -or [string]$rule.Profile -ne 'Any' -or
     -not [string]::Equals((Normalize-AnyValue $applications[0].Package),'Any',[StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals([string]$interfaces[0].InterfaceAlias,'Any',[StringComparison]::OrdinalIgnoreCase) -or -not(Test-SameDefinition $observed $definition)){
     throw 'Firewall rule does not exactly match the product definition.'
