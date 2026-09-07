@@ -52,7 +52,7 @@
 
 **Files:** 新建 `docs/acceptance/platform-prerequisites.md`、`deploy/toolchains.json`；读取现有 `deploy/client/build-lock.json`、`sing-box.manifest.json`、CI。
 
-- [ ] 在独立 worktree 执行 `go test ./... -count=1`、`Invoke-Pester tests/powershell -EnableExit`；记录基线失败，未解决前不改事务。
+- [x] 在独立 worktree 执行 `go test ./... -count=1`、`Invoke-Pester tests/powershell -EnableExit`；记录基线失败，未解决前不改事务。2026-09-07：Go 全通过，Pester 143/143。
 - [ ] 核对 Flutter 支持平台、Apple Network Extension 分发 entitlement、嵌入 sing-box 构建入口与许可，使用对应官方资料；记录版本、地址、构建命令和校验值。
 - [ ] 在实际 macOS arm64 构建最小 Packet Tunnel 容器，验证签名、安装、启动、停止；此任务是可行性门槛，不冒充完整客户端。
 - [ ] 清点 Windows、Ubuntu、Rocky、Mac 实机及签名身份；缺少平台只阻塞该平台验收，其余开发继续。
