@@ -39,7 +39,12 @@ class _DesktopState extends State<_Desktop> {
   Status? status;
   bool unavailable = false, busy = false, polling = false, details = false;
   late final Timer timer;
-  static const timeout = Duration(seconds: 8);
+  Timer? requestDeadline;
+  static const statusBudget = Duration(seconds: 8);
+  // Service lifecycle deadlines are 120s/90s; allow transport completion grace.
+  static const connectBudget = Duration(seconds: 130);
+  static const disconnectBudget = Duration(seconds: 100);
+  static const probeBudget = Duration(seconds: 10);
   @override
   void initState() {
     super.initState();
@@ -48,10 +53,16 @@ class _DesktopState extends State<_Desktop> {
   }
 
   Future<void> refresh() async {
-    if (polling || busy) return;
-    polling = true;
+    if (!mounted || polling || busy) return;
+    setState(() {
+      polling = true;
+    });
     try {
-      final value = await widget.client.status().timeout(timeout);
+      final value = await observe(
+        widget.client.status(),
+        statusBudget,
+        discardLate: true,
+      );
       // Calls are serialized: no persistent generation cache survives service restart.
       if (mounted) {
         setState(() {
@@ -60,19 +71,52 @@ class _DesktopState extends State<_Desktop> {
         });
       }
     } catch (_) {
+      markUnavailable();
+    } finally {
       if (mounted) {
         setState(() {
-          status = null;
-          unavailable = true;
+          polling = false;
         });
       }
+    }
+  }
+
+  void markUnavailable() {
+    if (!mounted) return;
+    setState(() {
+      status = null;
+      unavailable = true;
+    });
+  }
+
+  /// A deadline invalidates display data, but never abandons request ownership.
+  /// Task 7 transport cancellation must complete the original Future before a
+  /// later request may start. A late status sample cannot restore a stale claim.
+  Future<T> observe<T>(
+    Future<T> request,
+    Duration budget, {
+    bool discardLate = false,
+  }) async {
+    var overdue = false;
+    final deadline = Timer(budget, () {
+      overdue = true;
+      markUnavailable();
+    });
+    requestDeadline = deadline;
+    try {
+      final value = await request;
+      if (discardLate && overdue) {
+        throw TimeoutException('Status sample expired');
+      }
+      return value;
     } finally {
-      polling = false;
+      deadline.cancel();
+      if (identical(requestDeadline, deadline)) requestDeadline = null;
     }
   }
 
   Future<void> act({bool probe = false}) async {
-    if (busy || polling) return;
+    if (!mounted || busy || polling) return;
     final previous = status;
     if (!probe && previous?.configurationUnavailable == true) {
       return;
@@ -91,14 +135,19 @@ class _DesktopState extends State<_Desktop> {
     try {
       if (probe) {
         // The following status carries authoritative quality/history/counters.
-        await widget.client.probe().timeout(timeout);
+        await observe(widget.client.probe(), probeBudget);
       } else if (previous?.connected == true ||
           previous?.needsRestore == true) {
-        await widget.client.disconnect().timeout(timeout);
+        await observe(widget.client.disconnect(), disconnectBudget);
       } else {
-        await widget.client.connect().timeout(timeout);
+        await observe(widget.client.connect(), connectBudget);
       }
-      final value = await widget.client.status().timeout(timeout);
+      if (!mounted) return;
+      final value = await observe(
+        widget.client.status(),
+        statusBudget,
+        discardLate: true,
+      );
       if (mounted) {
         setState(() {
           status = value;
@@ -106,12 +155,7 @@ class _DesktopState extends State<_Desktop> {
         });
       }
     } catch (_) {
-      if (mounted) {
-        setState(() {
-          status = null;
-          unavailable = true;
-        });
-      }
+      markUnavailable();
     } finally {
       if (mounted) {
         setState(() {
@@ -124,6 +168,7 @@ class _DesktopState extends State<_Desktop> {
   @override
   void dispose() {
     timer.cancel();
+    requestDeadline?.cancel();
     super.dispose();
   }
 
@@ -142,6 +187,7 @@ class _DesktopState extends State<_Desktop> {
                     status: status!,
                     now: widget.now(),
                     busy: busy,
+                    polling: polling,
                     onBack: () => setState(() {
                       details = false;
                     }),
@@ -152,6 +198,7 @@ class _DesktopState extends State<_Desktop> {
                     now: widget.now(),
                     unavailable: unavailable,
                     busy: busy,
+                    polling: polling,
                     onAction: () => unavailable ? refresh() : act(),
                     onDetails: () => setState(() {
                       details = true;

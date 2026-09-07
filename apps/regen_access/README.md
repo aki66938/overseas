@@ -22,8 +22,17 @@ Both pages share a 460×540 logical content shell. Native runners start at this 
 size; their platform caption is additional. Narrow windows and large text scroll.
 OS-specific window sizing constraints and lifecycle integration remain Task 7 gates.
 
-Status polling is serialized every 3 seconds, with an 8-second per-call timeout.
-Errors clear the old connection claim. User actions are serialized; manual probes are
+Status polling is serialized every 3 seconds. Observation budgets are 8 seconds for
+status, 130 for connect, 100 for disconnect, and 10 for probes; lifecycle budgets allow
+grace beyond the service's 120/90-second deadlines. Crossing a budget clears the old
+connection claim but retains request ownership until the original Future completes.
+A late status sample is discarded; a completed lifecycle action gets a fresh status read.
+There is no UI-side cancellation pretending to stop server work. Task 7 transport must
+settle lifecycle Futures only after completion or confirmed cancellation. While a status
+read is pending, action buttons are visibly disabled and show the read in progress;
+the main connection state and duration remain visible until the status budget expires.
+Disposal cancels display timers and prevents follow-up requests, without claiming to
+cancel the service operation. User actions are serialized; manual probes are
 enabled only while connected, and their completed status is reread from the service.
 There is no UI network probing, client failure counting, or persistent generation cache.
 Service-authored counters are unknown when absent, pending at 1/2, abnormal at 3.
@@ -33,3 +42,4 @@ starting a connection hides the old results immediately.
 Tests use synthetic fixtures only. `test/fonts/README.md` describes the pinned OFL
 font and readable Chinese goldens. That font is test-only; production uses system fonts.
 Goldens verify Flutter content, not macOS-native appearance or live service integration.
+The generated empty macOS XCTest target was removed; no native macOS test pass is claimed.

@@ -10,12 +10,13 @@ class HomePage extends StatelessWidget {
     required this.now,
     required this.unavailable,
     required this.busy,
+    required this.polling,
     required this.onAction,
     required this.onDetails,
   });
   final Status? status;
   final DateTime now;
-  final bool unavailable, busy;
+  final bool unavailable, busy, polling;
   final VoidCallback onAction, onDetails;
 
   @override
@@ -51,7 +52,11 @@ class HomePage extends StatelessWidget {
         : transitional || loading
         ? '请稍候'
         : '按需开启海外访问';
-    final label = unavailable
+    final label = loading
+        ? '请稍候'
+        : polling
+        ? '正在读取状态'
+        : unavailable
         ? '重试'
         : busy
         ? '正在处理'
@@ -140,7 +145,7 @@ class HomePage extends StatelessWidget {
                     )
                   else
                     FilledButton(
-                      onPressed: loading || transitional || busy
+                      onPressed: loading || transitional || busy || polling
                           ? null
                           : onAction,
                       child: Text(label),

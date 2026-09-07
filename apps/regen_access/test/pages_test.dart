@@ -37,12 +37,14 @@ class FakeClient implements AccessClient {
   FakeClient(this.value);
   Status value;
   bool fail = false;
-  int connects = 0, disconnects = 0, probes = 0;
+  int connects = 0, disconnects = 0, probes = 0, statusCalls = 0;
   Completer<Status>? pending;
   Completer<List<ProbeResult>>? probing;
   Completer<void>? connecting;
+  Completer<void>? disconnecting;
   @override
   Future<Status> status() async {
+    statusCalls++;
     if (fail) throw StateError('secret internal path');
     return pending == null ? value : pending!.future;
   }
@@ -57,6 +59,7 @@ class FakeClient implements AccessClient {
   @override
   Future<void> disconnect() async {
     disconnects++;
+    if (disconnecting != null) await disconnecting!.future;
     value = snapshot('idle', history: true);
   }
 

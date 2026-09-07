@@ -2,7 +2,10 @@ import '../model/status.dart';
 
 abstract interface class AccessClient {
   Future<Status> status();
+  /// Complete only after the service operation ends or cancellation is confirmed.
+  /// A local timeout must not release ownership of a still-running operation.
   Future<void> connect();
+  /// Same completion/confirmed-cancellation contract as [connect].
   Future<void> disconnect();
   Future<List<ProbeResult>> probe();
 }

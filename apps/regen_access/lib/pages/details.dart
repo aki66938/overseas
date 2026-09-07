@@ -9,12 +9,13 @@ class DetailsPage extends StatelessWidget {
     required this.status,
     required this.now,
     required this.busy,
+    required this.polling,
     required this.onBack,
     required this.onProbe,
   });
   final Status status;
   final DateTime now;
-  final bool busy;
+  final bool busy, polling;
   final VoidCallback onBack, onProbe;
   @override
   Widget build(BuildContext context) {
@@ -149,8 +150,16 @@ class DetailsPage extends StatelessWidget {
                   const SizedBox(height: 24),
                   const Spacer(),
                   OutlinedButton(
-                    onPressed: status.connected && !busy ? onProbe : null,
-                    child: Text(busy ? '正在测速' : '立即测速'),
+                    onPressed: status.connected && !busy && !polling
+                        ? onProbe
+                        : null,
+                    child: Text(
+                      polling
+                          ? '正在读取状态'
+                          : busy
+                          ? '正在测速'
+                          : '立即测速',
+                    ),
                   ),
                 ],
               ),
