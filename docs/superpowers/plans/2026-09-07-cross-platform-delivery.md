@@ -109,11 +109,11 @@ type Status struct {
 
 **Interfaces:** `Enable(now time.Time, duration time.Duration) error`、`Enabled(now time.Time) bool`、`Close() error`；授权由 IPC 端验证真实调用者身份，不能信任 JSON 的管理员字段。
 
-- [ ] 用假时钟测试默认 false、15/30/60 分钟、非法时长拒绝、重启 false、过期关闭文件；普通用户启用被拒绝。
-- [ ] 执行 `go test ./internal/diagnosticmode ./internal/traceevent` 确认失败。
-- [ ] 默认使用空 Sink，不创建日志文件；仅开启时创建 Recorder。数据面 stdout/stderr 的持久记录同时受门控。
-- [ ] 每文件 2 MiB，最多 5 个；保留既有脱敏规则。网络恢复快照属于事务状态，不按诊断日志关闭。
-- [ ] 测试开启期间故障、自动过期、服务重启和凭据脱敏；提交 `feat(diagnostics): add expiring admin mode`。
+- [x] 用假时钟测试默认 false、15/30/60 分钟、非法时长拒绝、重启 false、过期关闭文件；普通用户启用被拒绝。
+- [x] 执行 `go test ./internal/diagnosticmode ./internal/traceevent` 确认失败。
+- [x] 默认使用空 Sink，不创建日志文件；仅开启时创建 Recorder。数据面 stdout/stderr 的持久记录同时受门控。
+- [x] 每文件 2 MiB，最多 5 个；保留既有脱敏规则。网络恢复快照属于事务状态，不按诊断日志关闭。
+- [x] 测试开启期间故障、自动过期、服务重启和凭据脱敏；提交 `feat(diagnostics): add expiring admin mode`。
 
 ## Task 5: 共享边界和平台编译保护
 
