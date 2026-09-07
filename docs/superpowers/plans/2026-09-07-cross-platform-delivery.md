@@ -94,13 +94,13 @@ type Status struct {
 
 **Interfaces:** `Probe(ctx context.Context, target Target) Result`；`Target{ID,URL string}`；`Result{ID string, LatencyMS int64, Reachable bool, HTTPStatus int, ErrorCode string, CheckedAt time.Time}`。注入 HTTP transport 与时钟，禁止测试访问公网。
 
-- [ ] 用本地 TLS 测试服务器覆盖 200、302、403、429、503、超时、证书不可信；403/429 仅证明网络可达，不能证明账号或 AI 功能可用。
-- [ ] 用假时钟验证 30 秒周期、5 秒总预算、3 次连续失败、恢复成功清零、断开取消、重连结果不串代。
-- [ ] 执行 `go test ./internal/lineprobe` 确认失败。
-- [ ] 固定目标 URL：`https://www.google.com/`、`https://www.pinterest.com/`、`https://gemini.google.com/`、`https://chatgpt.com/`、`https://claude.ai/`；不带 Cookie、登录凭据或正文。
-- [ ] 请求使用 HEAD、独立连接测量 DNS 到首响应；记录原始 HTTP 状态，禁止关闭 TLS 验证。405 可做限长 GET，最多读取 1024 字节。
+- [x] 用本地 TLS 测试服务器覆盖 200、302、403、429、503、超时、证书不可信；403/429 仅证明网络可达，不能证明账号或 AI 功能可用。
+- [x] 用假时钟验证 30 秒周期、5 秒总预算、3 次连续失败、恢复成功清零、断开取消、重连结果不串代。
+- [x] 执行 `go test ./internal/lineprobe` 确认失败。
+- [x] 固定目标 URL：`https://www.google.com/`、`https://www.pinterest.com/`、`https://gemini.google.com/`、`https://chatgpt.com/`、`https://claude.ai/`；不带 Cookie、登录凭据或正文。
+- [x] 请求使用 HEAD、独立连接测量 DNS 到首响应；记录原始 HTTP 状态，禁止关闭 TLS 验证。405 可做限长 GET，最多读取 1024 字节。
 - [ ] UI 显示 HTTPS 首响应耗时，不称带宽测试；暂定 <1000 ms 为正常、1000–5000 ms 为较慢，原型中的几十毫秒不作为生产阈值。
-- [ ] 一次手动探测复用正在进行的一轮；超过半数目标持续失败才降级；探测失败本身不删除路由或切换公网出口。
+- [x] 一次手动探测复用正在进行的一轮；超过半数目标持续失败才降级；探测失败本身不删除路由或切换公网出口。
 - [ ] Windows 实机验证请求确经已连接通道；固定目标不能证明所有海外流量可用。通过后提交 `feat(probe): add bounded line health checks`。
 
 ## Task 4: 默认关闭的临时诊断
