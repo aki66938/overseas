@@ -2,13 +2,15 @@
 param(
     [Parameter(Mandatory = $true)][string] $SigningCertificateThumbprint,
     [string] $SignToolPath = 'signtool.exe',
-    [version] $ReleaseVersion = [version] '0.1.7',
+    [Parameter(Mandatory = $true)][string] $TimestampUrl,
+    [version] $ReleaseVersion = [version] '0.1.8',
     [string] $FinalMsiPath
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+. (Join-Path $PSScriptRoot 'client-payload-tools.ps1')
+$workspace = Get-ClientWorkspace -Repository $repo
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
 $ReleaseVersion = [version] $ReleaseVersion
 if ([string]::IsNullOrWhiteSpace($FinalMsiPath)) {
@@ -115,7 +117,6 @@ try {
     [void] [IO.Directory]::CreateDirectory($firstParty)
     $builds = @(
         @('overseas-agent.exe', './cmd/overseas-agent', @()),
-        @('overseas-client.exe', './cmd/overseas-client', @('-ldflags', '-H windowsgui')),
         @('installer-verifier.exe', './cmd/installer-verifier', @())
     )
     foreach ($build in $builds) {
@@ -125,11 +126,15 @@ try {
         finally { $env:GOOS = $previousGoOS; $env:GOARCH = $previousGoArch }
         if ($LASTEXITCODE -ne 0) { throw "Locked Go build failed for '$($build[0])'." }
     }
-    & (Join-Path $PSScriptRoot 'build-client-artifacts.ps1') -Mode Release -OutputDirectory $payloadRelative -SigningCertificateThumbprint $SigningCertificateThumbprint -SignToolPath $signTool -FirstPartyBinaryDirectory $firstParty -ProductVersion $ReleaseVersion
+    # Invoke-LockedFlutterBuild passes --build-name and --build-number to the
+    # locked flutterExecutable; the package verifies those native PE resources.
+    $flutterOutput = @(Invoke-LockedFlutterBuild -Repository $repo -ProductVersion $ReleaseVersion)
+    $flutterRoot = [string]$flutterOutput[-1]
+    & (Join-Path $PSScriptRoot 'build-client-artifacts.ps1') -Mode Release -OutputDirectory $payloadRelative -SigningCertificateThumbprint $SigningCertificateThumbprint -SignToolPath $signTool -FirstPartyBinaryDirectory $firstParty -FlutterRuntimeDirectory $flutterRoot -ProductVersion $ReleaseVersion -TimestampUrl $TimestampUrl
     if ($LASTEXITCODE -ne 0) { throw 'Release payload build failed.' }
-    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -d ProductVersion=$ReleaseVersion -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
+    & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') ($payload + '.FlutterFiles.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -d ProductVersion=$ReleaseVersion -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
     if ($LASTEXITCODE -ne 0) { throw 'wix release build failed.' }
-    & $signTool sign /fd SHA256 /sha1 $SigningCertificateThumbprint $temporaryMsi | Out-Null
+    & $signTool sign /fd SHA256 /tr $TimestampUrl /td SHA256 /sha1 $SigningCertificateThumbprint $temporaryMsi | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'signtool release signing failed.' }
     & (Join-Path $PSScriptRoot 'inspect-client-msi.ps1') -MsiPath $temporaryMsi -StagingPath $payload -OutputDirectory ('build/release-' + $id + '/inspect')
     if ($LASTEXITCODE -ne 0) { throw 'Release inspection failed.' }

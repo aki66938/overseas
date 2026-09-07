@@ -802,18 +802,18 @@ Describe 'Transactional Windows client installer' {
         $inspector | Should Match 'UninstallCertificates'
     }
 
-    It 'publishes 0.1.7 from an explicit release identity and permits authoritative same-version replacement' {
+    It 'stages the 0.1.8 Flutter candidate from an explicit release identity and permits authoritative same-version replacement' {
         $product = Get-Content -LiteralPath $productPath -Raw -Encoding UTF8
         $installer = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
         $builder = Get-Content -LiteralPath $artifactBuilderPath -Raw -Encoding UTF8
         $publisher = Get-Content -LiteralPath $releasePublisherPath -Raw -Encoding UTF8
-        $product | Should Match '<\?define ProductVersion = "0\.1\.7"'
+        $product | Should Match '<\?define ProductVersion = "0\.1\.8"'
         $product | Should Match 'Version="\$\(var\.ProductVersion\)"'
         $product | Should Match '<MajorUpgrade[^>]*AllowSameVersionUpgrades="yes"'
-        $installer | Should Match "ProductVersion\s*=\s*\[version\]\s*'0\.1\.7'"
-        $builder | Should Match '\[version\]\s*\$ProductVersion\s*=\s*\[version\]\s*''0\.1\.7'''
+        $installer | Should Match "ProductVersion\s*=\s*\[version\]\s*'0\.1\.8'"
+        $builder | Should Match '\[version\]\s*\$ProductVersion\s*=\s*\[version\]\s*''0\.1\.8'''
         $builder | Should Match 'product_version\s*=\s*\$ProductVersion\.ToString\(\)'
-        $publisher | Should Match '\[version\]\s*\$ReleaseVersion\s*=\s*\[version\]\s*''0\.1\.7'''
+        $publisher | Should Match '\[version\]\s*\$ReleaseVersion\s*=\s*\[version\]\s*''0\.1\.8'''
         $publisher | Should Match 'OverseasAccessSetup-v.*ReleaseVersion.*-poc-RELEASE_SIGNED\.msi'
         $publisher | Should Match '-d ProductVersion=\$ReleaseVersion'
     }

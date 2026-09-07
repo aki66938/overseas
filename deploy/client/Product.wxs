@@ -5,7 +5,7 @@
   <?define PackageTrustMode = "INSPECT_ONLY_REFUSES_INSTALL" ?>
 <?endif?>
 <?ifndef ProductVersion ?>
-  <?define ProductVersion = "0.1.7" ?>
+  <?define ProductVersion = "0.1.8" ?>
 <?endif?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
@@ -98,6 +98,7 @@
 
     <Feature Id="Complete" Title="RegenBio Overseas Access" Level="1">
       <ComponentGroupRef Id="ClientFiles" />
+      <ComponentGroupRef Id="FlutterFiles" />
       <ComponentGroupRef Id="ClientPolicy" />
     </Feature>
   </Package>

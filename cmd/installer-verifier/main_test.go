@@ -15,7 +15,20 @@ type fakeTrustVerifier struct {
 	installCalls   int
 	rollbackCalls  int
 	uninstallCalls int
+	prepareCalls   int
 	err            error
+}
+
+func (f *fakeTrustVerifier) prepareUpgrade() error { f.prepareCalls++; return f.err }
+
+func TestRunPreparesUpgradeAndPropagatesRestorationFailure(t *testing.T) {
+	for _, failure := range []error{nil, errors.New("restoration residue")} {
+		fake := &fakeTrustVerifier{err: failure}
+		result := run([]string{"prepare-upgrade"}, fake, io.Discard)
+		if fake.prepareCalls != 1 || (failure == nil && result != 0) || (failure != nil && result == 0) {
+			t.Fatalf("prepare calls=%d exit=%d", fake.prepareCalls, result)
+		}
+	}
 }
 
 func (f *fakeTrustVerifier) verifyBundle(input bundleInput) error {

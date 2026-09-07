@@ -12,7 +12,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ProductVersion = [version] '0.1.7'
+$ProductVersion = [version] '0.1.8'
 $TrustedManifestSignerThumbprint = '0000000000000000000000000000000000000000' # INSPECT_ONLY_REFUSES_INSTALL; release recipe replaces this copy.
 $ServiceName = 'RegenBioOverseasAccessAgent'
 $ServiceDisplayName = 'RegenBio Overseas Access Agent'
@@ -210,26 +210,43 @@ function Remove-RootOwnershipMarker {
     Remove-Item -LiteralPath (Join-Path $Root $RootOwnerFileName) -Force
 }
 
-function Resolve-PayloadPath {
+function Resolve-OwnedPayloadPath {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Name
     )
-    if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $Name.Contains('..')) {
+    # Manifest paths use one canonical separator. Windows aliases (ADS, DOS
+    # devices, trailing dots/spaces and alternate separators) are never names.
+    if ($Name -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$') {
         throw "Payload name '$Name' is invalid."
+    }
+    foreach ($segment in @($Name -split '/')) {
+        if ($segment.EndsWith('.') -or $segment.Contains('..') -or
+            $segment -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw "Payload name '$Name' is invalid." }
     }
     $rootPath = Get-CanonicalPath $Root
     $candidate = Get-CanonicalPath (Join-Path $rootPath $Name)
     if (-not $candidate.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "Payload '$Name' escapes the bundle root."
     }
-    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-        throw "Required payload '$Name' is absent."
+    # Check the whole ancestry, including the supplied root, before reads,
+    # copies or deletion. Missing descendants are allowed for installation.
+    $current = $candidate
+    while (-not [string]::IsNullOrEmpty($current)) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Payload '$Name' must not cross a reparse point." }
+            if ($current -ne $candidate -and -not $item.PSIsContainer) { throw "Payload '$Name' has an invalid parent." }
+        }
+        $current = Split-Path -Parent $current
     }
-    $item = Get-Item -LiteralPath $candidate -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Payload '$Name' must not be a reparse point."
-    }
+    return $candidate
+}
+
+function Resolve-PayloadPath {
+    param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Name)
+    $candidate = Resolve-OwnedPayloadPath -Root $Root -Name $Name
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "Required payload '$Name' is absent." }
     return $candidate
 }
 
@@ -256,6 +273,25 @@ function Assert-DetachedSignatureWithPinnedSigner {
     }
 }
 
+function Assert-PayloadInventory {
+    param([Parameter(Mandatory = $true)] $Manifest, [Parameter(Mandatory = $true)][string] $Root)
+    $names = @{}
+    $dataNames = @('agent.yaml', 'agent.yaml.p7s', 'client-sbom.json', 'SHA256SUMS')
+    foreach ($entry in @($Manifest.files)) {
+        $name = [string]$entry.name
+        [void](Resolve-OwnedPayloadPath -Root $Root -Name $name)
+        if ($names.ContainsKey($name)) { throw 'The payload manifest contains duplicate Windows names.' }
+        $names[$name] = $true
+        $flutter = $name -cmatch '^(flutter_windows\.dll|[A-Za-z0-9_]+_plugin\.dll|native_assets\.json|data/(app\.so|icudtl\.dat|flutter_assets/.+))$'
+        if ($RequiredPayloads -cnotcontains $name -and -not $flutter) { throw "Payload '$name' is outside the payload allowlist." }
+        $destination = if ($dataNames -ccontains $name) { 'program-data' } else { 'program-files' }
+        if ([string]$entry.destination -cne $destination) { throw "Payload '$name' has an invalid destination." }
+    }
+    foreach ($required in $RequiredPayloads) {
+        if (-not $names.ContainsKey($required)) { throw "The payload manifest omits '$required'." }
+    }
+}
+
 function Read-PayloadManifest {
     param([Parameter(Mandatory = $true)][string] $Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -271,13 +307,7 @@ function Read-PayloadManifest {
     if ($manifest.schema_version -ne 1 -or -not $manifest.product_version) {
         throw 'The payload manifest schema is invalid.'
     }
-    $names = @($manifest.files | ForEach-Object { [string] $_.name })
-    if ($names.Count -ne $RequiredPayloads.Count -or @($names | Sort-Object -Unique).Count -ne $RequiredPayloads.Count) {
-        throw 'The payload manifest must contain the exact payload allowlist.'
-    }
-    foreach ($required in $RequiredPayloads) {
-        if ($names -notcontains $required) { throw "The payload manifest omits '$required'." }
-    }
+    Assert-PayloadInventory -Manifest $manifest -Root (Split-Path -Parent (Get-CanonicalPath $Path))
     if ([version] $manifest.product_version -ne $ProductVersion) {
         throw "Payload version '$($manifest.product_version)' does not match installer version '$ProductVersion'."
     }
@@ -468,7 +498,14 @@ function Copy-PayloadFile {
         [Parameter(Mandatory = $true)][string] $Destination,
         [Parameter(Mandatory = $true)][string] $ExpectedHash
     )
-    $temporary = $Destination + '.new'
+    $destinationPath = Get-CanonicalPath $Destination
+    $roots = @($InstallRoot, $DataRoot | Where-Object { $destinationPath.StartsWith((Get-CanonicalPath $_) + '\', [StringComparison]::OrdinalIgnoreCase) })
+    if ($roots.Count -ne 1) { throw 'Payload copy destination is outside the exact owned roots.' }
+    $root = Get-CanonicalPath $roots[0]
+    $name = $destinationPath.Substring($root.Length + 1).Replace('\', '/')
+    [void](Resolve-OwnedPayloadPath -Root $root -Name $name)
+    $temporary = Resolve-OwnedPayloadPath -Root $root -Name ($name + '.new')
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destinationPath))
     Copy-Item -LiteralPath $Source -Destination $temporary -Force
     $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $ExpectedHash.ToLowerInvariant()) {
@@ -719,29 +756,99 @@ function Remove-OwnedPayloadFiles {
     param([Parameter(Mandatory = $true)][string] $Root)
     if (-not (Test-ValidRootMarker -Root $Root)) { throw "Ownership marker for '$Root' is invalid." }
     $marker = Get-Content -LiteralPath (Join-Path $Root $RootOwnerFileName) -Raw | ConvertFrom-Json
+    $paths = @{}
     foreach ($name in @($marker.OwnedFiles)) {
-        if ([string] $name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or ([string] $name).Contains('..')) { throw 'Owned file name is invalid.' }
-        $path = Join-Path $Root ([string] $name)
+        $path = Resolve-OwnedPayloadPath -Root $Root -Name ([string] $name)
+        if ($paths.ContainsKey($path)) { throw 'Owned file list contains duplicate Windows names.' }
+        $paths[$path] = [string] $name
+    }
+    foreach ($path in @($paths.Keys)) {
+        # Revalidate immediately before deletion; never recurse through a root.
+        [void](Resolve-OwnedPayloadPath -Root $Root -Name $paths[$path])
         if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
     }
+    foreach ($path in @($paths.Keys)) {
+        $parent = Split-Path -Parent $path
+        while ($parent -ne (Get-CanonicalPath $Root) -and $parent.StartsWith((Get-CanonicalPath $Root) + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            [void](Resolve-OwnedPayloadPath -Root $Root -Name $paths[$path])
+            if ((Test-Path -LiteralPath $parent -PathType Container) -and @(Get-ChildItem -LiteralPath $parent -Force).Count -eq 0) {
+                Remove-Item -LiteralPath $parent -Force
+            }
+            $parent = Split-Path -Parent $parent
+        }
+    }
+}
+
+function Assert-RestorationResponse {
+    param([Parameter(Mandatory = $true)] $Response, [Parameter(Mandatory = $true)][string] $RequestId)
+    $properties = @($Response.PSObject.Properties.Name)
+    if ($properties -notcontains 'id' -or [string]$Response.id -cne $RequestId -or
+        ($properties -contains 'error_code' -and -not [string]::IsNullOrEmpty([string]$Response.error_code))) {
+        throw 'The agent restoration response has an invalid request ID or error.'
+    }
+    if ($properties -contains 'version') {
+        if ($Response.version -ne 1 -or $properties -notcontains 'status' -or $null -eq $Response.status) {
+            throw 'The agent restoration protocol version or status is invalid.'
+        }
+        $statusProperties = @($Response.status.PSObject.Properties.Name)
+        if ($statusProperties -notcontains 'state' -or [string]$Response.status.state -cne 'idle' -or
+            ($statusProperties -contains 'error_code' -and -not [string]::IsNullOrEmpty([string]$Response.status.error_code))) {
+            throw 'The agent reported that restoration could not be proven.'
+        }
+    }
+    elseif ($properties -notcontains 'state' -or [string]$Response.state -cnotin @('disconnected', 'prepared')) {
+        throw 'The agent reported that restoration could not be proven.'
+    }
+    # These acknowledgements are necessary, not sufficient: callers still run
+    # Assert-NetworkRestored against adapters, routes, DNS, firewall and journal.
+}
+
+function Read-BoundedPipeFrame {
+    param([Parameter(Mandatory = $true)][IO.Stream] $Stream, [int] $TimeoutMilliseconds = 95000)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $buffer = New-Object byte[] 1024
+    $frame = New-Object IO.MemoryStream
+    try {
+        while ($true) {
+            $remaining = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remaining -le 0) { throw 'Agent restoration response timed out.' }
+            $read = $Stream.ReadAsync($buffer, 0, $buffer.Length)
+            if (-not $read.Wait($remaining)) { throw 'Agent restoration response timed out.' }
+            $count = $read.Result
+            if ($count -eq 0) { throw 'Agent restoration response ended without a newline.' }
+            for ($index = 0; $index -lt $count; $index++) {
+                if ($buffer[$index] -eq 10) {
+                    $utf8 = New-Object Text.UTF8Encoding($false, $true)
+                    return $utf8.GetString($frame.ToArray()).TrimEnd([char]13)
+                }
+                if ($frame.Length -ge 65536) { throw 'Agent restoration response exceeds the frame limit.' }
+                $frame.WriteByte($buffer[$index])
+            }
+        }
+    }
+    finally { $frame.Dispose() }
 }
 
 function Request-ControlledDisconnect {
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service) { return }
-    if ($service.Status -ne 'Running') { Start-Service -Name $ServiceName -ErrorAction Stop }
-    $pipe = New-Object IO.Pipes.NamedPipeClientStream('.', 'RegenBioOverseasAccess', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::None)
+    if ($service.Status -ne 'Running') {
+        # During a major upgrade the new payload is installed but must remain
+        # stopped until the cached old MSI finishes its runtime cleanup.
+        Assert-NetworkRestored
+        return
+    }
+    $pipe = New-Object IO.Pipes.NamedPipeClientStream('.', 'RegenBioOverseasAccess', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
     try {
         $pipe.Connect(5000)
         $writer = New-Object IO.StreamWriter($pipe, (New-Object Text.UTF8Encoding($false)), 1024, $true)
-        $reader = New-Object IO.StreamReader($pipe, (New-Object Text.UTF8Encoding($false)), $false, 1024, $true)
         $writer.AutoFlush = $true
         $requestId = [guid]::NewGuid().ToString('N')
         $writer.WriteLine(([ordered] @{ id = $requestId; action = 'disconnect' } | ConvertTo-Json -Compress))
-        $response = $reader.ReadLine() | ConvertFrom-Json
-        if ($response.id -ne $requestId -or $response.state -ne 'disconnected') {
-            throw 'The agent reported that restoration could not be proven.'
-        }
+        # Legacy request supports the installed 0.1.7 service as well as the
+        # new service; versioned responses are validated separately if present.
+        $response = Read-BoundedPipeFrame -Stream $pipe | ConvertFrom-Json
+        Assert-RestorationResponse -Response $response -RequestId $requestId
     }
     catch {
         throw "Refusing to remove the client because controlled restoration could not be proven: $($_.Exception.Message)"

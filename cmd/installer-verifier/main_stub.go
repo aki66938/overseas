@@ -25,3 +25,4 @@ func (unsupportedTrustVerifier) installFirewall() error   { return errors.New("u
 func (unsupportedTrustVerifier) rollbackFirewall() error  { return errors.New("unsupported") }
 func (unsupportedTrustVerifier) uninstallFirewall() error { return errors.New("unsupported") }
 func (unsupportedTrustVerifier) cleanupRuntime() error    { return errors.New("unsupported") }
+func (unsupportedTrustVerifier) prepareUpgrade() error    { return errors.New("unsupported") }

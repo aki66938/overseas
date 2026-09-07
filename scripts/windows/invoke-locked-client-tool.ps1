@@ -9,7 +9,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+. (Join-Path $PSScriptRoot 'client-payload-tools.ps1')
+$workspace = Get-ClientWorkspace -Repository $repo
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
 
 function Assert-LockedHash {

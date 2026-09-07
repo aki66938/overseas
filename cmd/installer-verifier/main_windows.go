@@ -128,8 +128,30 @@ func (windowsTrustVerifier) verifyBundle(input bundleInput) error {
 	return runPowerShell(verifyBundleScript, input.Bundle, input.MSI, input.FixtureManifest, input.FixtureSignature, input.ReleaseManifest, input.ReleaseSignature, input.ExpectedCommit, input.ExpectedMSISHA256, input.ExpectedFixtureSHA256, input.ExpectedReleaseSHA256, input.FixtureSigner, input.ReleaseSigner, input.MSISigner, input.Evidence)
 }
 
+const safePayloadPathScript = `
+function Resolve-VerifierPayloadPath([string]$Root,[string]$Name) {
+  if($Name -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$'){throw 'Invalid payload name'}
+  foreach($segment in @($Name -split '/')){
+    if($segment.EndsWith('.') -or $segment.Contains('..') -or $segment -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)'){throw 'Invalid payload name'}
+  }
+  $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\')
+  $path=[IO.Path]::GetFullPath((Join-Path $rootPath $Name))
+  if(-not $path.StartsWith($rootPath+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Payload escaped root'}
+  $current=$path
+  while(-not [string]::IsNullOrEmpty($current)){
+    if(Test-Path -LiteralPath $current){
+      $item=Get-Item -LiteralPath $current -Force
+      if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Payload crosses reparse point'}
+      if($current -ne $path -and -not $item.PSIsContainer){throw 'Invalid payload parent'}
+    }
+    $current=Split-Path -Parent $current
+  }
+  return $path
+}
+`
+
 func (windowsTrustVerifier) verifyPayload(input payloadInput) error {
-	const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $manifestBytes=[IO.File]::ReadAllBytes($args[2]); $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$manifestBytes); $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true); $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[3]).Trim())); $cms.CheckSignature($true); if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $args[4].ToUpperInvariant()) { exit 20 }; $manifest=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json; if ($manifest.schema_version -ne 1 -or @($manifest.files).Count -eq 0) { exit 21 }; foreach($entry in @($manifest.files)){ $name=[string]$entry.name; if($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $name.Contains('..')){exit 22}; $root=switch([string]$entry.destination){'program-files'{$args[0]}'program-data'{$args[1]}default{exit 23}}; $path=Join-Path $root $name; if(-not(Test-Path -LiteralPath $path -PathType Leaf)){exit 24}; if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$entry.sha256).ToUpperInvariant()){exit 25}; if($entry.authenticode_required -eq $true){$signature=Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status.ToString() -ne 'Valid' -or $null -eq $signature.SignerCertificate -or @($entry.authenticode_thumbprints|ForEach-Object{$_.ToUpperInvariant()}) -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){exit 26}} }`
+	const script = safePayloadPathScript + `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $manifestBytes=[IO.File]::ReadAllBytes($args[2]); $content=New-Object System.Security.Cryptography.Pkcs.ContentInfo -ArgumentList @(,$manifestBytes); $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms -ArgumentList @($content,$true); $cms.Decode([Convert]::FromBase64String([IO.File]::ReadAllText($args[3]).Trim())); $cms.CheckSignature($true); if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate -or $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant() -ne $args[4].ToUpperInvariant()) { exit 20 }; $manifest=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json; if ($manifest.schema_version -ne 1 -or @($manifest.files).Count -eq 0) { exit 21 }; $names=@{}; foreach($entry in @($manifest.files)){ $name=[string]$entry.name; if($names.ContainsKey($name)){exit 22}; $names[$name]=$true; $root=switch([string]$entry.destination){'program-files'{$args[0]}'program-data'{$args[1]}default{exit 23}}; $path=Resolve-VerifierPayloadPath $root $name; if(-not(Test-Path -LiteralPath $path -PathType Leaf)){exit 24}; if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$entry.sha256).ToUpperInvariant()){exit 25}; if($entry.authenticode_required -eq $true){$signature=Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status.ToString() -ne 'Valid' -or $null -eq $signature.SignerCertificate -or @($entry.authenticode_thumbprints|ForEach-Object{$_.ToUpperInvariant()}) -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()){exit 26}} }`
 	return runPowerShell(script, input.ProgramFiles, input.ProgramData, input.Manifest, input.Signature, input.Thumbprint)
 }
 

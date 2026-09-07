@@ -32,10 +32,17 @@ type trustVerifier interface {
 	rollbackFirewall() error
 	uninstallFirewall() error
 	cleanupRuntime() error
+	prepareUpgrade() error
 }
 
 func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 	switch {
+	case len(args) == 1 && args[0] == "prepare-upgrade":
+		if err := verifier.prepareUpgrade(); err != nil {
+			_, _ = fmt.Fprintln(errorOutput, "upgrade restoration could not be proven")
+			return 1
+		}
+		return 0
 	case validBundleArguments(args):
 		input := bundleInput{
 			Bundle: args[2], MSI: args[4], FixtureManifest: args[6], FixtureSignature: args[8],

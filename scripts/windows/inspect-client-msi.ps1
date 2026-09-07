@@ -8,7 +8,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+. (Join-Path $PSScriptRoot 'client-payload-tools.ps1')
+$workspace = Get-ClientWorkspace -Repository $repo
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
 function Resolve-VerifiedTool([string] $RelativePath, [string] $ExpectedHash) {
     $path = [IO.Path]::GetFullPath((Join-Path $workspace $RelativePath))
@@ -36,9 +37,19 @@ $map = [ordered] @{
     SingBoxLicense='sing-box-LICENSE.txt'; WintunLicense='wintun-LICENSE.txt'; PocRootCert='RegenBio-OverseasAccess-PoC-Root.cer'; TelecomMitmCert='Telecom-GoMITM-Root.cer'; AgentPolicy='agent.yaml'; AgentPolicySignature='agent.yaml.p7s'
     ArtifactManifest='artifact-manifest.json'; ArtifactManifestSignature='artifact-manifest.json.p7s'; ClientSbom='client-sbom.json'; PayloadChecksums='SHA256SUMS'
 }
+$manifest = Get-Content -LiteralPath (Join-Path $StagingPath 'artifact-manifest.json') -Raw | ConvertFrom-Json
+$names = @{}
+foreach ($entry in @($manifest.files)) {
+    $name = [string]$entry.name
+    if ($names.ContainsKey($name)) { throw 'Duplicate Windows name in MSI manifest.' }
+    $names[$name] = $true
+    if (@($map.Values) -cnotcontains $name) {
+        if ($name -cnotmatch '^(flutter_windows\.dll|[A-Za-z0-9_]+_plugin\.dll|native_assets\.json|data/(app\.so|icudtl\.dat|flutter_assets/[A-Za-z0-9_][A-Za-z0-9_./-]*))$' -or $name.Contains('..') -or $name.Contains('//')) { throw 'MSI Flutter payload allowlist mismatch.' }
+        $map[(Get-FlutterPayloadId $name)] = $name
+    }
+}
 $extracted = Get-ChildItem -LiteralPath (Join-Path $output 'files\File') -File
 if (Compare-Object @($map.Keys | Sort-Object) @($extracted.Name | Sort-Object)) { throw 'MSI file-table allowlist mismatch.' }
-$manifest = Get-Content -LiteralPath (Join-Path $StagingPath 'artifact-manifest.json') -Raw | ConvertFrom-Json
 $trustRootNames = @('artifact-manifest.json','artifact-manifest.json.p7s')
 $coveredNames = @($manifest.files | ForEach-Object { [string] $_.name }) + $trustRootNames
 $payloadNames = @($map.Values)

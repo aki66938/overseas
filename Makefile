@@ -4,6 +4,8 @@ CLIENT_MSI ?= dist/OverseasAccessSetup.msi
 CLIENT_RELEASE_MSI ?= dist/OverseasAccessSetup-RELEASE_SIGNED.msi
 SIGNTOOL ?= signtool.exe
 SIGNING_CERT_THUMBPRINT ?=
+CLIENT_VERSION ?= 0.1.8
+TIMESTAMP_URL ?=
 
 .PHONY: test build
 .PHONY: test-integration-preflight test-integration-live build-integration-fixtures
@@ -59,15 +61,16 @@ test-client-install:
 	pwsh -NoProfile -Command "$$result = Invoke-Pester -Script tests/powershell/ClientInstall.Tests.ps1 -PassThru; if ($$result.('Failed'+'Count') -ne 0) { exit 1 }"
 
 prepare-client-payload: build-client-binaries
-	pwsh -NoProfile -File scripts/windows/build-client-artifacts.ps1 -Mode Inspect -OutputDirectory '$(CLIENT_PAYLOAD_DIR)'
+	pwsh -NoProfile -Command ". ./scripts/windows/client-payload-tools.ps1; Invoke-LockedFlutterBuild -Repository (Get-Location).Path -ProductVersion '$(CLIENT_VERSION)'"
+	pwsh -NoProfile -File scripts/windows/build-client-artifacts.ps1 -Mode Inspect -OutputDirectory '$(CLIENT_PAYLOAD_DIR)' -ProductVersion '$(CLIENT_VERSION)'
 
 msi: prepare-client-payload
 	pwsh -NoProfile -Command "New-Item -ItemType Directory -Path (Split-Path -Parent '$(CLIENT_MSI)') -Force | Out-Null"
-	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Wix -ToolArguments @('build','deploy/client/Product.wxs','deploy/client/Files.wxs','-bindpath','$(CLIENT_PAYLOAD_DIR)','-arch','x64','-intermediateFolder','build/wixobj','-pdbtype','none','-out','$(CLIENT_MSI)'); exit $$LASTEXITCODE"
+	pwsh -NoProfile -Command "& '$(LOCKED_CLIENT_TOOL)' -Tool Wix -ToolArguments @('build','deploy/client/Product.wxs','deploy/client/Files.wxs','$(CLIENT_PAYLOAD_DIR).FlutterFiles.wxs','-d','ProductVersion=$(CLIENT_VERSION)','-bindpath','$(CLIENT_PAYLOAD_DIR)','-arch','x64','-intermediateFolder','build/wixobj','-pdbtype','none','-out','$(CLIENT_MSI)'); exit $$LASTEXITCODE"
 
 inspect-msi: msi
 	pwsh -NoProfile -File scripts/windows/inspect-client-msi.ps1 -MsiPath '$(CLIENT_MSI)' -StagingPath '$(CLIENT_PAYLOAD_DIR)'
 
 release-msi:
 	pwsh -NoProfile -Command "if ('$(SIGNING_CERT_THUMBPRINT)' -notmatch '^[A-Fa-f0-9]{40}$$') { throw 'SIGNING_CERT_THUMBPRINT is required for release-msi.' }"
-	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_RELEASE_MSI)'
+	pwsh -NoProfile -File scripts/windows/publish-client-release.ps1 -SigningCertificateThumbprint '$(SIGNING_CERT_THUMBPRINT)' -SignToolPath '$(SIGNTOOL)' -FinalMsiPath '$(CLIENT_RELEASE_MSI)' -ReleaseVersion '$(CLIENT_VERSION)' -TimestampUrl '$(TIMESTAMP_URL)'

@@ -39,6 +39,8 @@
       </Component>
 
       <Component Id="ClientUi" Guid="E22BA95A-6552-44AD-A61E-A8F21BE85A1C" Bitness="always64">
+        <!-- Flutter runner retains the historical install path/component identity.
+             DLL and data components come from the validated FlutterFiles fragment. -->
         <File Id="ClientExe" Source="overseas-client.exe" KeyPath="yes" Checksum="yes">
           <Shortcut
               Id="StartMenuShortcut"

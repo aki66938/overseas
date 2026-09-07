@@ -6,9 +6,33 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestInstalledVerifierResolvesNestedPayloadWithoutWindowsAliases(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "data", "flutter_assets", "font.otf")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("font"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := runPowerShell(safePayloadPathScript+`
+$path=Resolve-VerifierPayloadPath $args[0] 'data/flutter_assets/font.otf'
+if([IO.File]::ReadAllText($path)-cne'font'){throw 'nested payload missing'}
+foreach($name in @('../foreign','data/../foreign','data\\font','data//font','data/NUL.txt','data/font.','data/font:ads')){
+  $failed=$false
+  try{$null=Resolve-VerifierPayloadPath $args[0] $name}catch{$failed=$true}
+  if(-not $failed){throw 'unsafe path accepted'}
+}
+`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestRunPowerShellReceivesExactArguments(t *testing.T) {
 	err := runPowerShell(`if($args.Count-ne 2-or$args[0]-cne'path with spaces'-or$args[1]-cne'ABC123'){exit 19}`, "path with spaces", "ABC123")

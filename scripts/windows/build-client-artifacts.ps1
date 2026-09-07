@@ -7,18 +7,22 @@ param(
     [string] $SigningCertificateThumbprint,
     [string] $SignToolPath = 'signtool.exe',
     [string] $FirstPartyBinaryDirectory,
-    [version] $ProductVersion = [version] '0.1.7'
+    [string] $FlutterRuntimeDirectory,
+    [string] $TimestampUrl,
+    [version] $ProductVersion = [version] '0.1.8'
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+. (Join-Path $PSScriptRoot 'client-payload-tools.ps1')
+if ($ProductVersion -le [version]'0.1.7' -or $ProductVersion.Revision -gt 0) { throw 'Flutter candidate version must be newer than 0.1.7 and use three MSI version fields.' }
 $finalTarget = [IO.Path]::GetFullPath((Join-Path $repo $OutputDirectory))
 $temporary = if ($Mode -eq 'Release') { $finalTarget + '.release-' + [guid]::NewGuid().ToString('N') + '.tmp' } else { $finalTarget }
 $target = $temporary
 if (-not $target.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe artifact output directory.' }
 $lock = Get-Content -LiteralPath (Join-Path $repo 'deploy\client\build-lock.json') -Raw | ConvertFrom-Json
-$workspace = [IO.Path]::GetFullPath((Join-Path $repo '..\..\..'))
+$workspace = Get-ClientWorkspace -Repository $repo
 $goExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.go.executable_path))
 $wixPackages = Join-Path $workspace ('.tools\wix' + $lock.wix.version)
 $wixExecutable = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.executable_path))
@@ -28,10 +32,15 @@ $iisExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.iis_exten
 $dtf = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.dtf_path))
 $certificate = $null
 if ($Mode -eq 'Release') {
+    if ($TimestampUrl -notmatch '^https://[^\s]+$') { throw 'Release requires an explicit trusted HTTPS timestamp service.' }
     if ($SigningCertificateThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Release requires a corporate signing certificate thumbprint.' }
     $certificate = @(Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $SigningCertificateThumbprint -and $_.HasPrivateKey })
     if ($certificate.Count -ne 1) { throw 'Release signing certificate is absent or ambiguous.' }
 }
+if ([string]::IsNullOrWhiteSpace($FlutterRuntimeDirectory)) { $FlutterRuntimeDirectory = Join-Path $repo 'apps/regen_access/build/windows/x64/runner/Release' }
+$flutterInventory = @(Get-FlutterPayloadInventory -Root $FlutterRuntimeDirectory)
+$flutterVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $FlutterRuntimeDirectory 'regen_access.exe'))
+if ($flutterVersion.FileMajorPart -ne $ProductVersion.Major -or $flutterVersion.FileMinorPart -ne $ProductVersion.Minor -or $flutterVersion.FileBuildPart -ne $ProductVersion.Build) { throw 'Flutter executable version differs from the candidate package version. Build Flutter with --build-name first.' }
 $workingTreeStatus = @(& git -C $repo status --porcelain --untracked-files=normal)
 if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the Git worktree.' }
 if ($workingTreeStatus.Count -ne 0) { throw 'Artifact builds require a clean Git worktree.' }
@@ -115,8 +124,14 @@ $copies = @{
     'sing-box.manifest.json' = 'sing-box.manifest.json'
 }
 foreach ($name in @($copies.Keys | Sort-Object)) { Copy-Item -LiteralPath (Join-Path $repo $copies[$name]) -Destination (Join-Path $target $name) }
-foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')) {
+foreach ($name in @('overseas-agent.exe', 'installer-verifier.exe')) {
     Copy-Item -LiteralPath (Join-Path $firstPartyRoot $name) -Destination (Join-Path $target $name)
+}
+foreach ($file in $flutterInventory) {
+    $name = if ($file.Name -ceq 'regen_access.exe') { 'overseas-client.exe' } else { $file.Name }
+    $destination = Join-Path $target $name
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+    Copy-Item -LiteralPath $file.FullName -Destination $destination
 }
 $coreRoot = Join-Path $scratch ('core\sing-box-' + $lock.sing_box.version + '-windows-amd64')
 Copy-Item -LiteralPath (Join-Path $coreRoot 'sing-box.exe') -Destination (Join-Path $target 'sing-box.exe')
@@ -130,18 +145,22 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\deploy\client\Telecom-GoM
 $wintunSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $target 'wintun.dll')
 if ($wintunSignature.Status -ne 'Valid' -or $wintunSignature.SignerCertificate.Thumbprint.ToLowerInvariant() -ne $lock.wintun.dll_signer_thumbprint) { throw 'Wintun signature mismatch.' }
 
+$harnessPath = Join-Path $target 'install-client.ps1'
+$harness = [IO.File]::ReadAllText($harnessPath)
+# Keep the candidate harness version identical to MSI and Flutter resources.
+$harness = [regex]::Replace($harness, '(?m)^\$ProductVersion = \[version\] ''[0-9.]+''', ('$ProductVersion = [version] ''' + $ProductVersion + ''''))
+$firstParty = @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe') + @($flutterInventory | Where-Object { $_.Name -match '\.dll$' } | ForEach-Object { $_.Name })
 if ($Mode -eq 'Release') {
-    $harnessPath = Join-Path $target 'install-client.ps1'
-    $harness = [IO.File]::ReadAllText($harnessPath)
     $sentinel = '0000000000000000000000000000000000000000'
     if (-not $harness.Contains($sentinel)) { throw 'Installer harness trust-anchor sentinel is absent.' }
     [IO.File]::WriteAllText($harnessPath, $harness.Replace($sentinel, $SigningCertificateThumbprint.ToUpperInvariant()), (New-Object Text.UTF8Encoding($false)))
     Write-DetachedCms -ContentPath (Join-Path $target 'agent.yaml') -SignaturePath (Join-Path $target 'agent.yaml.p7s')
-    foreach ($name in @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')) {
-        & $SignToolPath sign /fd SHA256 /sha1 $SigningCertificateThumbprint (Join-Path $target $name) | Out-Null
+    foreach ($name in $firstParty) {
+        & $SignToolPath sign /fd SHA256 /tr $TimestampUrl /td SHA256 /sha1 $SigningCertificateThumbprint (Join-Path $target $name) | Out-Null
         if (-not $? -or $LASTEXITCODE -ne 0) { throw "Authenticode signing failed for '$name'." }
     }
 }
+else { [IO.File]::WriteAllText($harnessPath, $harness, (New-Object Text.UTF8Encoding($false))) }
 
 $sourceCommit = (& git -C $repo rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[a-f0-9]{40}$') { throw 'Could not bind artifacts to the Git commit.' }
@@ -153,17 +172,18 @@ $sbom = [ordered] @{
     )
 }
 [IO.File]::WriteAllText((Join-Path $target 'client-sbom.json'), ($sbom | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
-$sumLines = @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name })
+Remove-Item -LiteralPath $scratch -Recurse -Force
+$sumLines = @(Get-ChildItem -LiteralPath $target -Recurse -File | Sort-Object FullName | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($target.Length + 1).Replace('\', '/') })
 [IO.File]::WriteAllLines((Join-Path $target 'SHA256SUMS'), $sumLines, (New-Object Text.UTF8Encoding($false)))
 $dataNames = @('agent.yaml', 'agent.yaml.p7s', 'artifact-manifest.json', 'artifact-manifest.json.p7s', 'client-sbom.json', 'SHA256SUMS')
-$firstParty = @('overseas-agent.exe', 'overseas-client.exe', 'installer-verifier.exe')
 $files = @()
-foreach ($item in @(Get-ChildItem -LiteralPath $target -File | Sort-Object Name)) {
-    $required = $item.Name -eq 'wintun.dll' -or ($Mode -eq 'Release' -and $firstParty -contains $item.Name)
+foreach ($item in @(Get-ChildItem -LiteralPath $target -Recurse -File | Sort-Object FullName)) {
+    $name = $item.FullName.Substring($target.Length + 1).Replace('\', '/')
+    $required = $name -eq 'wintun.dll' -or ($Mode -eq 'Release' -and $firstParty -contains $name)
     $allowed = @()
     if ($required) { $allowed = @($(if ($item.Name -eq 'wintun.dll') { $lock.wintun.dll_signer_thumbprint } else { $SigningCertificateThumbprint.ToLowerInvariant() })) }
     $files += [ordered] @{
-        name = $item.Name; destination = $(if ($dataNames -contains $item.Name) { 'program-data' } else { 'program-files' })
+        name = $name; destination = $(if ($dataNames -contains $name) { 'program-data' } else { 'program-files' })
         sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         authenticode_required = $required; authenticode_thumbprints = $allowed
     }
@@ -179,12 +199,12 @@ if ($Mode -eq 'Release') {
 }
 else { [IO.File]::WriteAllText($signaturePath, 'INSPECT-ONLY-NOT-SIGNED', [Text.Encoding]::ASCII) }
 
-Remove-Item -LiteralPath $scratch -Recurse -Force
 if ($Mode -eq 'Release') {
     if (Test-Path -LiteralPath $finalTarget) { throw 'Final release path already exists.' }
     [IO.Directory]::Move($temporary, $finalTarget) # atomic publish on one volume
     $target = $finalTarget
 }
+Write-FlutterWixFragment -Inventory $flutterInventory -Path ($target + '.FlutterFiles.wxs')
 [ordered] @{ mode = $Mode; source_commit = $sourceCommit; output = $target; signing_thumbprint = $(if ($certificate) { $certificate[0].Thumbprint } else { $null }) } | ConvertTo-Json -Compress
 }
 finally {
