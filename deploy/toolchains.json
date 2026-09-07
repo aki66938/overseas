@@ -20,6 +20,13 @@
     "windows_manifest": "sing-box.manifest.json",
     "apple_library_verified": false
   },
+  "visual_studio_build_tools": {
+    "version": "17.14.39",
+    "installation_version": "17.14.37614.0",
+    "workload": "Microsoft.VisualStudio.Workload.VCTools",
+    "bootstrapper_sha256": "236367b68ba9a51708263ab10a1c85546cc4a8eca78b365168811d19c4fb2f29",
+    "installation_verified": true
+  },
   "xcode": {
     "version": null,
     "verified": false
