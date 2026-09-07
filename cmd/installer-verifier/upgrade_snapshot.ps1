@@ -5,6 +5,8 @@ if (-not ('RegenBioUpgradeFileIdentity' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class RegenBioUpgradeFileIdentity {
@@ -18,6 +20,64 @@ public static class RegenBioUpgradeFileIdentity {
         Information info;
         if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
         return info.Volume.ToString("x8") + info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8");
+    }
+    public static uint Attributes(SafeFileHandle handle) {
+        Information info;
+        if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return info.Attributes;
+    }
+}
+public sealed class RegenBioUpgradeDirectoryGuard : IDisposable {
+    [StructLayout(LayoutKind.Sequential)] private struct SecurityAttributes {
+        public int Length; public IntPtr Descriptor; public int Inherit;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern bool CreateDirectoryW(string path, ref SecurityAttributes security);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor);
+    private readonly string path;
+    private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
+    private SafeFileHandle Open(string name, uint access) {
+        // BACKUP_SEMANTICS | OPEN_REPARSE_POINT; READ|WRITE sharing, NOT DELETE.
+        SafeFileHandle handle = CreateFileW(name, access, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (handle.IsInvalid) { int error=Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error); }
+        try {
+            uint attributes=RegenBioUpgradeFileIdentity.Attributes(handle);
+            if ((attributes & 0x400)!=0) throw new IOException("Snapshot directory is a reparse point.");
+            if ((attributes & 0x10)==0) throw new IOException("Snapshot path is not a directory.");
+            handles.Add(handle); return handle;
+        } catch { handle.Dispose(); throw; }
+    }
+    public RegenBioUpgradeDirectoryGuard(string target) {
+        path=Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar);
+        List<string> ancestors=new List<string>();
+        for (DirectoryInfo item=Directory.GetParent(path); item!=null; item=item.Parent) ancestors.Add(item.FullName);
+        ancestors.Reverse();
+        // FILE_LIST_DIRECTORY makes the no-delete sharing reservation effective;
+        // metadata-only access does not prevent a concurrent directory rename.
+        try { foreach (string ancestor in ancestors) Open(ancestor,0x20081); }
+        catch { Dispose(); throw; }
+    }
+    public void Protect(byte[] descriptor, bool createNew) {
+        if (createNew) {
+            GCHandle pinned=GCHandle.Alloc(descriptor,GCHandleType.Pinned);
+            try {
+                SecurityAttributes security=new SecurityAttributes { Length=Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=pinned.AddrOfPinnedObject(), Inherit=0 };
+                // Existing directory is a conflict, never an ownership claim.
+                if (!CreateDirectoryW(path,ref security)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            } finally { pinned.Free(); }
+            Open(path,0x20081);
+        } else {
+            SafeFileHandle handle=Open(path,0xE0081);
+            // Owner/group/DACL + protected DACL, applied to the checked handle.
+            if (!SetKernelObjectSecurity(handle,0x80000007,descriptor)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+    public void Dispose() {
+        for (int i=handles.Count-1;i>=0;i--) handles[i].Dispose();
+        handles.Clear();
     }
 }
 '@
@@ -150,11 +210,18 @@ function Publish-SnapshotRestoreFile([string]$Temporary,[string]$Target) {
     else { [IO.File]::Move($Temporary,$Target) }
 }
 
-function Set-SnapshotDirectoryProtection([string]$Path) {
+function Set-SnapshotDirectoryProtection([string]$Path,[switch]$CreateNew,[switch]$RequireProtectedParent) {
+    Assert-SnapshotOrdinaryPath $Path
+    if ((Test-Path -LiteralPath $Path) -and -not (Get-Item -LiteralPath $Path -Force).PSIsContainer) { throw 'Snapshot path is not a directory.' }
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
-    Set-Acl -LiteralPath $Path -AclObject $acl
-    Assert-SnapshotDirectoryProtection $Path
+    $guard = New-Object RegenBioUpgradeDirectoryGuard($Path)
+    try {
+        if ($RequireProtectedParent) { Assert-SnapshotDirectoryProtection (Split-Path -Parent $Path) }
+        $guard.Protect($acl.GetSecurityDescriptorBinaryForm(),[bool]$CreateNew)
+        Assert-SnapshotDirectoryProtection $Path
+    }
+    finally { $guard.Dispose() }
 }
 
 function Assert-SnapshotDirectoryProtection([string]$Path) {
@@ -303,16 +370,14 @@ function Invoke-UpgradeSnapshot {
         if ($firewall.journal_present) { $owned += 'msi-firewall-owned.json' }
         $parent = Split-Path -Parent $SnapshotRoot
         if (-not (Test-Path -LiteralPath $parent)) {
-            [void][IO.Directory]::CreateDirectory($parent)
-            Set-SnapshotDirectoryProtection $parent
+            Set-SnapshotDirectoryProtection $parent -CreateNew
         }
         else { Assert-SnapshotDirectoryProtection $parent }
         $transaction = [guid]::NewGuid().ToString('N')
         $entropy = [Text.Encoding]::UTF8.GetBytes($transaction)
         $created = @()
-        [void][IO.Directory]::CreateDirectory($SnapshotRoot)
+        Set-SnapshotDirectoryProtection $SnapshotRoot -CreateNew -RequireProtectedParent
         try {
-            Set-SnapshotDirectoryProtection $SnapshotRoot
             if (@(Get-ChildItem -LiteralPath $SnapshotRoot -Force).Count) { throw 'Foreign snapshot content appeared before backup.' }
             $records = @()
             foreach ($name in $owned) {

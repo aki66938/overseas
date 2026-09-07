@@ -567,3 +567,57 @@ artifact with exit1; no real MSI product lifecycle action or certificate operati
 The three classified decompilation warnings remain; all actual database assertions
 passed, including sole ignored commit and rollback-disabled/cost-policy safeguards.
 This append is documentation only; artifact provenance remains the code commit above.
+
+### Bounded directory ACL write hardening (post-review)
+
+The original real-junction test was already GREEN: external target ACL mutation
+was not reproduced. Two additional tests demonstrated the actual defects: ACL
+mutation was invoked before junction validation, and an ordinary foreign file
+was accepted and its ACL changed. Focused RED: 17 passed / 2 failed. A local
+native directory guard replaces path-based Set-Acl: no-follow directory handles
+are checked before handle-bound security mutation; new directories receive the
+protected SYSTEM/Admin descriptor atomically through CreateDirectoryW security
+attributes, and AlreadyExists is a conflict, not ownership proof.
+
+Native isolated tests initially exposed another real boundary (20/21): metadata
+access alone did not block ancestor rename despite omitted delete sharing.
+Adding FILE_LIST_DIRECTORY yielded 21/21, with rename denied while handles are
+held and allowed after disposal. A junction introduced after acquiring ancestor
+handles is rejected without changing the external ACL. Both existing-directory
+conflict ACL and ordinary-file ACL/content remain unchanged. Leaf handles use
+the same effective sharing reservation. No shared RegenBio parent ACL is changed.
+Snapshot-root creation additionally validates its protected parent while ancestor
+handles are held. These guarantees cover this creation/ACL operation, not a claim
+that all installer path I/O is globally race-free or arbitrary fresh-device ACLs
+have been accepted. Privileged ACL tampering is outside this boundary.
+
+Primary API contracts consulted:
+[CreateDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createdirectoryw),
+[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+[SetKernelObjectSecurity](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setkernelobjectsecurity).
+All native filesystem/ACL tests use isolated Pester TestDrive directories only;
+there were no actual product ACL, certificate, service, network or MSI mutations.
+
+Commands (from the worktree; explicit Pester 3.4.0, not another major):
+
+```powershell
+Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'
+$r = Invoke-Pester tests/powershell/UpgradeSnapshot.Tests.ps1 -PassThru -Quiet
+$r = Invoke-Pester tests/powershell -PassThru -Quiet
+Write-Output "Passed=$($r.PassedCount) Failed=$($r.FailedCount)"
+if ($r.FailedCount) { exit 1 }
+# Same full-suite body passed to Windows PowerShell 5.1 -NoProfile -Command.
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' test ./cmd/installer-verifier -count=1
+git diff --check
+```
+
+Focused 21/21 and initial full PowerShell 7 194/194 passed; Go verifier passed
+(12.994s). Final both-engine rerun after applying effective leaf sharing is
+recorded below. Existing signed/native lifecycle gates remain pending; this is
+only the bounded ACL fix, not a new claim of Task8 lifecycle completion.
+
+Final fresh leaf-sharing validation: PowerShell 7 **194/194**, Windows PowerShell
+5.1 **194/194**, both exit0. Go verifier **pass (12.481s)**, exit0. `git diff
+--check` passed (only Git's existing LF-to-CRLF working-copy notices). Self-review
+kept this change to the embedded helper, two creation callers and five focused
+tests; no MSI sequence, cleanup protocol or runtime transaction changes.

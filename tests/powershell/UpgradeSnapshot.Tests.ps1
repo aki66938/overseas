@@ -204,4 +204,68 @@ Describe 'Protected MSI upgrade snapshot' {
         (Test-Path ($snapshot + '.cleanup.json')) | Should Be $false
         Invoke-UpgradeSnapshot -Mode Rollback -DataRoot $data -SnapshotRoot $snapshot
     }
+
+    It 'refuses a junction before changing the external directory ACL' {
+        $external = Join-Path $TestDrive ('external-' + [guid]::NewGuid().ToString('N'))
+        $junction = Join-Path $TestDrive ('acl-link-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($external)
+        $beforeAcl = (Get-Acl -LiteralPath $external).Sddl
+        New-Item -ItemType Junction -Path $junction -Target $external | Out-Null
+        try {
+            (Get-SnapshotFailure { Set-SnapshotDirectoryProtection $junction }) | Should Match 'reparse'
+            (Get-Acl -LiteralPath $external).Sddl | Should Be $beforeAcl
+        }
+        finally { [IO.Directory]::Delete($junction) }
+    }
+
+    It 'checks a junction before invoking any directory ACL mutation' {
+        $external = Join-Path $TestDrive ('external-' + [guid]::NewGuid().ToString('N'))
+        $junction = Join-Path $TestDrive ('acl-link-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($external)
+        New-Item -ItemType Junction -Path $junction -Target $external | Out-Null
+        Mock Set-Acl { throw 'ACL mutation reached before validation' } -ParameterFilter { $LiteralPath -eq $junction }
+        try { (Get-SnapshotFailure { Set-SnapshotDirectoryProtection $junction }) | Should Match 'reparse' }
+        finally { [IO.Directory]::Delete($junction) }
+    }
+
+    It 'refuses an ordinary file without changing its ACL or contents' {
+        $file = Join-Path $TestDrive ('ordinary-' + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($file,'foreign file')
+        $beforeAcl = (Get-Acl -LiteralPath $file).Sddl
+        (Get-SnapshotFailure { Set-SnapshotDirectoryProtection $file }) | Should Match 'directory'
+        (Get-Acl -LiteralPath $file).Sddl | Should Be $beforeAcl
+        [IO.File]::ReadAllText($file) | Should Be 'foreign file'
+    }
+
+    It 'rejects an already existing directory instead of claiming it during atomic creation' {
+        $foreign = Join-Path $TestDrive ('precreated-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($foreign)
+        $beforeAcl = (Get-Acl -LiteralPath $foreign).Sddl
+        (Get-SnapshotFailure { Set-SnapshotDirectoryProtection $foreign -CreateNew }) | Should Not Be ''
+        (Get-Acl -LiteralPath $foreign).Sddl | Should Be $beforeAcl
+        $created = Join-Path $TestDrive ('atomic-' + [guid]::NewGuid().ToString('N'))
+        Set-SnapshotDirectoryProtection $created -CreateNew
+        Assert-SnapshotDirectoryProtection $created
+    }
+
+    It 'holds ancestors against rename and rejects a late junction before handle-bound ACL mutation' {
+        $parent = Join-Path $TestDrive ('locked-parent-' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $parent 'target'
+        $external = Join-Path $TestDrive ('late-external-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($parent)
+        [void][IO.Directory]::CreateDirectory($external)
+        $beforeAcl = (Get-Acl -LiteralPath $external).Sddl
+        $guard = New-Object RegenBioUpgradeDirectoryGuard($target)
+        try {
+            (Get-SnapshotFailure { [IO.Directory]::Move($parent,$parent + '-moved') }) | Should Not Be ''
+            New-Item -ItemType Junction -Path $target -Target $external | Out-Null
+            $acl = New-Object Security.AccessControl.DirectorySecurity
+            $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+            (Get-SnapshotFailure { $guard.Protect($acl.GetSecurityDescriptorBinaryForm(),$false) }) | Should Match 'reparse'
+            (Get-Acl -LiteralPath $external).Sddl | Should Be $beforeAcl
+        }
+        finally { $guard.Dispose(); if (Test-Path -LiteralPath $target) { [IO.Directory]::Delete($target) } }
+        [IO.Directory]::Move($parent,$parent + '-moved')
+        (Test-Path ($parent + '-moved')) | Should Be $true
+    }
 }
