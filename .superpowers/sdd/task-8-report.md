@@ -551,3 +551,19 @@ passed30 files; previous extension/ACL decompilation warnings remain classified
 above. Core/runtime code was unchanged by this small follow-up. The completed review
 fix is commit6a4a2e5 plus this rollback-policy guard commit; a new exact-source
 inspect-only artifact is rebuilt after this commit, not from the authoring fixture.
+
+### Review-fixed exact-source artifact
+
+Fresh Go binaries, staging and WiX MSI built from clean code commit
+**a126d5756830a9ef765d379be2bfadaf2b28ca40** using the build/extract commands recorded
+above. All commands exited0; default ICE validation passed. Final inspection:
+30 files, mode inspect, source_commita126d5756830a9ef765d379be2bfadaf2b28ca40,
+MSI SHA256 **6DCF41B764E949F5251D92C54E5038C7BC6AC75BFBB6CB81127F52CC75048050**.
+The exact package contains the fixed reservation/cleanup implementation and new
+rollback gates, unlike the earlier authoring-only fixture. Same local paths:
+`dist/Task8-0.1.8-INSPECT_ONLY.msi`, `build/task8-inspect`,
+`build/task8-msi-inspection`. Read-only package verifier again refused the unsigned
+artifact with exit1; no real MSI product lifecycle action or certificate operation.
+The three classified decompilation warnings remain; all actual database assertions
+passed, including sole ignored commit and rollback-disabled/cost-policy safeguards.
+This append is documentation only; artifact provenance remains the code commit above.
