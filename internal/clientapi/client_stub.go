@@ -8,6 +8,8 @@ import (
 	"net"
 )
 
+// Shared protocol decoding remains available; only this native transport
+// capability is unsupported until a platform-specific adapter is supplied.
 func defaultDialPipe(context.Context, string) (net.Conn, error) {
 	return nil, fmt.Errorf("%w: named pipes require Windows", ErrServiceUnavailable)
 }

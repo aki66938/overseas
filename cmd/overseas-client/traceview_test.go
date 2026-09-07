@@ -8,6 +8,15 @@ import (
 	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
+func viewTraceEvent(sequence, generation uint64, stage, event string, residue *traceevent.Residue) traceevent.Event {
+	return traceevent.Event{
+		SchemaVersion: traceevent.SchemaVersion, Sequence: sequence,
+		TimestampUTC: time.Date(2026, 9, 1, 8, 0, int(sequence%60), 0, time.UTC),
+		Generation:   generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentNetwork,
+		Stage: stage, Event: event, Message: "test event", Residue: residue,
+	}
+}
+
 func TestFormatTraceTimelineShowsLevelsStagesDetailsAndGenerations(t *testing.T) {
 	elapsed := int64(37)
 	residue := traceevent.Residue{ManagedRules: 23, Snapshot: true, SnapshotPhase: "protected"}

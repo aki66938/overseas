@@ -1,12 +1,16 @@
 name: build
 on:
   push:
-    branches: [main, feature/windows-forwarding-poc]
+    branches: [main, feature/windows-forwarding-poc, feature/cross-platform]
+  pull_request:
   workflow_dispatch:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    env:
+      # Live host networking changes require a separate, explicitly authorized gate.
+      OVERSEAS_ACCESS_NETWORK_GATE: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -24,3 +28,20 @@ jobs:
           path: |
             bin/overseas-agent.exe
             bin/overseas-client.exe
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    env:
+      OVERSEAS_ACCESS_NETWORK_GATE: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+      - name: Native shared core and protocol tests
+        run: go test ./... -count=1
+      - name: Native build
+        run: go build ./...

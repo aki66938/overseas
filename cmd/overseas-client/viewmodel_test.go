@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -558,15 +560,6 @@ func TestViewModelCopyLogsUsesLocalEventsWithoutDiagnosticsCall(t *testing.T) {
 	}
 	if !strings.Contains(clipboard.text(), "Generation 8") || indexOf(client.calls(), "diagnostics") >= 0 {
 		t.Fatalf("clipboard=%q calls=%v", clipboard.text(), client.calls())
-	}
-}
-
-func viewTraceEvent(sequence, generation uint64, stage, event string, residue *traceevent.Residue) traceevent.Event {
-	return traceevent.Event{
-		SchemaVersion: traceevent.SchemaVersion, Sequence: sequence,
-		TimestampUTC: time.Date(2026, 9, 1, 8, 0, int(sequence%60), 0, time.UTC),
-		Generation:   generation, Level: traceevent.LevelInfo, Component: traceevent.ComponentNetwork,
-		Stage: stage, Event: event, Message: "test event", Residue: residue,
 	}
 }
 
