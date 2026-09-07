@@ -421,3 +421,23 @@ Decompilation warnings retained and investigated:
   CreateFolder / D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA). CreateFolder contains matching
   INSTALLFOLDER→InstallFolderAcl and DATAFOLDER→DataFolderAcl rows. We do not rebuild
   from this lossy decompiled XML. Native application of ACLs remains a pilot gate.
+
+### Exact-source inspect artifact receipt
+
+Rebuilt both Go binaries and staged/built/extracted with the same commands above
+from clean code commit **96751f5f05724886bdefe171f2133feeca0a23de**. All exited0;
+WiX default validation passed. Final inspector: 30 payload files, mode inspect,
+source_commit96751f5f05724886bdefe171f2133feeca0a23de,
+MSI SHA256 **49AA52F2EDD5A5118A014B56C29D8B79F86CAB28F72E7B9281E81147CD36E57C**.
+Artifact: `dist/Task8-0.1.8-INSPECT_ONLY.msi`; staging `build/task8-inspect`;
+extraction `build/task8-msi-inspection`. The same three explained decompilation
+warnings remain. All outputs are ignored local artifacts, not a formal release.
+
+Executed only the read-only verifier gate:
+```powershell
+& ./bin/installer-verifier.exe package --msi ((Resolve-Path dist/Task8-0.1.8-INSPECT_ONLY.msi).Path) --thumbprint 0000000000000000000000000000000000000000
+```
+Expected fail-closed refusal confirmed exit1 (`installer trust verification failed`).
+No msiexec product install/upgrade/uninstall was performed. Fresh full PowerShell7
+under StrictMode2.0 also passed181/181 after the test mock correction. This receipt
+is a documentation-only follow-up: it does not change the artifact's code provenance.
