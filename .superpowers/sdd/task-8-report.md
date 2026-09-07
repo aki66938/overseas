@@ -210,3 +210,67 @@ Strict TDD evidence:
 - `go test -count=1 ./...`: all packages passed.
 - `go vet ./...`: exit 0.
 - No live or privileged firewall mutation was performed; the behavioral tests execute the extracted production lifecycle script with isolated mocks.
+
+---
+
+# Task 8 implementation evidence
+
+## 2026-09-07 — first implementation slice (candidate, not accepted release)
+
+Read task-8-brief/context/preflight first, TDD skill and implementer template.
+No developer-machine installed product/service, remote host, certificate store, private key,
+or production network mutations performed. No release signing performed.
+
+Implemented so far: bounded asynchronous restoration response (95s total / 64KiB),
+legacy disconnected/prepared and version-one idle validation, request/error checks;
+stopped services require independent real residue proof and are not started by old removal.
+Nested owned paths reject traversal, ADS, DOS names, alternate separators, trailing
+dots/spaces, duplicate Windows names and reparse ancestry. Cleanup removes only listed
+files and empty ancestors; foreign content remains. The embedded installed verifier now
+resolves nested paths and rejects duplicate names. Flutter inventory emits stable one-file
+WiX components, preserving overseas-client.exe and its existing GUID; candidate version
+0.1.8 is bound to native Flutter PE resources, manifest and MSI. Flutter toolchain checked
+against deploy/toolchains.json. Release recipe builds Flutter, signs its DLLs and exe, keeps
+upstream Wintun signer, and requires explicit HTTPS timestamp service. These are recipe
+changes only; short-lived signing identity remains unqualified for formal release.
+
+TDD commands (cwd `.worktrees/cross-platform`):
+
+```powershell
+Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'
+Invoke-Pester tests/powershell/ClientUpgrade.Tests.ps1 -EnableExit
+Invoke-Pester tests/powershell/ClientPayloadPaths.Tests.ps1 -EnableExit
+Invoke-Pester tests/powershell/FlutterPackage.Tests.ps1 -EnableExit
+& C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe test ./cmd/installer-verifier -run TestInstalledVerifierResolvesNestedPayloadWithoutWindowsAliases -count=1
+& C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe test ./cmd/installer-verifier -run TestRunPreparesUpgradeAndPropagatesRestorationFailure -count=1
+```
+
+RED: restoration 0/4 (helpers absent), path ownership 0/4 (flat-path rejection and
+no nested cleanup), extended inventory 4/6 (missing manifest helper), nested copy 6/7
+(missing destination parent), Flutter 0/4 (missing inventory/authoring and legacy build),
+stopped service 6/7 (unwanted Start-Service), Go nested resolver undefined constant,
+Go prepare-upgrade returned exit2 with zero dispatch. GREEN: restoration7/7,
+paths7/7, Flutter4/4, both focused Go tests pass. Pester3 Should Throw is unreliable on
+PS7 here; tests use the repository's explicit try/catch failure-message pattern.
+
+Full regression before this slice: PS7 Pester161/161, PS5.1 Pester161/161.
+PS7 command: `Import-Module .../Pester/3.4.0/Pester.psd1; Invoke-Pester tests/powershell -PassThru -Quiet`
+PS5.1: `C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'; Invoke-Pester tests/powershell -EnableExit"`
+Go: explicit go1.27.0 `test ./cmd/installer-verifier -count=1` PASS 11.383s;
+signed-MSI input integration test retains its existing absent-input skip.
+Flutter: `CI=true; . ./scripts/windows/client-payload-tools.ps1; Invoke-LockedFlutterBuild -Repository (Get-Location).Path -ProductVersion 0.1.8`
+PASS native Windows release build 28.8s, dependency lock enforced. Four informational
+newer-dependency notices; no dependency upgrades. No GUI acceptance performed.
+
+Upgrade architecture remains separate pending work: changing only the new harness does
+not fix old cached MSI early removal. Parent's per-user dummy-MSI fixture established
+shared component Action Null and two-flush built-in rollback semantics; it did not exercise
+our service, IIS certificate action or runtime cleanup. Old runtime-cleanup destroys owned
+credential.bin/sing-box.json without rollback, requiring protected ciphertext-only snapshot,
+restore, rollback and commit cleanup. Parent approved that extension. Formal sequence and
+certificate changes are intentionally not included in this first slice. Native actual
+0.1.7 upgrade/rollback/uninstall/clean install gates remain pending.
+
+Self-review: first slice is coherent for inspect-only packaging; no claim that normal
+upgrade works yet. MSI extraction still to run after a clean scoped commit because the
+builder requires a clean source tree. Additional full Go/platform checks follow final slice.
