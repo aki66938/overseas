@@ -362,7 +362,13 @@ Describe 'Transactional Windows client installer' {
         $product | Should Match '<CustomAction[^>]*Id="MsiSafeRemove"[^>]*Execute="deferred"[^>]*Impersonate="no"[^>]*Return="check"'
         $product | Should Match '<SetProperty[^>]*Id="MsiSafeRemove"[^>]*-MsiPreRemove'
         $product | Should Match '<Custom[^>]*Action="MsiSafeRemove"[^>]*Before="StopServices"'
-        $product | Should Not Match 'NOT\s+UPGRADINGPRODUCTCODE'
+        [xml]$authoring = $product
+        foreach ($action in @($authoring.Wix.Package.InstallExecuteSequence.Custom)) {
+            if ($action.Action -ne 'MaintainUpgradeSnapshot') { $action.OuterXml | Should Not Match 'NOT\s+UPGRADINGPRODUCTCODE' }
+        }
+        # Only cleanup of a previous transaction is excluded from nested removal;
+        # the old safety gate, firewall and runtime cleanup still run normally.
+        @($authoring.Wix.Package.InstallExecuteSequence.Custom | Where-Object { $_.Action -eq 'MsiSafeRemove' })[0].Condition | Should Be 'REMOVE~="ALL"'
     }
 
     It 'fails untrusted install repair and upgrade before InstallInitialize using a first-party Binary action' {

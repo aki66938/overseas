@@ -45,8 +45,8 @@ func run(args []string, verifier trustVerifier, errorOutput io.Writer) int {
 			return 1
 		}
 		return 0
-	case len(args) == 1 && (args[0] == "upgrade-backup" || args[0] == "upgrade-restore" || args[0] == "upgrade-rollback" || args[0] == "upgrade-commit"):
-		modes := map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit"}
+	case len(args) == 1 && (args[0] == "upgrade-backup" || args[0] == "upgrade-restore" || args[0] == "upgrade-rollback" || args[0] == "upgrade-commit" || args[0] == "upgrade-maintenance"):
+		modes := map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit", "upgrade-maintenance": "Maintenance"}
 		if err := verifier.snapshotUpgrade(modes[args[0]]); err != nil {
 			_, _ = fmt.Fprintln(errorOutput, "upgrade snapshot operation failed; protected recovery evidence retained")
 			return 1

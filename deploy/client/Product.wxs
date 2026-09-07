@@ -22,6 +22,7 @@
         DowngradeErrorMessage="A newer version of RegenBio Overseas Access is already installed. Downgrades are not permitted."
         Schedule="afterInstallExecute" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Launch Condition="NOT RollbackDisabled" Message="Windows Installer rollback must be enabled to safely install, upgrade, or remove this product." />
 
     <Property Id="ARPCONTACT" Value="RegenBio IT" />
     <Property Id="ARPCOMMENTS" Value="Managed corporate overseas-access client" />
@@ -53,7 +54,11 @@
     <CustomAction Id="RollbackUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-rollback" Execute="rollback" Impersonate="no" Return="check" />
     <CustomAction Id="BackupUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-backup" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="RestoreUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-restore" Execute="deferred" Impersonate="no" Return="check" />
-    <CustomAction Id="CommitUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-commit" Execute="commit" Impersonate="no" Return="check" />
+    <!-- Last and ONLY commit action. Cleanup failure is logged by MSI and kept
+         as a durable receipt for automatic maintenance/uninstall retry; it must
+         never request rollback after deleting rollback payload. -->
+    <CustomAction Id="CommitUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-commit" Execute="commit" Impersonate="no" Return="ignore" />
+    <CustomAction Id="MaintainUpgradeSnapshot" BinaryRef="InstallerVerifierBinary" ExeCommand="upgrade-maintenance" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="InstallSharedRoot" BinaryRef="InstallerVerifierBinary" ExeCommand="shared-root-install" Execute="deferred" Impersonate="no" Return="check" />
 
     <SetProperty
@@ -74,6 +79,9 @@
            replacement service is still stopped. Backup occurs after StopServices;
            its rollback is therefore before service restart in the reverse script. -->
       <Custom Action="PrepareClientUpgrade" Before="StopServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <!-- Nested old-product removal belongs to the outer upgrade snapshot.
+           Ordinary maintenance/uninstall must finish any previous cleanup first. -->
+      <Custom Action="MaintainUpgradeSnapshot" Before="PrepareClientUpgrade" Condition="NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RollbackUpgradeSnapshot" After="StopServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="BackupUpgradeSnapshot" After="RollbackUpgradeSnapshot" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
       <Custom

@@ -133,4 +133,20 @@ Describe 'Client upgrade restoration protocol' {
         $sequence.InstallExecuteAgain.After | Should Be 'CommitUpgradeSnapshot'
         $sequence.InstallExecuteAgain.Condition | Should Be 'NOT REMOVE~="ALL"'
     }
+
+    It 'uses only a final ignored commit cleanup and checks rollback support before mutation' {
+        [xml]$product = Get-Content (Join-Path $repoRoot 'deploy/client/Product.wxs') -Raw
+        $package = $product.Wix.Package
+        $commit = @($package.CustomAction | Where-Object { $_.Execute -eq 'commit' })
+        $commit.Count | Should Be 1
+        $commit[0].Id | Should Be 'CommitUpgradeSnapshot'
+        $commit[0].Return | Should Be 'ignore'
+        @($package.Launch | Where-Object { $_.Condition -eq 'NOT RollbackDisabled' }).Count | Should Be 1
+        $maintenance = @($package.InstallExecuteSequence.Custom | Where-Object { $_.Action -eq 'MaintainUpgradeSnapshot' })[0]
+        $maintenance.Before | Should Be 'PrepareClientUpgrade'
+        $maintenance.Condition | Should Be 'NOT UPGRADINGPRODUCTCODE'
+        $inspector = Get-Content (Join-Path $repoRoot 'scripts/windows/inspect-client-msi.ps1') -Raw
+        $inspector | Should Match 'commitActions.Count -ne 1'
+        $inspector | Should Match 'RollbackDisabled'
+    }
 }

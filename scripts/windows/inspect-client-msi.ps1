@@ -141,6 +141,18 @@ if ($upgradeRows.Count -eq 0 -or $relatedUpgradeRows.Count -ne $upgradeRows.Coun
 $trustMode = @($propertyRows | Where-Object { $_[0] -eq 'PACKAGE_TRUST_MODE' } | ForEach-Object { $_[1] })
 if ($trustMode.Count -ne 1 -or $trustMode[0] -notin @('INSPECT_ONLY_REFUSES_INSTALL','RELEASE_SIGNED')) { throw 'Package trust mode is invalid.' }
 $customActions = @(Get-MsiTableRows 'CustomAction')
+$commitActions = @($customActions | Where-Object { ([int]$_[1] -band 1536) -eq 1536 })
+if ($commitActions.Count -ne 1 -or $commitActions[0][0] -ne 'CommitUpgradeSnapshot' -or [int]$commitActions[0][1] -ne 3650) { throw 'Snapshot cleanup must be the sole synchronous ignored commit action.' }
+foreach ($action in $customActions) {
+    if ($sequence.ContainsKey([string]$action[0]) -and $sequence[[string]$action[0]] -gt $sequence.CommitUpgradeSnapshot) { throw 'No custom action may be scheduled after irreversible snapshot commit cleanup.' }
+}
+if ($sequence.MaintainUpgradeSnapshot -ge $sequence.PrepareClientUpgrade -or $sequence.MaintainUpgradeSnapshot -ge $sequence.MsiSafeRemove) { throw 'Pending snapshot maintenance must precede every destructive removal action.' }
+$maintenance = @($customActions | Where-Object { $_[0] -eq 'MaintainUpgradeSnapshot' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq 'upgrade-maintenance' })
+if ($maintenance.Count -ne 1) { throw 'Checked automatic snapshot maintenance is absent.' }
+$maintenanceSequence = @(Get-MsiTableRows 'InstallExecuteSequence' | Where-Object { $_[0] -eq 'MaintainUpgradeSnapshot' -and $_[1] -eq 'NOT UPGRADINGPRODUCTCODE' })
+if ($maintenanceSequence.Count -ne 1) { throw 'Snapshot maintenance must not purge the outer upgrade transaction during nested removal.' }
+$rollbackLaunch = @(Get-MsiTableRows 'LaunchCondition' | Where-Object { $_[0] -eq 'NOT RollbackDisabled' })
+if ($rollbackLaunch.Count -ne 1 -or $sequence.LaunchConditions -ge $sequence.InstallInitialize) { throw 'RollbackDisabled must reject before transaction mutation.' }
 $tables = @(Get-MsiTableRows '_Tables' | ForEach-Object { [string]$_[0] })
 if ($tables -contains 'Wix4Certificate' -or @($customActions | Where-Object { $_[3] -match 'InstallCertificates|UninstallCertificates' }).Count) { throw 'Shared company trust must not have an IIS uninstall action.' }
 $sharedRootActions = @($customActions | Where-Object { $_[0] -eq 'InstallSharedRoot' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq 'shared-root-install' })

@@ -441,3 +441,94 @@ Expected fail-closed refusal confirmed exit1 (`installer trust verification fail
 No msiexec product install/upgrade/uninstall was performed. Fresh full PowerShell7
 under StrictMode2.0 also passed181/181 after the test mock correction. This receipt
 is a documentation-only follow-up: it does not change the artifact's code provenance.
+
+## 2026-09-07 Migration review fix wave: durable restore and cleanup
+
+Review found two Important failure paths in the migration slice. Both reproduced:
+(1) a temporary restore file survives ACL/publication failure and blocks rollback;
+(2) partial snapshot deletion destroys blob inventory while a checked commit CA can
+still request MSI rollback. These were not dismissed as native-only acceptance gaps.
+
+Restore fix: each attempt exclusively creates a random temporary file, captures its
+native Windows volume/file identity, and durably flushes an exact reservation before
+writing any plaintext. Normal failure compensates that exact file; a subsequent
+invocation can recover an abandoned partial write by its persisted native identity.
+Replacing the path with a different file is detected and preserved, not deleted.
+Original ACLs and hashes are still restored, and all plaintext buffers are cleared.
+The earlier synthetic-collision test that manually deleted a temp file was replaced
+with a real ACL-failure injection and automatic rollback with no manual deletion.
+
+Cleanup fix: atomically publish a `cleanup-pending` receipt in the protected snapshot
+parent before deleting any blob. It binds transaction/product/data-root and every
+expected blob hash plus the original journal hash. Resume accepts missing already-
+deleted owned files, but validates all surviving files and rejects foreign contents
+before mutation. The receipt remains until the exact empty snapshot directory is
+removed, making even final-directory-delete failure retryable. Rollback cleanup and
+committed cleanup have separate terminal kinds; phase-two restore never consumes a
+terminal cleanup receipt. A backup still needed for rollback is never treated as
+resumable committed cleanup.
+
+MSI commit policy was explicitly adjudicated with the parent/reviewer, preserving
+the normal single-MSI workflow (no required manual finalizer/background helper):
+- `CommitUpgradeSnapshot` is synchronous, Return=ignore, and the sole/final commit
+  action. Nonzero cleanup exit is left visible to MSI logging, not swallowed by Go;
+  the durable receipt identifies cleanup-pending after a deletion failure.
+- Checked maintenance automatically resumes prior pending cleanup before normal
+  maintenance/uninstall or the next backup. It precedes controlled disconnect and
+  every destructive removal action. A failure refuses removal with recovery evidence.
+- Maintenance is excluded only from nested old-product removal, which belongs to
+  the outer upgrade's active snapshot. Existing MsiSafeRemove, firewall cleanup and
+  runtime cleanup are NOT skipped or weakened. The test now checks this exact boundary
+  instead of rejecting the UPGRADINGPRODUCTCODE token anywhere in the whole package.
+- LaunchCondition rejects RollbackDisabled before InstallInitialize. The raw MSI
+  inspector enforces commit Type3650, exactly one commit action, no custom actions
+  afterward, checked maintenance placement/condition, and the rollback launch gate.
+
+Primary semantics used by the parent/adjudicator:
+https://learn.microsoft.com/en-us/windows/win32/msi/commit-custom-actions
+https://learn.microsoft.com/en-us/windows/win32/msi/installfinalize-action
+https://learn.microsoft.com/en-us/windows/win32/msi/deferred-execution-custom-actions
+Commit failures normally initiate rollback, while ignoring a commit return is
+documented. This solution therefore keeps the full snapshot through all checked
+rollback-capable work and reserves irreversible cleanup for the only final ignored
+commit. Power loss/installer termination remains an explicit native recovery gate;
+an incomplete receipt publication leaves the intact snapshot conservatively blocked,
+not inferred safe to purge. No claim of zero residue while cleanup-pending exists.
+
+RED/GREEN and fresh receipts:
+- ACL failure reproduction: snapshot8/9 RED (`Interrupted upgrade restore temporary
+  file requires recovery`) ->9/9 GREEN after durable reservations/compensation.
+- Partial writes, publication failure, abandoned reservation and foreign replacement:
+  12/12 with real temporary files/DPAPI/ACL/native file IDs and injected I/O failures.
+- Cleanup deletion failure after the first blob:12/13 RED (no failure intercepted by
+  old unjournaled deletion) ->13/13 GREEN with resumable receipt.
+- Explicit durable cleanup-pending state RED15/16 ->GREEN16/16; added completed
+  rollback cleanup retry, foreign preservation, final directory failure and automatic
+  retry-before-next-backup cases. A test-created foreign collision is removed only
+  within its negative test to demonstrate legitimate retry, never as recovery logic.
+- Sole ignored commit/rollback-policy XML contract RED11/12 ->GREEN12/12.
+- Go maintenance route RED (`upgrade-maintenance exit=2 mode=`) ->GREEN.
+- Covering Snapshot+Upgrade+ClientInstall Pester77/77, then full fresh suites:
+  PowerShell7 StrictMode2:189/189; WindowsPowerShell5.1:189/189,25.5s,exit0.
+- Full Go verifier `test ./cmd/installer-verifier -count=1`:PASS12.794s;
+  `vet ./cmd/installer-verifier`:exit0. The signed-MSI integration input remains absent.
+
+Commands used (same repository and explicit locked executables as above):
+```powershell
+Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'
+Invoke-Pester tests/powershell/UpgradeSnapshot.Tests.ps1 -PassThru -Quiet
+Invoke-Pester @('tests/powershell/UpgradeSnapshot.Tests.ps1','tests/powershell/ClientUpgrade.Tests.ps1','tests/powershell/ClientInstall.Tests.ps1') -PassThru -Quiet
+Set-StrictMode -Version 2.0
+Invoke-Pester tests/powershell -PassThru -Quiet
+& 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe' -NoProfile -Command "Import-Module 'C:/Program Files/WindowsPowerShell/Modules/Pester/3.4.0/Pester.psd1'; Invoke-Pester tests/powershell -EnableExit"
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' test ./cmd/installer-verifier -count=1
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' vet ./cmd/installer-verifier
+```
+Authoring-only WiX default ICE build and extraction passed30 files against the old
+96751f5 payload in `build/task8-review-authoring-only.msi`. That is schema/table
+validation, NOT this fix's source-bound executable artifact. The same previously
+explained WIX1060/WIX1059 decompilation warnings remain. A clean-source rebuild follows
+the code commit. Parent's separate per-user MSI fixture additionally observed ignored
+commit failure -> MSIexit0/newproduct retained -> automatic maintenance/uninstall
+cleanup success. It used HKCU/dummy files, not these snapshot I/O functions or real
+product/service/certificate state. Production signing/native lifecycle gates remain.

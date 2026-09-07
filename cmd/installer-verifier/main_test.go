@@ -36,7 +36,7 @@ func TestRunRoutesSharedTrustInstallOnly(t *testing.T) {
 }
 
 func TestRunRoutesUpgradeSnapshotLifecycle(t *testing.T) {
-	for command, mode := range map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit"} {
+	for command, mode := range map[string]string{"upgrade-backup": "Backup", "upgrade-restore": "Restore", "upgrade-rollback": "Rollback", "upgrade-commit": "Commit", "upgrade-maintenance": "Maintenance"} {
 		fake := &fakeTrustVerifier{}
 		if result := run([]string{command}, fake, io.Discard); result != 0 || fake.snapshotMode != mode {
 			t.Fatalf("%s exit=%d mode=%s", command, result, fake.snapshotMode)

@@ -1,6 +1,27 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 Add-Type -AssemblyName System.Security
+if (-not ('RegenBioUpgradeFileIdentity' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class RegenBioUpgradeFileIdentity {
+    [StructLayout(LayoutKind.Sequential)] private struct Information {
+        public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh,
+            WriteLow, WriteHigh, Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information info);
+    public static string Read(SafeFileHandle handle) {
+        Information info;
+        if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return info.Volume.ToString("x8") + info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8");
+    }
+}
+'@
+}
 
 function Get-UpgradeFirewallBaseline {
     $value = Read-FirewallJournal
@@ -65,6 +86,68 @@ function Write-SnapshotBytes([string]$Path, [byte[]]$Bytes) {
     $stream = New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
+}
+
+function Read-SnapshotRestoreReservations([string]$SnapshotRoot,$Record) {
+    $reservations = @()
+    foreach ($item in @(Get-ChildItem -LiteralPath $SnapshotRoot -Filter 'restore-*.json' -Force)) {
+        Assert-SnapshotOrdinaryPath $item.FullName
+        if ($item.PSIsContainer -or $item.Name -cnotmatch '^restore-[a-f0-9]{32}\.json$' -or $item.Length -gt 4096) { throw 'Invalid restore reservation inventory.' }
+        $value = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+        if ($value.transaction_id -cne $Record.transaction_id -or $value.identity -cnotmatch '^[a-f0-9]{24}$' -or
+            @($Record.files | Where-Object { $_.name -ceq $value.name }).Count -ne 1 -or
+            $value.token -cne $item.Name.Substring(8,32)) { throw 'Invalid restore reservation ownership.' }
+        $reservations += $value
+    }
+    return $reservations
+}
+
+function Remove-SnapshotRestoreReservation([string]$SnapshotRoot,[string]$DataRoot,$Reservation) {
+    $temporary = Join-Path $DataRoot ($Reservation.name + '.upgrade-' + $Reservation.transaction_id + '-' + $Reservation.token + '.tmp')
+    Assert-SnapshotOrdinaryPath $temporary
+    if (Test-Path -LiteralPath $temporary) {
+        $stream = New-Object IO.FileStream($temporary,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+        try {
+            if ([RegenBioUpgradeFileIdentity]::Read($stream.SafeFileHandle) -cne $Reservation.identity) { throw 'Foreign replacement of a restore temporary file.' }
+        }
+        finally { $stream.Dispose() }
+        [IO.File]::Delete($temporary)
+    }
+    [IO.File]::Delete((Join-Path $SnapshotRoot ('restore-' + $Reservation.token + '.json')))
+}
+
+function New-SnapshotRestoreReservation([string]$SnapshotRoot,[string]$DataRoot,$Record,$File) {
+    $token = [guid]::NewGuid().ToString('N')
+    $temporary = Join-Path $DataRoot ($File.name + '.upgrade-' + $Record.transaction_id + '-' + $token + '.tmp')
+    Assert-SnapshotOrdinaryPath $temporary
+    $stream = New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    $markerStream = $null
+    $markerPath = Join-Path $SnapshotRoot ('restore-' + $token + '.json')
+    try {
+        $reservation = [pscustomobject]@{transaction_id=$Record.transaction_id;token=$token;name=$File.name;identity=[RegenBioUpgradeFileIdentity]::Read($stream.SafeFileHandle)}
+        # Persist the exclusive CreateNew file identity BEFORE writing plaintext.
+        # A crash after this point leaves enough evidence for another process to
+        # delete only this file, even if its write never completed.
+        $markerStream = New-Object IO.FileStream($markerPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $markerBytes = [Text.Encoding]::UTF8.GetBytes(($reservation | ConvertTo-Json -Compress))
+        $markerStream.Write($markerBytes,0,$markerBytes.Length); $markerStream.Flush($true); $markerStream.Dispose()
+    }
+    catch {
+        $stream.Dispose(); [IO.File]::Delete($temporary)
+        if ($null -ne $markerStream) { $markerStream.Dispose(); [IO.File]::Delete($markerPath) }
+        throw
+    }
+    return [pscustomobject]@{stream=$stream;path=$temporary;reservation=$reservation}
+}
+
+function Write-SnapshotRestoreContent($Stream,[byte[]]$Bytes) {
+    $Stream.Write($Bytes,0,$Bytes.Length)
+    $Stream.Flush($true)
+}
+
+function Publish-SnapshotRestoreFile([string]$Temporary,[string]$Target) {
+    if (Test-Path -LiteralPath $Target) { [IO.File]::Replace($Temporary,$Target,[Management.Automation.Language.NullString]::Value) }
+    else { [IO.File]::Move($Temporary,$Target) }
 }
 
 function Set-SnapshotDirectoryProtection([string]$Path) {
@@ -134,26 +217,85 @@ function Read-UpgradeSnapshot([string]$SnapshotRoot, [string]$DataRoot) {
         $inventory += [string]$file.blob
     }
     $actual = @(Get-ChildItem -LiteralPath $SnapshotRoot -Force | ForEach-Object { $_.Name })
+    foreach ($reservation in @(Read-SnapshotRestoreReservations $SnapshotRoot $record)) { $inventory += 'restore-' + $reservation.token + '.json' }
     if (Compare-Object @($inventory | Sort-Object) @($actual | Sort-Object)) { throw 'Upgrade snapshot contains foreign inventory.' }
     return $record
 }
 
-function Remove-UpgradeSnapshot([string]$SnapshotRoot, $Record) {
-    # Caller validated the complete inventory. Never recurse or delete unknown data.
-    foreach ($name in @($Record.files | ForEach-Object { $_.blob }) + @('journal.json')) {
-        $path = Join-Path $SnapshotRoot $name
-        Assert-SnapshotOrdinaryPath $path
-        [IO.File]::Delete($path)
+function Complete-SnapshotCleanup([string]$SnapshotRoot,[string]$DataRoot,[string]$Mode) {
+    $receiptPath = $SnapshotRoot + '.cleanup.json'
+    Assert-SnapshotDirectoryProtection (Split-Path -Parent $SnapshotRoot)
+    Assert-SnapshotOrdinaryPath $receiptPath
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf) -or (Get-Item -LiteralPath $receiptPath).Length -gt 65536) { throw 'Invalid pending snapshot cleanup receipt.' }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    if ($receipt.schema_version -ne 1 -or $receipt.product -cne 'RegenBioOverseasAccess' -or
+        $receipt.transaction_id -cnotmatch '^[a-f0-9]{32}$' -or $receipt.data_root -cne [IO.Path]::GetFullPath($DataRoot) -or
+        $receipt.kind -cnotin @('committed','rolled-back') -or $receipt.state -cne 'cleanup-pending' -or $receipt.journal_sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid pending snapshot cleanup ownership.' }
+    if ($Mode -eq 'Rollback' -and $receipt.kind -ne 'rolled-back') { throw 'Commit cleanup already started; rollback payload is no longer complete.' }
+    $expected = @{'journal.json'=[string]$receipt.journal_sha256}
+    $ordered = @()
+    foreach ($file in @($receipt.files)) {
+        if ($file.name -cnotin @('credential.bin','sing-box.json','runtime-owned.json','msi-firewall-owned.json') -or
+            $file.blob -cne ($file.name + '.blob') -or $expected.ContainsKey([string]$file.blob) -or
+            $file.wrapped_sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid pending snapshot cleanup inventory.' }
+        $expected[[string]$file.blob] = [string]$file.wrapped_sha256
+        $ordered += [string]$file.blob
     }
-    if (@(Get-ChildItem -LiteralPath $SnapshotRoot -Force).Count) { throw 'Foreign snapshot content prevents cleanup.' }
-    [IO.Directory]::Delete($SnapshotRoot)
+    if (Test-Path -LiteralPath $SnapshotRoot) {
+        Assert-SnapshotDirectoryProtection $SnapshotRoot
+        # Missing owned files are expected after an interrupted cleanup. Prove
+        # every remaining file and reject any foreign content BEFORE deleting.
+        foreach ($item in @(Get-ChildItem -LiteralPath $SnapshotRoot -Force)) {
+            Assert-SnapshotOrdinaryPath $item.FullName
+            if ($item.PSIsContainer -or -not $expected.ContainsKey($item.Name) -or $item.Length -gt 16777216 -or
+                (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected[$item.Name]) { throw 'Foreign or corrupt pending snapshot cleanup content.' }
+        }
+        foreach ($name in @($ordered) + @('journal.json')) {
+            $path = Join-Path $SnapshotRoot $name
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+        }
+        if (@(Get-ChildItem -LiteralPath $SnapshotRoot -Force).Count) { throw 'Foreign snapshot content prevents cleanup.' }
+        Remove-Item -LiteralPath $SnapshotRoot -Force -ErrorAction Stop
+    }
+    # The receipt lives in the protected parent, so even a directory-delete
+    # failure after the last blob/journal deletion remains safely retryable.
+    Remove-Item -LiteralPath $receiptPath -Force -ErrorAction Stop
+}
+
+function Remove-UpgradeSnapshot([string]$SnapshotRoot,$Record,[string]$Kind) {
+    $receiptPath = $SnapshotRoot + '.cleanup.json'
+    $temporary = $receiptPath + '.new'
+    Assert-SnapshotOrdinaryPath $receiptPath
+    Assert-SnapshotOrdinaryPath $temporary
+    if (Test-Path -LiteralPath $receiptPath) { throw 'Pending snapshot cleanup must be resumed first.' }
+    $receipt = [ordered]@{schema_version=1;product='RegenBioOverseasAccess';transaction_id=$Record.transaction_id;data_root=$Record.data_root;kind=$Kind;state='cleanup-pending';files=@($Record.files);journal_sha256=(Get-FileHash -LiteralPath (Join-Path $SnapshotRoot 'journal.json') -Algorithm SHA256).Hash.ToLowerInvariant()}
+    $stream = New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($receipt | ConvertTo-Json -Depth 8))
+        $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true); $stream.Dispose()
+        [IO.File]::Move($temporary,$receiptPath)
+    }
+    finally { $stream.Dispose(); if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) } }
+    # This durable transition is only allowed after all rollback-capable work or
+    # after successful baseline rollback. It never occurs during phase two.
+    Complete-SnapshotCleanup $SnapshotRoot $Record.data_root $(if ($Kind -eq 'rolled-back') { 'Rollback' } else { 'Commit' })
 }
 
 function Invoke-UpgradeSnapshot {
-    param([ValidateSet('Backup','Restore','Rollback','Commit')][string]$Mode, [string]$DataRoot, [string]$SnapshotRoot)
+    param([ValidateSet('Backup','Restore','Rollback','Commit','Maintenance')][string]$Mode, [string]$DataRoot, [string]$SnapshotRoot)
     Assert-SnapshotOrdinaryPath $DataRoot
-    Assert-SnapshotDirectoryProtection $DataRoot
     Assert-SnapshotOrdinaryPath $SnapshotRoot
+    if (Test-Path -LiteralPath ($SnapshotRoot + '.cleanup.json')) {
+        if ($Mode -eq 'Restore') { throw 'Snapshot is already in terminal cleanup and cannot restore phase two.' }
+        Complete-SnapshotCleanup $SnapshotRoot $DataRoot $Mode
+        if ($Mode -ne 'Backup') { return }
+    }
+    if ($Mode -eq 'Maintenance') {
+        if (Test-Path -LiteralPath $SnapshotRoot) { throw 'Unfinished upgrade recovery blocks maintenance; no runtime resources were removed.' }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $SnapshotRoot) -and $Mode -in @('Rollback','Commit')) { return }
+    Assert-SnapshotDirectoryProtection $DataRoot
     if ($Mode -eq 'Backup') {
         if (Test-Path -LiteralPath $SnapshotRoot) { throw 'An existing or stale upgrade snapshot requires recovery before retry.' }
         $owned = @(Get-UpgradeOwnedRuntimeFiles $DataRoot)
@@ -208,7 +350,8 @@ function Invoke-UpgradeSnapshot {
     }
     Assert-SnapshotDirectoryProtection (Split-Path -Parent $SnapshotRoot)
     $record = Read-UpgradeSnapshot $SnapshotRoot $DataRoot
-    if ($Mode -eq 'Commit') { Remove-UpgradeSnapshot $SnapshotRoot $record; return }
+    foreach ($reservation in @(Read-SnapshotRestoreReservations $SnapshotRoot $record)) { Remove-SnapshotRestoreReservation $SnapshotRoot $DataRoot $reservation }
+    if ($Mode -eq 'Commit') { Remove-UpgradeSnapshot $SnapshotRoot $record 'committed'; return }
     $decoded = @{}
     $currentFirewallJournal = Read-FirewallJournal
     try {
@@ -242,15 +385,17 @@ function Invoke-UpgradeSnapshot {
         foreach ($file in @($record.files | Sort-Object @{Expression={ $_.name -eq 'runtime-owned.json' }}, name)) {
             $target = Join-Path $DataRoot $file.name
             Assert-SnapshotOrdinaryPath $target
-            $temporary = $target + '.upgrade-' + $record.transaction_id + '.tmp'
-            if (Test-Path -LiteralPath $temporary) { throw 'Interrupted upgrade restore temporary file requires recovery.' }
-            Write-SnapshotBytes $temporary $decoded[[string]$file.name]
-            $acl = New-Object Security.AccessControl.FileSecurity
-            $acl.SetSecurityDescriptorSddlForm([string]$file.sddl)
-            Set-Acl -LiteralPath $temporary -AclObject $acl
-            if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary, $target, [Management.Automation.Language.NullString]::Value) }
-            else { [IO.File]::Move($temporary, $target) }
-            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw 'Restored runtime hash mismatch.' }
+            $reservation = New-SnapshotRestoreReservation $SnapshotRoot $DataRoot $record $file
+            try {
+                try { Write-SnapshotRestoreContent $reservation.stream $decoded[[string]$file.name] }
+                finally { $reservation.stream.Dispose() }
+                $acl = New-Object Security.AccessControl.FileSecurity
+                $acl.SetSecurityDescriptorSddlForm([string]$file.sddl)
+                Set-Acl -LiteralPath $reservation.path -AclObject $acl
+                Publish-SnapshotRestoreFile $reservation.path $target
+                if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw 'Restored runtime hash mismatch.' }
+            }
+            finally { Remove-SnapshotRestoreReservation $SnapshotRoot $DataRoot $reservation.reservation }
         }
         if ($Mode -eq 'Rollback') {
             Restore-UpgradeFirewallBaseline -Baseline $record.firewall -CurrentJournal $currentFirewallJournal
@@ -265,7 +410,7 @@ function Invoke-UpgradeSnapshot {
         }
     }
     finally { foreach ($bytes in $decoded.Values) { [Array]::Clear($bytes, 0, $bytes.Length) } }
-    if ($Mode -eq 'Rollback') { Remove-UpgradeSnapshot $SnapshotRoot $record }
+    if ($Mode -eq 'Rollback') { Remove-UpgradeSnapshot $SnapshotRoot $record 'rolled-back' }
 }
 
 Invoke-UpgradeSnapshot -Mode $args[0] -DataRoot 'C:\ProgramData\RegenBio\OverseasAccess' -SnapshotRoot 'C:\ProgramData\RegenBio\InstallerTransactions\UpgradeSnapshot'
