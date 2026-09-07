@@ -22,7 +22,9 @@
         DowngradeErrorMessage="A newer version of RegenBio Overseas Access is already installed. Downgrades are not permitted."
         Schedule="afterInstallExecute" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
-    <Launch Condition="NOT RollbackDisabled" Message="Windows Installer rollback must be enabled to safely install, upgrade, or remove this product." />
+    <Property Id="PROMPTROLLBACKCOST" Value="F" />
+    <Launch Condition="NOT RollbackDisabled AND NOT DISABLEROLLBACK AND PROMPTROLLBACKCOST = &quot;F&quot;" Message="Windows Installer rollback must be enabled to safely install, upgrade, or remove this product." />
+    <CustomAction Id="RequireRollbackEnabled" Error="Rollback was disabled after costing. No product mutation is permitted." />
 
     <Property Id="ARPCONTACT" Value="RegenBio IT" />
     <Property Id="ARPCOMMENTS" Value="Managed corporate overseas-access client" />
@@ -75,6 +77,7 @@
         Impersonate="no"
         Return="check" />
     <InstallExecuteSequence>
+      <Custom Action="RequireRollbackEnabled" After="InstallInitialize" Condition="RollbackDisabled OR DISABLEROLLBACK OR PROMPTROLLBACKCOST &lt;&gt; &quot;F&quot;" />
       <!-- The old cached MSI must see verified replacement files while the
            replacement service is still stopped. Backup occurs after StopServices;
            its rollback is therefore before service restart in the reverse script. -->

@@ -141,7 +141,11 @@ Describe 'Client upgrade restoration protocol' {
         $commit.Count | Should Be 1
         $commit[0].Id | Should Be 'CommitUpgradeSnapshot'
         $commit[0].Return | Should Be 'ignore'
-        @($package.Launch | Where-Object { $_.Condition -eq 'NOT RollbackDisabled' }).Count | Should Be 1
+        @($package.Launch | Where-Object { $_.Condition -eq 'NOT RollbackDisabled AND NOT DISABLEROLLBACK AND PROMPTROLLBACKCOST = "F"' }).Count | Should Be 1
+        @($package.Property | Where-Object { $_.Id -eq 'PROMPTROLLBACKCOST' -and $_.Value -eq 'F' }).Count | Should Be 1
+        $lateGate = @($package.InstallExecuteSequence.Custom | Where-Object { $_.Action -eq 'RequireRollbackEnabled' })[0]
+        $lateGate.After | Should Be 'InstallInitialize'
+        $lateGate.Condition | Should Be 'RollbackDisabled OR DISABLEROLLBACK OR PROMPTROLLBACKCOST <> "F"'
         $maintenance = @($package.InstallExecuteSequence.Custom | Where-Object { $_.Action -eq 'MaintainUpgradeSnapshot' })[0]
         $maintenance.Before | Should Be 'PrepareClientUpgrade'
         $maintenance.Condition | Should Be 'NOT UPGRADINGPRODUCTCODE'

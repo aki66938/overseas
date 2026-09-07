@@ -532,3 +532,22 @@ the code commit. Parent's separate per-user MSI fixture additionally observed ig
 commit failure -> MSIexit0/newproduct retained -> automatic maintenance/uninstall
 cleanup success. It used HKCU/dummy files, not these snapshot I/O functions or real
 product/service/certificate state. Production signing/native lifecycle gates remain.
+
+### Rollback policy timing follow-up
+
+Parent's disposable MSI probe observed DISABLEROLLBACK=1 populate RollbackDisabled
+before LaunchConditions and fail1603 before InstallInitialize, with no fixture
+product/key/file left. Since later cost-based disabling is a distinct path, the
+package additionally requires `NOT DISABLEROLLBACK`, pins PROMPTROLLBACKCOST=F and
+rejects any override, and executes a Type19 condition check immediately after
+InstallInitialize but before maintenance/prepare. The inspector checks all three
+conditions/placements and rejects any DisableRollback sequence action. No global
+Windows Installer policy was changed.
+
+Focused XML contract RED11/12 ->GREEN12/12. Fresh full Pester after this final
+authoring change: PowerShell7 189/189, WindowsPowerShell5.1 189/189 (25.48s), exit0.
+Locked WiX default ICE authoring-only rebuild and actual table extraction again
+passed30 files; previous extension/ACL decompilation warnings remain classified
+above. Core/runtime code was unchanged by this small follow-up. The completed review
+fix is commit6a4a2e5 plus this rollback-policy guard commit; a new exact-source
+inspect-only artifact is rebuilt after this commit, not from the authoring fixture.

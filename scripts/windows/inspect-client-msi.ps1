@@ -151,8 +151,14 @@ $maintenance = @($customActions | Where-Object { $_[0] -eq 'MaintainUpgradeSnaps
 if ($maintenance.Count -ne 1) { throw 'Checked automatic snapshot maintenance is absent.' }
 $maintenanceSequence = @(Get-MsiTableRows 'InstallExecuteSequence' | Where-Object { $_[0] -eq 'MaintainUpgradeSnapshot' -and $_[1] -eq 'NOT UPGRADINGPRODUCTCODE' })
 if ($maintenanceSequence.Count -ne 1) { throw 'Snapshot maintenance must not purge the outer upgrade transaction during nested removal.' }
-$rollbackLaunch = @(Get-MsiTableRows 'LaunchCondition' | Where-Object { $_[0] -eq 'NOT RollbackDisabled' })
+$rollbackLaunch = @(Get-MsiTableRows 'LaunchCondition' | Where-Object { $_[0] -eq 'NOT RollbackDisabled AND NOT DISABLEROLLBACK AND PROMPTROLLBACKCOST = "F"' })
 if ($rollbackLaunch.Count -ne 1 -or $sequence.LaunchConditions -ge $sequence.InstallInitialize) { throw 'RollbackDisabled must reject before transaction mutation.' }
+$rollbackCost = @($propertyRows | Where-Object { $_[0] -eq 'PROMPTROLLBACKCOST' -and $_[1] -eq 'F' })
+$lateRollbackGate = @($customActions | Where-Object { $_[0] -eq 'RequireRollbackEnabled' -and $_[1] -eq '19' })
+$lateRollbackSequence = @(Get-MsiTableRows 'InstallExecuteSequence' | Where-Object { $_[0] -eq 'RequireRollbackEnabled' -and $_[1] -eq 'RollbackDisabled OR DISABLEROLLBACK OR PROMPTROLLBACKCOST <> "F"' })
+if ($rollbackCost.Count -ne 1 -or $lateRollbackGate.Count -ne 1 -or $lateRollbackSequence.Count -ne 1 -or
+    $sequence.RequireRollbackEnabled -le $sequence.InstallInitialize -or $sequence.RequireRollbackEnabled -ge $sequence.MaintainUpgradeSnapshot -or
+    $sequence.ContainsKey('DisableRollback')) { throw 'Rollback support must remain required after costing and before all product mutation.' }
 $tables = @(Get-MsiTableRows '_Tables' | ForEach-Object { [string]$_[0] })
 if ($tables -contains 'Wix4Certificate' -or @($customActions | Where-Object { $_[3] -match 'InstallCertificates|UninstallCertificates' }).Count) { throw 'Shared company trust must not have an IIS uninstall action.' }
 $sharedRootActions = @($customActions | Where-Object { $_[0] -eq 'InstallSharedRoot' -and $_[1] -eq '3074' -and $_[2] -eq 'InstallerVerifierBinary' -and $_[3] -eq 'shared-root-install' })
