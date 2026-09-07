@@ -1,4 +1,21 @@
 # Pure inventory and WiX authoring helpers. No installation or trust-store work.
+function Resolve-MsiPayloadDestination {
+    param([string]$DirectoryId,[string]$FileName,[hashtable]$Directories)
+    $parts = @($FileName.Split('|')[-1]); $seen = @{}
+    while ($DirectoryId -notin @('INSTALLFOLDER','DATAFOLDER')) {
+        if (-not $Directories.ContainsKey($DirectoryId) -or $seen.ContainsKey($DirectoryId)) { throw 'Invalid MSI payload directory ancestry.' }
+        $seen[$DirectoryId]=$true
+        $row=$Directories[$DirectoryId]
+        $segment=([string]$row[2]).Split(':')[0].Split('|')[-1]
+        if ($segment -ne '.') { $parts=@($segment)+$parts }
+        $DirectoryId=[string]$row[1]
+    }
+    foreach ($segment in $parts) {
+        if ($segment -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*$' -or $segment.Contains('..') -or $segment.EndsWith('.') -or $segment -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'Invalid MSI payload directory name.' }
+    }
+    return [pscustomobject]@{name=($parts -join '/');destination=$(if ($DirectoryId -eq 'INSTALLFOLDER') {'program-files'} else {'program-data'})}
+}
+
 function Get-ClientWorkspace {
     param([string]$Repository)
     $candidate = [IO.Path]::GetFullPath($Repository)

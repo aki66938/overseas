@@ -66,7 +66,7 @@ Describe 'Client upgrade restoration protocol' {
 
     It 'lets absent service proceed to the callers independent residue proof' {
         $ServiceName = 'RegenBioInstallerTest-Absent'
-        Mock Get-Service { return $null }
+        Mock Get-Service { return @() }
         (Get-UpgradeFailure { Request-ControlledDisconnect }) | Should Be ''
         Assert-MockCalled Get-Service -Times 1 -Exactly
         $text = Get-Content -LiteralPath $installerPath -Raw
@@ -128,7 +128,8 @@ Describe 'Client upgrade restoration protocol' {
         @($sequence.Custom | Where-Object { $_.Action -eq 'PrepareClientUpgrade' })[0].Before | Should Be 'StopServices'
         @($sequence.Custom | Where-Object { $_.Action -eq 'BackupUpgradeSnapshot' })[0].After | Should Be 'RollbackUpgradeSnapshot'
         @($sequence.Custom | Where-Object { $_.Action -eq 'RestoreUpgradeSnapshot' })[0].After | Should Be 'RemoveExistingProducts'
-        $sequence.StartServices.After | Should Be 'InstallClientFirewall'
+        $sequence.InstallExecute.Sequence | Should Be '6500'
+        $sequence.StartServices.Sequence | Should Be '6550'
         $sequence.InstallExecuteAgain.After | Should Be 'CommitUpgradeSnapshot'
         $sequence.InstallExecuteAgain.Condition | Should Be 'NOT REMOVE~="ALL"'
     }

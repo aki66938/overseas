@@ -91,13 +91,13 @@
           Before="InstallServices"
           Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="InstallSharedRoot" After="VerifyInstalledPayload" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <InstallExecute />
+      <InstallExecute Sequence="6500" />
       <!-- No script-generating action may intervene between this first flush
            and RemoveExistingProducts (MajorUpgrade afterInstallExecute). -->
       <Custom Action="RestoreUpgradeSnapshot" After="RemoveExistingProducts" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RollbackClientFirewall" After="RestoreUpgradeSnapshot" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="InstallClientFirewall" After="RollbackClientFirewall" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <StartServices After="InstallClientFirewall" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <StartServices Sequence="6550" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="CommitUpgradeSnapshot" After="StartServices" Condition="WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
       <InstallExecuteAgain After="CommitUpgradeSnapshot" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RemoveClientFirewall" After="StopServices" Condition="REMOVE~=&quot;ALL&quot;" />

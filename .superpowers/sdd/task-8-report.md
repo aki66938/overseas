@@ -374,3 +374,50 @@ Self-review boundaries and remaining acceptance:
 Final second-slice full Go test command above exited 0, all packages passed;
 installer-verifier 14.454s. No signed-MSI integration inputs were supplied, so that
 existing explicit native integration test remains skipped, not silently accepted.
+
+## 2026-09-07 Native package authoring correction and extraction
+
+The first WiX build found real schema errors WIX0072 (InstallExecute requires an
+ordering attribute) and WIX0004 (StartServices does not accept After). Corrected
+authoring to explicit InstallExecute Sequence=6500 and StartServices Sequence=6550;
+all relative ordering remains checked against actual MSI tables by the inspector.
+Default WiX ICE validation then passed without build warnings. An early extraction
+attempt while the build still held its database failed WIX0223; after build exit 0,
+extraction passed. No MSI installation was executed.
+
+Added actual File -> Component -> Directory destination verification, with RED4/5
+missing helper -> GREEN5/5 (nested long names, redirected ancestry, cycles). This
+checks installed paths, not just matching extracted file IDs/hashes.
+Full Pester at this point passed 181/181 in fresh PowerShell7 and WindowsPowerShell5.1
+processes. Dot-sourcing the inspector before Pester exposed strict-mode fixture
+leakage: the absent-service mock emitted a null object, not an empty enumeration;
+that combined run was 180/181. Changed only the mock to return @(), reflecting the
+real enumeration contract; strict-mode ClientUpgrade then passed11/11. No production
+enumeration safety relaxation.
+
+Commands (from repository root, using the locked wrapper):
+```powershell
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' build -o bin/overseas-agent.exe ./cmd/overseas-agent
+& 'C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe' build -o bin/installer-verifier.exe ./cmd/installer-verifier
+& ./scripts/windows/build-client-artifacts.ps1 -Mode Inspect -OutputDirectory build/task8-inspect -ProductVersion 0.1.8
+& ./scripts/windows/invoke-locked-client-tool.ps1 -Tool Wix -ToolArguments @('build','deploy/client/Product.wxs','deploy/client/Files.wxs','build/task8-inspect.FlutterFiles.wxs','-d','ProductVersion=0.1.8','-bindpath','build/task8-inspect','-arch','x64','-intermediateFolder','build/task8-wixobj','-pdbtype','none','-out','dist/Task8-0.1.8-INSPECT_ONLY.msi')
+& ./scripts/windows/inspect-client-msi.ps1 -MsiPath dist/Task8-0.1.8-INSPECT_ONLY.msi -StagingPath build/task8-inspect -OutputDirectory build/task8-msi-inspection
+```
+The exploratory package used payload7139605 plus corrected authoring; it is NOT a
+source-aligned delivery. Clean-source rebuild after the correction commit follows.
+Exploratory extraction passed30 files and exact trust sentinel/signature refusal.
+Actual action sequence: Prepare1897, Stop1900, SnapshotRollback1901, Backup1902,
+InstallFiles4000, Verify5798, SharedRoot5799, InstallServices5800, Execute6500,
+RemoveExisting6501, Restore6502, FirewallRollback6503, FirewallInstall6504,
+Start6550, Commit6551, ExecuteAgain6552, Finalize6600.
+
+Decompilation warnings retained and investigated:
+- WIX1060: Wix4ServiceConfig rendered as a custom table, an extension representation
+  limitation of this decompile invocation, not an ICE compile failure.
+- WIX1059 twice: decompiler misrepresents MsiLockPermissionsEx references and omits
+  corresponding permission authoring. Read-only original database query confirms
+  LockObject INSTALLFOLDER / Table CreateFolder / SDDL
+  D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU), and DATAFOLDER /
+  CreateFolder / D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA). CreateFolder contains matching
+  INSTALLFOLDER→InstallFolderAcl and DATAFOLDER→DataFolderAcl rows. We do not rebuild
+  from this lossy decompiled XML. Native application of ACLs remains a pilot gate.

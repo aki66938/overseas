@@ -107,6 +107,17 @@ function Get-MsiTableRows([string] $Table) {
     return $rows
 }
 $sequence = @{}
+$directories = @{}; foreach ($row in @(Get-MsiTableRows 'Directory')) { $directories[[string]$row[0]]=$row }
+$components = @{}; foreach ($row in @(Get-MsiTableRows 'Component')) { $components[[string]$row[0]]=$row }
+$manifestEntries = @{}; foreach ($entry in @($manifest.files)) { $manifestEntries[[string]$entry.name]=$entry }
+foreach ($row in @(Get-MsiTableRows 'File')) {
+    $id=[string]$row[0]
+    if (-not $map.Contains($id) -or -not $components.ContainsKey([string]$row[1])) { throw 'Unlisted MSI payload component.' }
+    $actual=Resolve-MsiPayloadDestination -DirectoryId ([string]$components[[string]$row[1]][2]) -FileName ([string]$row[2]) -Directories $directories
+    $expectedName=[string]$map[$id]
+    $expectedDestination=if ($trustRootNames -contains $expectedName) { 'program-data' } else { [string]$manifestEntries[$expectedName].destination }
+    if ($actual.name -cne $expectedName -or $actual.destination -cne $expectedDestination) { throw 'MSI payload destination differs from the signed manifest.' }
+}
 foreach ($row in @(Get-MsiTableRows 'InstallExecuteSequence')) { $sequence[[string] $row[0]] = [int] $row[2] }
 if ($sequence.VerifyPackageTrust -ge $sequence.InstallInitialize) { throw 'VerifyPackageTrust must precede InstallInitialize.' }
 if ($sequence.MsiSafeRemove -ge $sequence.StopServices) { throw 'MsiSafeRemove must precede StopServices.' }

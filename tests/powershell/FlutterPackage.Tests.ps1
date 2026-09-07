@@ -46,4 +46,14 @@ Describe 'Flutter Windows package inventory' {
         $publisher | Should Match '--build-name'
         $publisher | Should Not Match "'\./cmd/overseas-client'"
     }
+    It 'resolves actual MSI directory tables and rejects redirected or cyclic destinations' {
+        $directories = @{nested=@('nested','INSTALLFOLDER','short|data');INSTALLFOLDER=@('INSTALLFOLDER','Company','OverseasAccess')}
+        $destination = Resolve-MsiPayloadDestination -DirectoryId nested -FileName 'app.so' -Directories $directories
+        $destination.name | Should Be 'data/app.so'
+        $destination.destination | Should Be 'program-files'
+        $directories.nested[1]='foreign'
+        (Get-FlutterFailure { Resolve-MsiPayloadDestination nested 'app.so' $directories }) | Should Match 'directory'
+        $directories.nested[1]='nested'
+        (Get-FlutterFailure { Resolve-MsiPayloadDestination nested 'app.so' $directories }) | Should Match 'directory'
+    }
 }
