@@ -11,6 +11,9 @@ import (
 )
 
 type ClientInput struct {
+	// Empty retains the shipped Windows configuration. Linux has a shorter
+	// fixed interface name because IFNAMSIZ includes the terminating NUL.
+	Platform         string
 	Node             accessmodel.Node
 	CorporateCIDRs   []string
 	CorporateDNS     []string
@@ -85,6 +88,14 @@ type dnsRule struct {
 }
 
 func RenderClient(input ClientInput) ([]byte, error) {
+	interfaceName := tunInterfaceName
+	switch input.Platform {
+	case "", "windows":
+	case "linux":
+		interfaceName = "regen-access"
+	default:
+		return nil, fmt.Errorf("unsupported client platform")
+	}
 	nodeAddress, err := validateNode(input.Node)
 	if err != nil {
 		return nil, err
@@ -167,9 +178,9 @@ func RenderClient(input ClientInput) ([]byte, error) {
 		Inbounds: []clientInbound{{
 			Type:          "tun",
 			Tag:           "tun-in",
-			InterfaceName: tunInterfaceName,
-			Address: []string{tunAddress},
-			MTU:     tunMTU,
+			InterfaceName: interfaceName,
+			Address:       []string{tunAddress},
+			MTU:           tunMTU,
 			// auto_route: sing-box installs the two default-half routes and
 			// the tun DNS itself, and they vanish with the process. No
 			// product-owned route table to build, verify, or restore.

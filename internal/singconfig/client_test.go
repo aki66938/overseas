@@ -1,12 +1,27 @@
 package singconfig_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/singconfig"
 )
+
+func TestLinuxPlatformOnlyChangesTUNName(t *testing.T) {
+	input := singconfig.ClientInput{Node: accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080}, CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"ad.intra.regen-bio.com"}}
+	windows := mustRenderClient(t, input)
+	input.Platform = "linux"
+	linux := mustRenderClient(t, input)
+	if !bytes.Equal(bytes.ReplaceAll(windows, []byte("RegenBioOverseasAccess"), []byte("regen-access")), linux) {
+		t.Fatal("Linux rendering must only change the proven interface name")
+	}
+	input.Platform = "unknown"
+	if _, err := singconfig.RenderClient(input); err == nil {
+		t.Fatal("unknown platform accepted")
+	}
+}
 
 func TestClientRoutesInternetTCPAndRejectsUDP(t *testing.T) {
 	config := decodeRenderedConfig(t, mustRenderClient(t, singconfig.ClientInput{
