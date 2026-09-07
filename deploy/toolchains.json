@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "go": {
+    "version": "1.27.0",
+    "windows_executable_sha256": "7d828191ba32519a9c9361789ab647486236ed45c660889196c7770a8ff1985c",
+    "legacy_lock": "deploy/client/build-lock.json"
+  },
+  "flutter": {
+    "version": "3.47.2",
+    "source": "https://github.com/flutter/flutter.git",
+    "commit": "d3b14c876900e553bc736ca19295fc09e3853e8e",
+    "engine_commit": "a804b261645ef8c13eb3d5c44a5c2fb0340c5539",
+    "dart_version": null,
+    "initialization_verified": false
+  },
+  "sing_box": {
+    "version": "1.13.19",
+    "windows_manifest": "sing-box.manifest.json",
+    "apple_library_verified": false
+  },
+  "xcode": {
+    "version": null,
+    "verified": false
+  }
+}
