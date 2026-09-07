@@ -21,7 +21,7 @@ func goTool() string {
 	return filepath.Join(runtime.GOROOT(), "bin", name)
 }
 
-func targetEnv(goos, arch string) []string {
+func targetEnv(goos, arch, cgo string) []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -29,53 +29,66 @@ func targetEnv(goos, arch string) []string {
 			env = append(env, entry)
 		}
 	}
-	return append(env, "GOOS="+goos, "GOARCH="+arch, "CGO_ENABLED=0")
+	return append(env, "GOOS="+goos, "GOARCH="+arch, "CGO_ENABLED="+cgo)
+}
+
+// importGraphViolations inspects source metadata only; it never compiles C.
+func importGraphViolations(t *testing.T, dir, goos, arch, cgo string, roots ...string) []string {
+	t.Helper()
+	args := append([]string{"list", "-deps", "-json"}, roots...)
+	cmd := exec.Command(goTool(), args...)
+	cmd.Dir = dir
+	cmd.Env = targetEnv(goos, arch, cgo)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list %s/cgo%s: %v", goos, cgo, err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(out)))
+	var violations []string
+	for {
+		var pkg struct {
+			ImportPath string
+			Standard   bool
+			Imports    []string
+			CgoFiles   []string
+		}
+		if err := decoder.Decode(&pkg); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if pkg.Standard {
+			continue
+		}
+		if len(pkg.CgoFiles) != 0 {
+			violations = append(violations, pkg.ImportPath+" contains cgo sources: "+strings.Join(pkg.CgoFiles, ", "))
+		}
+		switch pkg.ImportPath {
+		case "corp.example/overseas-access-gateway/internal/localapi",
+			"corp.example/overseas-access-gateway/internal/lineprobe",
+			"corp.example/overseas-access-gateway/internal/diagnosticmode",
+			"corp.example/overseas-access-gateway/internal/traceevent":
+		default:
+			violations = append(violations, "shared graph imports unapproved dependency "+pkg.ImportPath)
+		}
+		for _, dependency := range pkg.Imports {
+			if dependency == "syscall" || dependency == "C" {
+				violations = append(violations, pkg.ImportPath+" directly imports native API "+dependency)
+			}
+		}
+	}
+	return violations
 }
 
 func TestPortableImportGraph(t *testing.T) {
 	for _, target := range []struct{ os, arch string }{{"windows", "amd64"}, {"linux", "amd64"}, {"darwin", "arm64"}} {
-		t.Run(target.os, func(t *testing.T) {
-			cmd := exec.Command(goTool(), "list", "-deps", "-json", "./internal/localapi", "./internal/lineprobe", "./internal/diagnosticmode")
-			cmd.Dir = filepath.Join("..", "..")
-			cmd.Env = targetEnv(target.os, target.arch)
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatal(err)
-			}
-			decoder := json.NewDecoder(strings.NewReader(string(out)))
-			for {
-				var pkg struct {
-					ImportPath string
-					Standard   bool
-					Imports    []string
+		for _, cgo := range []string{"0", "1"} {
+			t.Run(target.os+"/cgo"+cgo, func(t *testing.T) {
+				for _, violation := range importGraphViolations(t, filepath.Join("..", ".."), target.os, target.arch, cgo, "./internal/localapi", "./internal/lineprobe", "./internal/diagnosticmode") {
+					t.Error(violation)
 				}
-				if err := decoder.Decode(&pkg); err == io.EOF {
-					break
-				} else if err != nil {
-					t.Fatal(err)
-				}
-				// Standard library OS implementations are expected. Shared project
-				// code must not depend on platform adapters or UI libraries.
-				if pkg.Standard {
-					continue
-				}
-				// An explicit shared-package allowlist also catches newly named
-				// platform bindings and UI frameworks, requiring boundary review.
-				switch pkg.ImportPath {
-				case "corp.example/overseas-access-gateway/internal/localapi",
-					"corp.example/overseas-access-gateway/internal/lineprobe",
-					"corp.example/overseas-access-gateway/internal/diagnosticmode",
-					"corp.example/overseas-access-gateway/internal/traceevent":
-				default:
-					t.Errorf("shared graph imports unapproved dependency %s", pkg.ImportPath)
-				}
-				for _, dependency := range pkg.Imports {
-					if dependency == "syscall" || dependency == "C" {
-						t.Errorf("%s directly imports native API %s", pkg.ImportPath, dependency)
-					}
-				}
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -84,7 +97,7 @@ func TestPortableBuild(t *testing.T) {
 		t.Run(target.os, func(t *testing.T) {
 			cmd := exec.Command(goTool(), "build", "./...")
 			cmd.Dir = filepath.Join("..", "..")
-			cmd.Env = targetEnv(target.os, target.arch)
+			cmd.Env = targetEnv(target.os, target.arch, "0")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("%s build: %v\n%s", target.os, err, out)
 			}
