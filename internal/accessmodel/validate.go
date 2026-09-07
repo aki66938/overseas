@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -56,7 +55,7 @@ func validateCredential(credential CredentialRef) error {
 	if credential.Kind != "dpapi-file" {
 		return fmt.Errorf("credential.kind must be %q", "dpapi-file")
 	}
-	if !filepath.IsAbs(credential.Path) {
+	if !windowsCredentialPathIsAbs(credential.Path) {
 		return fmt.Errorf("credential.path must be an absolute path")
 	}
 	return nil
