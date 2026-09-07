@@ -119,11 +119,11 @@ type Status struct {
 
 **Files:** 新建 `tests/contracts/platform_boundary_test.go`；修改必要的平台 build tags、`internal/clientapi/client_stub.go` 和 `.github/workflows/build.yml`。
 
-- [ ] 用 Go import graph 检查 `localapi`、`lineprobe`、`diagnosticmode` 不导入 Windows/Linux/Apple API 或 UI 包。
-- [ ] 测试非 Windows 平台协议样本解析；失败原因必须是待适配能力，不应是共享类型丢失。
-- [ ] 将共享请求类型从 Windows/stub 重复定义中集中；保持 `NetworkManager` 和 `ProcessSupervisor` 的事务接口。
+- [x] 用 Go import graph 检查 `localapi`、`lineprobe`、`diagnosticmode` 不导入 Windows/Linux/Apple API 或 UI 包。覆盖 CGO=0/1 及传递依赖。
+- [x] 测试非 Windows 平台协议样本解析；失败原因必须是待适配能力，不应是共享类型丢失。Ubuntu 24 原生通过。
+- [x] 将共享请求类型从 Windows/stub 重复定义中集中；保持 `NetworkManager` 和 `ProcessSupervisor` 的事务接口。
 - [ ] Windows/Linux 原生 runner 执行共享测试；macOS runner执行协议测试；真实网络测试显式 opt-in。
-- [ ] 验证三平台编译与 Windows 全量回归，提交 `refactor(core): enforce platform boundaries`。
+- [x] 验证三平台编译与 Windows 全量回归，提交 `refactor(core): enforce platform boundaries`。`8aa0874`、`ae1a837`；原生 Linux 路径修正 `3f1d7f1` 复审通过。macOS 原生运行仍待验证。
 
 ## Task 6: Flutter 同尺寸主页面与详情
 
@@ -131,12 +131,12 @@ type Status struct {
 
 **Interfaces:** Dart `AccessClient` 提供 `Future<Status> status()`、`connect()`、`disconnect()`、`Future<List<ProbeResult>> probe()`；测试注入 fake client。
 
-- [ ] Golden/Widget 测试覆盖 idle、connecting、connected、degraded、needs_action；同一窗口切页无尺寸变化。
-- [ ] 执行 `flutter test` 确认页面用例失败。
-- [ ] 实现固定 460×540 逻辑尺寸、深绿主操作、浅绿成功状态；使用已确认原型作为布局参考，数值明确为假数据。
-- [ ] 主页面显示状态、连接时长、连接/断开、详情；详情显示五个目标、延迟、更新时间与立即测速。
-- [ ] 错误页只显示短文案和动作；无检查更新、复制诊断或日志入口。窄显示区域、200% DPI、大字体允许内容滚动避免裁切。
-- [ ] `flutter analyze`、`flutter test` 通过；提交 `feat(ui): add shared desktop pages`。
+- [x] Golden/Widget 测试覆盖 idle、connecting、connected、degraded、needs_action；同一窗口切页无尺寸变化。
+- [x] 执行 `flutter test` 确认页面用例失败。
+- [x] 实现固定 460×540 逻辑尺寸、深绿主操作、浅绿成功状态；使用已确认原型作为布局参考，数值明确为假数据。
+- [x] 主页面显示状态、连接时长、连接/断开、详情；详情显示五个目标、延迟、更新时间与立即测速。
+- [x] 错误页只显示短文案和动作；无检查更新、复制诊断或日志入口。窄显示区域、200% DPI、大字体允许内容滚动避免裁切。
+- [x] `flutter analyze`、`flutter test` 通过；提交 `feat(ui): add shared desktop pages`。`8d3e379`、`480789c`：54 项测试、10 张固定样例图、Windows release 构建通过，独立复审通过；实机窗口行为归任务 7。
 
 ## Task 7: Windows IPC、窗口与托盘
 
