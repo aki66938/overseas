@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "request": {
+    "version": 1,
+    "id": "request-123",
+    "action": "status"
+  },
+  "response": {
+    "version": 1,
+    "id": "request-123",
+    "status": {
+      "state": "connected",
+      "quality": "good",
+      "connected_at": "2026-09-07T08:00:00Z",
+      "generation": 7
+    }
+  }
+}

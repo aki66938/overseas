@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/localapi"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
@@ -217,6 +218,84 @@ func TestPipeRejectsUnknownAction(t *testing.T) {
 	if len(controller.actions()) != 0 {
 		t.Fatalf("unknown action reached controller: %v", controller.actions())
 	}
+}
+
+func TestPipeV1ProjectsStatusWithoutLegacyMessage(t *testing.T) {
+	controller := &fakePipeController{
+		status:      Status{State: accessmodel.StateConnected, Message: "internal detail"},
+		diagnostics: Diagnostics{State: accessmodel.StateConnected, Generation: 12, Detail: "private log"},
+	}
+	request := localapi.Request{Version: localapi.Version, ID: "v1-status", Action: localapi.ActionStatus}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, ok := rawVersionedPipeLine(t, NewPipeServer(controller), append(data, '\n'))
+	if !ok {
+		t.Fatal("v1 status returned no response")
+	}
+	response, err := localapi.DecodeResponse(line, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status.State != localapi.StateConnected || response.Status.Generation != 12 {
+		t.Fatalf("status = %#v", response.Status)
+	}
+	if strings.Contains(string(line), "internal detail") || strings.Contains(string(line), "private log") {
+		t.Fatalf("ordinary v1 response leaked logs: %s", line)
+	}
+}
+
+func TestPipeV1ProjectsOneCoherentDiagnosticSnapshot(t *testing.T) {
+	controller := &fakePipeController{
+		status:      Status{State: accessmodel.StateConnected, ErrorCode: ErrorCoreStart},
+		diagnostics: Diagnostics{State: accessmodel.StateRestoring, Generation: 13},
+	}
+	request := localapi.Request{Version: localapi.Version, ID: "coherent", Action: localapi.ActionStatus}
+	data, _ := json.Marshal(request)
+	line, ok := rawVersionedPipeLine(t, NewPipeServer(controller), append(data, '\n'))
+	if !ok {
+		t.Fatal("no response")
+	}
+	response, err := localapi.DecodeResponse(line, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status.State != localapi.StateRestoring || response.Status.Generation != 13 || response.Status.ErrorCode != "" {
+		t.Fatalf("mixed snapshot = %#v", response.Status)
+	}
+}
+
+func TestPipeV1LeavesLegacyConnectCompatible(t *testing.T) {
+	controller := &fakePipeController{status: Status{State: accessmodel.StatePrepared}}
+	legacy, ok := pipeTransaction(t, NewPipeServer(controller), Request{ID: "legacy", Action: ActionConnect})
+	if !ok || legacy.ID != "legacy" || legacy.State != string(accessmodel.StatePrepared) {
+		t.Fatalf("legacy response = %#v, ok = %v", legacy, ok)
+	}
+}
+
+func TestPipeVersionNullCannotDowngradeToLegacy(t *testing.T) {
+	controller := &fakePipeController{status: Status{State: accessmodel.StatePrepared}}
+	_, ok := rawPipeTransaction(t, NewPipeServer(controller), `{"version":null,"id":"downgrade","action":"connect"}`+"\n")
+	if ok {
+		t.Fatal("null version returned a legacy response")
+	}
+	if len(controller.actions()) != 0 {
+		t.Fatalf("request reached controller: %v", controller.actions())
+	}
+}
+
+func rawVersionedPipeLine(t *testing.T, server *PipeServer, frame []byte) ([]byte, bool) {
+	t.Helper()
+	serverSide, clientSide := net.Pipe()
+	done := make(chan struct{})
+	go func() { server.serveConnection(serverSide); close(done) }()
+	go func() { _, _ = clientSide.Write(frame) }()
+	_ = clientSide.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := bufio.NewReader(clientSide).ReadBytes('\n')
+	_ = clientSide.Close()
+	<-done
+	return line, err == nil
 }
 
 func TestPipeRejectsArbitraryExecutableAndConfigFields(t *testing.T) {

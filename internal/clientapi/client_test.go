@@ -12,8 +12,98 @@ import (
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/localapi"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 )
+
+func TestRequestV1UsesVersionedShapeAndCallerContext(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	requestSeen := make(chan localapi.Request, 1)
+	go func() {
+		defer serverConn.Close()
+		line, _ := bufio.NewReader(serverConn).ReadBytes('\n')
+		request, _ := localapi.DecodeRequest(line)
+		requestSeen <- request
+		frame, _ := localapi.EncodeResponse(localapi.Response{Version: localapi.Version, ID: request.ID, Status: localapi.Status{State: localapi.StateIdle, Quality: localapi.QualityUnknown, Generation: 3}})
+		_, _ = serverConn.Write(frame)
+	}()
+	client := New(
+		WithDialPipe(func(ctx context.Context, _ string) (net.Conn, error) {
+			if _, ok := ctx.Deadline(); ok {
+				t.Fatal("client added a deadline to caller context")
+			}
+			return clientConn, nil
+		}),
+		WithRequestIDGenerator(func() (string, error) { return "v1-fixed", nil }),
+	)
+	status, err := client.StatusV1(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != localapi.StateIdle || status.Generation != 3 {
+		t.Fatalf("status = %#v", status)
+	}
+	request := <-requestSeen
+	if request.Version != localapi.Version || request.ID != "v1-fixed" || request.Action != localapi.ActionStatus {
+		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestRequestV1RejectsMismatchedResponseID(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	go func() {
+		defer serverConn.Close()
+		_, _ = bufio.NewReader(serverConn).ReadBytes('\n')
+		frame, _ := localapi.EncodeResponse(localapi.Response{Version: localapi.Version, ID: "other", Status: localapi.Status{State: localapi.StateIdle, Quality: localapi.QualityUnknown}})
+		_, _ = serverConn.Write(frame)
+	}()
+	client := New(
+		WithDialPipe(func(context.Context, string) (net.Conn, error) { return clientConn, nil }),
+		WithRequestIDGenerator(func() (string, error) { return "expected", nil }),
+	)
+	if _, err := client.StatusV1(context.Background()); !errors.Is(err, ErrMismatchedResponseID) {
+		t.Fatalf("error = %v, want %v", err, ErrMismatchedResponseID)
+	}
+}
+
+func TestRequestV1CancellationUnblocksReadWithoutDeadline(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	client := New(
+		WithDialPipe(func(context.Context, string) (net.Conn, error) { return clientConn, nil }),
+		WithRequestIDGenerator(func() (string, error) { return "cancel", nil }),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := client.StatusV1(ctx); done <- err }()
+	_, _ = bufio.NewReader(serverConn).ReadBytes('\n')
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled request returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled request remained blocked")
+	}
+}
+
+func TestRequestV1DoesNotTreatRemoteErrorAsSuccess(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	go func() {
+		defer serverConn.Close()
+		_, _ = bufio.NewReader(serverConn).ReadBytes('\n')
+		frame, _ := localapi.EncodeResponse(localapi.Response{Version: localapi.Version, ID: "error", ErrorCode: agent.ErrorInvalidAction, Status: localapi.Status{State: localapi.StateIdle, Quality: localapi.QualityUnknown}})
+		_, _ = serverConn.Write(frame)
+	}()
+	client := New(
+		WithDialPipe(func(context.Context, string) (net.Conn, error) { return clientConn, nil }),
+		WithRequestIDGenerator(func() (string, error) { return "error", nil }),
+	)
+	if _, err := client.StatusV1(context.Background()); !errors.Is(err, ErrRequestRejected) {
+		t.Fatalf("error = %v, want %v", err, ErrRequestRejected)
+	}
+}
 
 func TestConnectUsesFixedPipeDeadlineAndRequestShape(t *testing.T) {
 	serverConn, clientConn := net.Pipe()

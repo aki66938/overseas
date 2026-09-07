@@ -15,6 +15,7 @@ import (
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
+	"corp.example/overseas-access-gateway/internal/localapi"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 )
 
@@ -26,6 +27,7 @@ var (
 	ErrResponseTooLarge     = errors.New("named-pipe response exceeded size limit")
 	ErrInvalidResponseShape = errors.New("named-pipe response shape is invalid")
 	ErrMismatchedResponseID = errors.New("named-pipe response ID does not match request")
+	ErrRequestRejected      = errors.New("local API request was rejected")
 	ErrInvalidResponseState = errors.New("named-pipe response state is not approved")
 	ErrInvalidResponseCode  = errors.New("named-pipe response error code is not approved")
 )
@@ -96,6 +98,77 @@ func (c *Client) Disconnect(ctx context.Context) (Status, error) {
 
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	return c.requestStatus(ctx, agent.ActionStatus)
+}
+
+// ConnectV1, DisconnectV1, and StatusV1 expose the platform-independent
+// contract. The legacy methods above remain for the shipped Walk client.
+func (c *Client) ConnectV1(ctx context.Context) (localapi.Status, error) {
+	return c.requestV1(ctx, localapi.ActionConnect, 0)
+}
+
+func (c *Client) DisconnectV1(ctx context.Context) (localapi.Status, error) {
+	return c.requestV1(ctx, localapi.ActionDisconnect, 0)
+}
+
+func (c *Client) StatusV1(ctx context.Context) (localapi.Status, error) {
+	return c.requestV1(ctx, localapi.ActionStatus, 0)
+}
+
+func (c *Client) requestV1(ctx context.Context, action string, durationMinutes int) (localapi.Status, error) {
+	if c == nil {
+		return localapi.Status{}, fmt.Errorf("%w: client is nil", ErrServiceUnavailable)
+	}
+	id, err := c.requestIDFactory()
+	if err != nil {
+		return localapi.Status{}, fmt.Errorf("%w: %v", ErrRequestID, err)
+	}
+	connection, err := c.dialPipe(ctx, agent.PipeName)
+	if err != nil {
+		return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+	}
+	defer connection.Close()
+	watcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = connection.Close()
+		case <-watcherDone:
+		}
+	}()
+	defer close(watcherDone)
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+		}
+	}
+	frame, err := json.Marshal(localapi.Request{Version: localapi.Version, ID: id, Action: action, DurationMinutes: durationMinutes})
+	if err != nil {
+		return localapi.Status{}, err
+	}
+	if len(frame)+1 > localapi.MaxFrameBytes {
+		return localapi.Status{}, ErrInvalidResponseShape
+	}
+	if _, err := connection.Write(append(frame, '\n')); err != nil {
+		return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+	}
+	responseFrame, err := readBoundedFrame(connection, localapi.MaxFrameBytes)
+	if err != nil {
+		if ctx.Err() != nil {
+			return localapi.Status{}, ctx.Err()
+		}
+		return localapi.Status{}, err
+	}
+	response, err := localapi.DecodeResponse(responseFrame, id)
+	if err != nil {
+		if errors.Is(err, localapi.ErrMismatchedResponseID) {
+			return localapi.Status{}, ErrMismatchedResponseID
+		}
+		return localapi.Status{}, ErrInvalidResponseShape
+	}
+	if response.ErrorCode != "" {
+		return localapi.Status{}, fmt.Errorf("%w: %s", ErrRequestRejected, response.ErrorCode)
+	}
+	return response.Status, nil
 }
 
 func (c *Client) Diagnostics(ctx context.Context) (Diagnostics, error) {
@@ -228,9 +301,13 @@ func decodeTraceMessage(message string, after uint64) (traceevent.Batch, error) 
 }
 
 func readResponseFrame(connection net.Conn) ([]byte, error) {
-	reader := bufio.NewReader(io.LimitReader(connection, agent.MaxPipeFrameBytes+1))
+	return readBoundedFrame(connection, agent.MaxPipeFrameBytes)
+}
+
+func readBoundedFrame(connection net.Conn, limit int) ([]byte, error) {
+	reader := bufio.NewReader(io.LimitReader(connection, int64(limit)+1))
 	frame, err := reader.ReadBytes('\n')
-	if len(frame) > agent.MaxPipeFrameBytes {
+	if len(frame) > limit {
 		return nil, ErrResponseTooLarge
 	}
 	if err != nil {

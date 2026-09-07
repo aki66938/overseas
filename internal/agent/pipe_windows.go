@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/localapi"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 
 	"github.com/Microsoft/go-winio"
@@ -160,6 +161,10 @@ func (s *PipeServer) serveConnection(connection net.Conn) {
 	if err != nil {
 		return
 	}
+	if isVersionedPipeRequest(frame) {
+		s.serveV1(connection, frame)
+		return
+	}
 	request, err := decodePipeRequest(frame)
 	if err != nil {
 		return
@@ -179,6 +184,55 @@ func (s *PipeServer) serveConnection(connection net.Conn) {
 		return
 	}
 	data = append(data, '\n')
+	_, _ = connection.Write(data)
+}
+
+func isVersionedPipeRequest(frame []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(frame, &envelope) != nil {
+		return false
+	}
+	_, present := envelope["version"]
+	return present
+}
+
+func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
+	request, err := localapi.DecodeRequest(frame)
+	if err != nil {
+		return
+	}
+	operationTimeout := PipeTimeoutForAction(request.Action)
+	if err := connection.SetDeadline(time.Now().Add(operationTimeout)); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+
+	responseError := ""
+	switch request.Action {
+	case localapi.ActionConnect:
+		_ = s.controller.Connect(ctx)
+	case localapi.ActionDisconnect:
+		_ = s.controller.Disconnect(ctx)
+	case localapi.ActionStatus:
+		// Diagnostics below supplies one coherent state/generation snapshot.
+	case localapi.ActionProbe, localapi.ActionDiagnosticEnable:
+		responseError = ErrorInvalidAction
+	}
+	diagnostics := s.controller.Diagnostics()
+	projected := localapi.ProjectStatus(localapi.ProjectionInput{
+		State: string(diagnostics.State), Quality: localapi.QualityUnknown,
+		ErrorCode: diagnostics.ErrorCode, Generation: diagnostics.Generation,
+	})
+	data, err := localapi.EncodeResponse(localapi.Response{
+		Version: localapi.Version, ID: request.ID, Status: projected, ErrorCode: responseError,
+	})
+	if err != nil {
+		return
+	}
+	if err := connection.SetDeadline(time.Now().Add(PipeOperationTimeout)); err != nil {
+		return
+	}
 	_, _ = connection.Write(data)
 }
 
