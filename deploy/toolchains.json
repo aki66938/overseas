@@ -3,7 +3,11 @@
   "go": {
     "version": "1.27.0",
     "windows_executable_sha256": "7d828191ba32519a9c9361789ab647486236ed45c660889196c7770a8ff1985c",
-    "legacy_lock": "deploy/client/build-lock.json"
+    "legacy_lock": "deploy/client/build-lock.json",
+    "linux_amd64_archive_source": "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+    "linux_amd64_archive_sha256": "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+    "linux_amd64_archive_verified": true,
+    "linux_version_command_verified": true
   },
   "flutter": {
     "version": "3.47.2",

@@ -14,11 +14,17 @@
 | 平台 | 当前条件 | 发布门槛 |
 |---|---|---|
 | Windows | Go/PowerShell/Flutter 可运行；VS BuildTools 17.14.39；Flutter 原生 Release 样例构建通过 | 产品 Release 构建、签名 MSI、新终端生命周期测试 |
-| Ubuntu 22.04/24.04 | 尚未指定专用测试机 | 原生 CLI、网络 namespace 与 DEB 生命周期测试 |
+| Ubuntu 22.04/24.04 | 新建 Ubuntu 24.04.4 测试 VM 116，172.20.8.48；原生共享测试进行中 | CLI、网络 namespace 与 DEB 生命周期测试；22.04 仍待验证 |
 | Rocky 9 | 尚未指定专用测试机 | 原生 CLI、网络 namespace 与 RPM 生命周期测试 |
-| macOS arm64 | 未提供 Mac、Xcode 与 Developer ID 身份 | 最小扩展签名/安装/启停成功后再接入完整隧道 |
+| macOS arm64 | 用户指定 EC 唯一受管 Apple 设备，开发后由用户测试；Xcode/Developer ID 未核验 | 最小扩展签名/安装/启停和签名分发仍待验证 |
 
 不在现有生产服务器上执行改变路由、DNS 或防火墙的开发测试。缺少平台只阻塞该平台验收。
+
+### Ubuntu 专用测试机
+
+用户 2026-09-07 授权在 PVE 新建。VM 116 `regen-access-ubuntu-test` 位于 pve02：4 vCPU、4 GiB 内存、32 GiB local-lvm 磁盘；`onboot=0`，不承载业务。DHCP 地址 `172.20.8.48/22`，网关 `172.20.10.1`，DNS `172.20.9.1/.2`。账号 `regenbio` 使用管理公钥，密码登录关闭；主机公钥通过 PVE guest agent 核对后固定到独立 known_hosts。
+
+镜像为 [Ubuntu 官方 24.04 release-20260826](https://cloud-images.ubuntu.com/releases/noble/release-20260826/)，SHA-256 `d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30`，下载完成后复核通过。初始化 `cloud-init status --long` 为 done，errors 为空。已验证 GCC 13.3.0、Git 2.43.0 和 Go 1.27.0 linux/amd64。基础环境可用不等同于产品 Linux 网络验收通过。
 
 ## Flutter
 
