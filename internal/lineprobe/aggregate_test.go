@@ -2,6 +2,30 @@ package lineprobe
 
 import "testing"
 
+func TestAggregatePublishesAuthoritativeTargetCounts(t *testing.T) {
+	var a Aggregate
+	results := []Result{{ID: "google", ErrorCode: "timeout"}, {ID: "claude", Reachable: true, HTTPStatus: 403}}
+	for _, want := range []int{1, 2, 3, 3} {
+		a.Update(results)
+		if results[0].ConsecutiveFailures == nil || *results[0].ConsecutiveFailures != want {
+			t.Fatalf("failed target: %+v want %d", results[0], want)
+		}
+		if results[1].ConsecutiveFailures == nil || *results[1].ConsecutiveFailures != 0 {
+			t.Fatalf("healthy target: %+v", results[1])
+		}
+		if results[0].Reachable || results[0].ErrorCode != "timeout" || results[1].HTTPStatus != 403 {
+			t.Fatal("raw attempt changed")
+		}
+	}
+	results[0].Reachable = true
+	results[0].HTTPStatus = 200
+	results[0].ErrorCode = ""
+	a.Update(results)
+	if *results[0].ConsecutiveFailures != 0 {
+		t.Fatal("recovery did not reset count")
+	}
+}
+
 func TestAggregateFailureHysteresisAndRecovery(t *testing.T) {
 	var a Aggregate
 	results := []Result{{ID: "a", Reachable: false}, {ID: "b", Reachable: false}, {ID: "c", Reachable: false}, {ID: "d", Reachable: true, HTTPStatus: 403}, {ID: "e", Reachable: true, HTTPStatus: 429}}

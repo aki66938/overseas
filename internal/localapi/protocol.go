@@ -143,6 +143,9 @@ func validProbeResults(response Response) bool {
 			return false
 		}
 		delete(ids, r.ID)
+		if r.ConsecutiveFailures != nil && (*r.ConsecutiveFailures < 0 || *r.ConsecutiveFailures > 3) {
+			return false
+		}
 		switch r.ErrorCode {
 		case "", "timeout", "canceled", "tls_error", "network_error", "http_server_error", "invalid_target":
 		default:

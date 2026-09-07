@@ -30,6 +30,29 @@ func TestProbeResponseBoundedAndGenerationChecked(t *testing.T) {
 	}
 }
 
+func TestProbeConsecutiveFailuresOptionalAndBounded(t *testing.T) {
+	response := Response{Version: 1, ID: "counts", Status: Status{State: StateConnected, Quality: QualityUnknown, Generation: 1}, ProbeGeneration: 1, ProbeResults: []lineprobe.Result{{ID: "google", ErrorCode: "timeout", CheckedAt: time.Now()}}}
+	data, _ := json.Marshal(response)
+	old, err := DecodeResponse(data, "counts")
+	if err != nil || old.ProbeResults[0].ConsecutiveFailures != nil {
+		t.Fatalf("absent must remain unknown: %+v %v", old, err)
+	}
+	for _, count := range []int{-1, 0, 1, 2, 3, 4} {
+		response.ProbeResults[0].ConsecutiveFailures = &count
+		data, _ = json.Marshal(response)
+		got, err := DecodeResponse(data, "counts")
+		if count < 0 || count > 3 {
+			if err == nil {
+				t.Fatalf("accepted invalid %d", count)
+			}
+			continue
+		}
+		if err != nil || got.ProbeResults[0].ConsecutiveFailures == nil || *got.ProbeResults[0].ConsecutiveFailures != count {
+			t.Fatalf("%d: %+v %v", count, got, err)
+		}
+	}
+}
+
 func TestHistoricalProbeResponseRequiresExplicitFlagAndOlderGeneration(t *testing.T) {
 	response := Response{Version: 1, ID: "history", Status: Status{State: StateIdle, Quality: QualityUnknown, Generation: 4}, ProbeGeneration: 3, ProbeHistorical: true, ProbeResults: []lineprobe.Result{{ID: "google", Reachable: true, HTTPStatus: 200, CheckedAt: time.Now()}}}
 	data, _ := json.Marshal(response)

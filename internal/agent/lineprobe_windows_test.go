@@ -47,6 +47,11 @@ func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 		if len(got.ProbeResults) != 5 || got.ProbeGeneration != got.Status.Generation || got.ErrorCode != "" {
 			t.Fatal(got)
 		}
+		for _, r := range got.ProbeResults {
+			if r.ConsecutiveFailures == nil || *r.ConsecutiveFailures != 0 {
+				t.Fatal("healthy round count missing", r)
+			}
+		}
 	}
 	oldGeneration := c.LocalStatusSnapshot().Generation
 	c.Disconnect(context.Background())
@@ -56,6 +61,12 @@ func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 	}
 	if got := request("status"); len(got.ProbeResults) != 5 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration || got.ProbeGeneration >= got.Status.Generation {
 		t.Fatal(got)
+	} else {
+		for _, r := range got.ProbeResults {
+			if r.ConsecutiveFailures == nil || *r.ConsecutiveFailures != 0 {
+				t.Fatal("historical count lost", r)
+			}
+		}
 	}
 	if calls.Load() != before {
 		t.Fatal("disconnected history started traffic")

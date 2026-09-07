@@ -97,7 +97,14 @@ func (s *Scheduler) Start(ctx context.Context, generation uint64) {
 
 func (s *Scheduler) Snapshot() Snapshot { s.mu.Lock(); defer s.mu.Unlock(); return s.snapshotLocked() }
 func (s *Scheduler) snapshotLocked() Snapshot {
-	return Snapshot{Generation: s.last.Generation, Results: append([]Result(nil), s.last.Results...)}
+	results := append([]Result(nil), s.last.Results...)
+	for i := range results {
+		if results[i].ConsecutiveFailures != nil {
+			count := *results[i].ConsecutiveFailures
+			results[i].ConsecutiveFailures = &count
+		}
+	}
+	return Snapshot{Generation: s.last.Generation, Results: results}
 }
 
 // Manual joins an active round. A caller's cancellation ends only its wait,

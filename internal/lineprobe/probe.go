@@ -17,6 +17,9 @@ type Result struct {
 	HTTPStatus int       `json:"http_status"`
 	ErrorCode  string    `json:"error_code,omitempty"`
 	CheckedAt  time.Time `json:"checked_at"`
+	// Nil means the service did not provide round history (older API response).
+	// An authoritative zero is different from absent; abnormal starts at three.
+	ConsecutiveFailures *int `json:"consecutive_failures,omitempty"`
 }
 
 type Prober struct {

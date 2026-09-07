@@ -12,13 +12,15 @@ type Aggregate struct {
 	quality  string
 }
 
+// Update annotates one completed round with authoritative per-target counts.
+// It is called only at publication, never for status reads.
 func (a *Aggregate) Update(results []Result) string {
 	if a.failures == nil {
 		a.failures = make(map[string]int)
 	}
 	sustained := 0
 	latencies := make([]int64, 0, len(results))
-	for _, r := range results {
+	for i, r := range results {
 		if r.Reachable && r.HTTPStatus >= 200 && r.HTTPStatus < 500 {
 			a.failures[r.ID] = 0
 			latencies = append(latencies, r.LatencyMS)
@@ -28,6 +30,8 @@ func (a *Aggregate) Update(results []Result) string {
 		if a.failures[r.ID] >= 3 {
 			sustained++
 		}
+		count := a.failures[r.ID]
+		results[i].ConsecutiveFailures = &count
 	}
 	if sustained > len(results)/2 {
 		a.quality = "failed"

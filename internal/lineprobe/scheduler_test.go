@@ -217,8 +217,27 @@ func TestSchedulerFakeClockThreeFailuresRecoveryAndReconnect(t *testing.T) {
 		if q := await(t, qualities); q != step.want {
 			t.Fatalf("round %d: %s", i, q)
 		}
+		wantCount := []int{0, 1, 2, 3, 0, 1}[i]
+		for poll := 0; poll < 3; poll++ {
+			got := s.Snapshot()
+			for _, r := range got.Results {
+				if r.ConsecutiveFailures == nil || *r.ConsecutiveFailures != wantCount {
+					t.Fatalf("round %d poll %d: %+v", i, poll, r)
+				}
+			}
+			// A client can mutate its own optional value without changing service history.
+			*got.Results[0].ConsecutiveFailures = 99
+		}
 	}
 	cancel()
+	history := s.Manual(context.Background())
+	if history.Generation != 1 || *history.Results[0].ConsecutiveFailures != 1 {
+		t.Fatal("history lost", history)
+	}
+	*history.Results[0].ConsecutiveFailures = 99
+	if got := s.Snapshot(); *got.Results[0].ConsecutiveFailures != 1 {
+		t.Fatal("historical pointer shared")
+	}
 	next, cancelNext := context.WithCancel(context.Background())
 	defer cancelNext()
 	s.Start(next, 3)
@@ -236,5 +255,8 @@ func TestSchedulerFakeClockThreeFailuresRecoveryAndReconnect(t *testing.T) {
 	await(t, done)
 	if q := await(t, qualities); q != "unknown" {
 		t.Fatalf("reconnect reused failure history: %s", q)
+	}
+	if got := s.Snapshot(); got.Generation != 3 || *got.Results[0].ConsecutiveFailures != 1 {
+		t.Fatal("reconnect count not reset", got)
 	}
 }
