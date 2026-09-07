@@ -1,0 +1,105 @@
+package lineprobe
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+type Result struct {
+	ID         string    `json:"id"`
+	LatencyMS  int64     `json:"latency_ms"`
+	Reachable  bool      `json:"reachable"`
+	HTTPStatus int       `json:"http_status"`
+	ErrorCode  string    `json:"error_code,omitempty"`
+	CheckedAt  time.Time `json:"checked_at"`
+}
+
+type Prober struct {
+	transport http.RoundTripper
+	now       func() time.Time
+}
+
+// NewProber permits transport injection for local TLS tests. The production
+// transport never uses environment proxies or pooled connections: the OS-owned
+// route and DNS path are measured anew. TLS verification remains enabled.
+func NewProber(transport http.RoundTripper, now func() time.Time) *Prober {
+	if transport == nil {
+		transport = &http.Transport{Proxy: nil, DisableKeepAlives: true,
+			DialContext:         (&net.Dialer{Timeout: RoundBudget}).DialContext,
+			TLSHandshakeTimeout: RoundBudget, ResponseHeaderTimeout: RoundBudget,
+			MaxResponseHeaderBytes: 16 * 1024}
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &Prober{transport: transport, now: now}
+}
+
+func (p *Prober) Probe(ctx context.Context, target Target) Result {
+	started := p.now()
+	result := Result{ID: target.ID, CheckedAt: started}
+	// Also bound callers outside the scheduler. The shared round context can
+	// cancel earlier; fallback GET shares this same deadline.
+	ctx, cancel := context.WithTimeout(ctx, RoundBudget)
+	defer cancel()
+	client := &http.Client{Transport: p.transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		request, err := http.NewRequestWithContext(ctx, method, target.URL, nil)
+		if err != nil || request.URL.Scheme != "https" || request.URL.User != nil {
+			result.ErrorCode = "invalid_target"
+			return result
+		}
+		request.Close = true
+		response, err := client.Do(request)
+		result.LatencyMS = p.now().Sub(started).Milliseconds()
+		if result.LatencyMS < 0 {
+			result.LatencyMS = 0
+		}
+		if result.LatencyMS > RoundBudget.Milliseconds() {
+			result.LatencyMS = RoundBudget.Milliseconds()
+		}
+		if err != nil {
+			result.Reachable = false
+			result.ErrorCode = probeError(err)
+			return result
+		}
+		result.Reachable = response.StatusCode >= 200 && response.StatusCode < 500
+		result.HTTPStatus = response.StatusCode
+		if !result.Reachable {
+			result.ErrorCode = "http_server_error"
+		}
+		if method == http.MethodGet {
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusMethodNotAllowed || method == http.MethodGet {
+			return result
+		}
+	}
+	return result
+}
+
+func probeError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	var cert *tls.CertificateVerificationError
+	var unknown x509.UnknownAuthorityError
+	if errors.As(err, &cert) || errors.As(err, &unknown) {
+		return "tls_error"
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return "timeout"
+	}
+	return "network_error"
+}

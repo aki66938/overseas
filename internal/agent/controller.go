@@ -154,6 +154,9 @@ type Dependencies struct {
 	WriteConfigAtomic func(string, []byte) error
 	Now               func() time.Time
 	Trace             traceevent.Sink
+	// ConnectedLifetime starts optional generation-owned observation outside
+	// the controller mutex. It must return promptly; ctx ends before restoration.
+	ConnectedLifetime func(context.Context, uint64)
 }
 
 type Option func(*Dependencies)
@@ -286,6 +289,9 @@ func (c *Controller) Connect(ctx context.Context) Status {
 		close(active.done)
 		c.mu.Unlock()
 		if connected {
+			if c.deps.ConnectedLifetime != nil {
+				c.deps.ConnectedLifetime(monitorContext, generation)
+			}
 			c.startRuntimeMonitor(monitorContext, generation, outcome.instance, monitorDone, outcome.prepared)
 		}
 		return outcome.status

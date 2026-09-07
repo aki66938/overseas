@@ -16,6 +16,7 @@ import (
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
 	"corp.example/overseas-access-gateway/internal/coreverify"
+	"corp.example/overseas-access-gateway/internal/lineprobe"
 	"corp.example/overseas-access-gateway/internal/runtimeowner"
 	"corp.example/overseas-access-gateway/internal/secret"
 	"corp.example/overseas-access-gateway/internal/singconfig"
@@ -282,6 +283,8 @@ func buildService() (*serviceHandler, error) {
 	if err != nil {
 		return nil, err
 	}
+	var controller *agent.Controller
+	probes := lineprobe.NewScheduler(nil, nil, func(generation uint64, quality string) bool { return controller.UpdateLineQuality(generation, quality) })
 	dependencies := agent.Dependencies{
 		ExecutablePath:    corePath,
 		ConfigPath:        renderedPath,
@@ -292,11 +295,12 @@ func buildService() (*serviceHandler, error) {
 		WriteConfigAtomic: writeConfigAtomic,
 		Now:               time.Now,
 		Trace:             recorder,
+		ConnectedLifetime: probes.Start,
 	}
-	controller := agent.NewController(bootstrap.Policy, network, process, agent.WithDependencies(dependencies))
+	controller = agent.NewController(bootstrap.Policy, network, process, agent.WithDependencies(dependencies))
 	handler := &serviceHandler{
 		controller: controller,
-		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder)),
+		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder), agent.WithLineProbe(probes)),
 		trace:      recorder,
 		preparer:   network,
 	}

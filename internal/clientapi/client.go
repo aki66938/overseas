@@ -115,16 +115,31 @@ func (c *Client) StatusV1(ctx context.Context) (localapi.Status, error) {
 }
 
 func (c *Client) requestV1(ctx context.Context, action string, durationMinutes int) (localapi.Status, error) {
+	response, err := c.requestV1Response(ctx, action, durationMinutes)
+	return response.Status, err
+}
+
+// ProbeV1 measures the fixed HTTPS targets within the connected lifetime.
+func (c *Client) ProbeV1(ctx context.Context) (localapi.Response, error) {
+	return c.requestV1Response(ctx, localapi.ActionProbe, 0)
+}
+
+// StatusDetailsV1 includes the latest generation's stored probe results.
+func (c *Client) StatusDetailsV1(ctx context.Context) (localapi.Response, error) {
+	return c.requestV1Response(ctx, localapi.ActionStatus, 0)
+}
+
+func (c *Client) requestV1Response(ctx context.Context, action string, durationMinutes int) (localapi.Response, error) {
 	if c == nil {
-		return localapi.Status{}, fmt.Errorf("%w: client is nil", ErrServiceUnavailable)
+		return localapi.Response{}, fmt.Errorf("%w: client is nil", ErrServiceUnavailable)
 	}
 	id, err := c.requestIDFactory()
 	if err != nil {
-		return localapi.Status{}, fmt.Errorf("%w: %v", ErrRequestID, err)
+		return localapi.Response{}, fmt.Errorf("%w: %v", ErrRequestID, err)
 	}
 	connection, err := c.dialPipe(ctx, agent.PipeName)
 	if err != nil {
-		return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+		return localapi.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
 	defer connection.Close()
 	watcherDone := make(chan struct{})
@@ -138,37 +153,37 @@ func (c *Client) requestV1(ctx context.Context, action string, durationMinutes i
 	defer close(watcherDone)
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := connection.SetDeadline(deadline); err != nil {
-			return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+			return localapi.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 		}
 	}
 	frame, err := json.Marshal(localapi.Request{Version: localapi.Version, ID: id, Action: action, DurationMinutes: durationMinutes})
 	if err != nil {
-		return localapi.Status{}, err
+		return localapi.Response{}, err
 	}
 	if len(frame)+1 > localapi.MaxFrameBytes {
-		return localapi.Status{}, ErrInvalidResponseShape
+		return localapi.Response{}, ErrInvalidResponseShape
 	}
 	if _, err := connection.Write(append(frame, '\n')); err != nil {
-		return localapi.Status{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+		return localapi.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
 	responseFrame, err := readBoundedFrame(connection, localapi.MaxFrameBytes)
 	if err != nil {
 		if ctx.Err() != nil {
-			return localapi.Status{}, ctx.Err()
+			return localapi.Response{}, ctx.Err()
 		}
-		return localapi.Status{}, err
+		return localapi.Response{}, err
 	}
 	response, err := localapi.DecodeResponse(responseFrame, id)
 	if err != nil {
 		if errors.Is(err, localapi.ErrMismatchedResponseID) {
-			return localapi.Status{}, ErrMismatchedResponseID
+			return localapi.Response{}, ErrMismatchedResponseID
 		}
-		return localapi.Status{}, ErrInvalidResponseShape
+		return localapi.Response{}, ErrInvalidResponseShape
 	}
 	if response.ErrorCode != "" {
-		return localapi.Status{}, fmt.Errorf("%w: %s", ErrRequestRejected, response.ErrorCode)
+		return localapi.Response{}, fmt.Errorf("%w: %s", ErrRequestRejected, response.ErrorCode)
 	}
-	return response.Status, nil
+	return response, nil
 }
 
 func (c *Client) Diagnostics(ctx context.Context) (Diagnostics, error) {

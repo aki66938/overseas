@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"corp.example/overseas-access-gateway/internal/accessmodel"
+	"corp.example/overseas-access-gateway/internal/lineprobe"
 	"corp.example/overseas-access-gateway/internal/localapi"
 	"corp.example/overseas-access-gateway/internal/traceevent"
 
@@ -99,6 +100,11 @@ type PipeServer struct {
 	controller  PipeController
 	redactions  [][]byte
 	traceSource traceevent.Source
+	lineProbe   *lineprobe.Scheduler
+}
+
+func WithLineProbe(scheduler *lineprobe.Scheduler) PipeOption {
+	return func(server *PipeServer) { server.lineProbe = scheduler }
 }
 
 func NewPipeServer(controller PipeController, options ...PipeOption) *PipeServer {
@@ -218,7 +224,13 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 		_ = s.controller.Disconnect(ctx)
 	case localapi.ActionStatus:
 		// Diagnostics below supplies one coherent state/generation snapshot.
-	case localapi.ActionProbe, localapi.ActionDiagnosticEnable:
+	case localapi.ActionProbe:
+		if s.lineProbe == nil || v1SnapshotFor(s.controller).Status.State != accessmodel.StateConnected {
+			responseError = "probe_unavailable"
+		} else {
+			s.lineProbe.Manual(ctx)
+		}
+	case localapi.ActionDiagnosticEnable:
 		responseError = ErrorInvalidAction
 	}
 	snapshot := v1SnapshotFor(s.controller)
@@ -230,9 +242,20 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 		State: string(snapshot.Status.State), Quality: snapshot.Quality,
 		ErrorCode: snapshot.Status.ErrorCode, Generation: snapshot.Generation, ConnectedAt: connectedAt,
 	})
-	data, err := localapi.EncodeResponse(localapi.Response{
+	response := localapi.Response{
 		Version: localapi.Version, ID: request.ID, Status: projected, ErrorCode: responseError,
-	})
+	}
+	if s.lineProbe != nil && snapshot.Status.State == accessmodel.StateConnected {
+		probes := s.lineProbe.Snapshot()
+		if probes.Generation == snapshot.Generation && len(probes.Results) > 0 {
+			response.ProbeGeneration = probes.Generation
+			response.ProbeResults = probes.Results
+		}
+	}
+	if request.Action == localapi.ActionProbe && len(response.ProbeResults) == 0 {
+		response.ErrorCode = "probe_unavailable"
+	}
+	data, err := localapi.EncodeResponse(response)
 	if err != nil {
 		return
 	}
@@ -259,6 +282,8 @@ func PipeTimeoutForAction(action string) time.Duration {
 		return PipeConnectTimeout
 	case ActionDisconnect:
 		return PipeDisconnectTimeout
+	case localapi.ActionProbe:
+		return lineprobe.RoundBudget + PipeOperationTimeout
 	default:
 		return PipeOperationTimeout
 	}

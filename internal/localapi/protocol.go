@@ -3,6 +3,7 @@ package localapi
 
 import (
 	"bytes"
+	"corp.example/overseas-access-gateway/internal/lineprobe"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,10 +50,12 @@ type Status struct {
 // Response deliberately has no message, detail, log, path, command, or URL
 // field. Detailed diagnostics travel through a separately authorized mode.
 type Response struct {
-	Version   int    `json:"version"`
-	ID        string `json:"id"`
-	Status    Status `json:"status"`
-	ErrorCode string `json:"error_code,omitempty"`
+	Version         int                `json:"version"`
+	ID              string             `json:"id"`
+	Status          Status             `json:"status"`
+	ErrorCode       string             `json:"error_code,omitempty"`
+	ProbeGeneration uint64             `json:"probe_generation,omitempty"`
+	ProbeResults    []lineprobe.Result `json:"probe_results,omitempty"`
 }
 
 func DecodeRequest(frame []byte) (Request, error) {
@@ -92,7 +95,7 @@ func DecodeResponse(frame []byte, requestID string) (Response, error) {
 	if err := decodeOne(frame, &response); err != nil {
 		return Response{}, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
-	if response.Version != Version || !validID(response.ID) || !ValidStatus(response.Status) {
+	if response.Version != Version || !validID(response.ID) || !ValidStatus(response.Status) || !validProbeResults(response) {
 		return Response{}, ErrInvalidResponse
 	}
 	if response.ID != requestID {
@@ -102,6 +105,9 @@ func DecodeResponse(frame []byte, requestID string) (Response, error) {
 }
 
 func EncodeResponse(response Response) ([]byte, error) {
+	if !validProbeResults(response) {
+		return nil, ErrInvalidResponse
+	}
 	data, err := json.Marshal(response)
 	if err != nil {
 		return nil, err
@@ -110,6 +116,31 @@ func EncodeResponse(response Response) ([]byte, error) {
 		return nil, ErrFrameTooLarge
 	}
 	return append(data, '\n'), nil
+}
+
+func validProbeResults(response Response) bool {
+	if len(response.ProbeResults) == 0 {
+		return response.ProbeGeneration == 0
+	}
+	if len(response.ProbeResults) > 5 || response.ProbeGeneration != response.Status.Generation || response.Status.State != StateConnected {
+		return false
+	}
+	ids := make(map[string]bool)
+	for _, target := range lineprobe.Targets() {
+		ids[target.ID] = true
+	}
+	for _, r := range response.ProbeResults {
+		if !ids[r.ID] || r.LatencyMS < 0 || r.LatencyMS > 5000 || r.HTTPStatus < 0 || r.HTTPStatus > 599 || r.CheckedAt.IsZero() {
+			return false
+		}
+		delete(ids, r.ID)
+		switch r.ErrorCode {
+		case "", "timeout", "canceled", "tls_error", "network_error", "http_server_error", "invalid_target":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func decodeOne(frame []byte, destination any) error {
