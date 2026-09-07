@@ -97,3 +97,61 @@ allow with a nonempty Package SID is no longer treated as applying to the
 desktop sing-box executable. Real VM101 WhatIf then passed with no evidence,
 service, listener, file, or firewall mutation. Fresh post-fix regression:
 locked Go test/vet passed and both full Pester engines passed 117/117.
+
+---
+
+## 2026-09-07 cross-platform Task 7 Windows Flutter integration (new task; checkpoint)
+
+This section is independent of the historical Task 7 report above. Implementer base: `5d78c00`; parent documentation commits were made concurrently. Worktree: `C:/Users/Eleme/codex_workspace/overseas-access-gateway/.worktrees/cross-platform`. Code is scoped to `apps/regen_access`; no backend or production-network changes.
+
+### Implemented
+
+- Windows-only MethodChannel AccessClient selects the real native bridge in main; injectable fakes and unsupported-platform unavailable fallback remain.
+- Native bridge permits only status/connect/disconnect/probe and 32-hex request IDs, constructs APIv1 newline frames itself, and connects only `\\.\pipe\RegenBioOverseasAccess`. Test endpoint injection exists only under the standalone `REGEN_NATIVE_TEST` build definition. Maximum response is 64 KiB; partial reads are assembled; incomplete/oversized frames are rejected. SQOS identification prevents the pipe server impersonating the GUI at a stronger level.
+- One background worker and at most three outstanding requests; platform results return on the window thread. Shutdown signals the worker, cancels pending overlapped I/O, waits for OS completion before destroying OVERLAPPED storage, joins, drains posted notifications without raw object pointers, then destroys results before the Flutter engine. GUI exit does not send disconnect or stop the service.
+- Dart validates response identity/version/framing, approved status/error fields, probe target/latency/status/error/timestamp/generation, including RFC3339 shape and zero timestamps. Observation budgets remain 130/100/10/8 seconds. Native I/O timeout is classified conservatively: a definite pre-dispatch failure may release ownership; after possible dispatch, a transport loss or invalid reply becomes OperationUncertainException. Page and tray remain lifecycle-locked for this GUI session even after a fresh terminal status. Read-only refresh continues.
+- Page and tray use one action owner. Tray includes current state/brief current-generation latency, home/details navigation within one window, lifecycle label, per-user UI startup, and “退出应用”. Opening, hiding, navigating, startup and exit never connect or disconnect. A locally drawn app-owned R mark replaces the tray/window scaffold icon. First hide shows one notification per GUI session; TaskbarCreated re-adds the icon.
+- A session-local named mutex prevents duplicate GUIs and the second launch focuses the first. Close hides, minimize remains in taskbar, UI uses asInvoker manifest.
+- Confirmed the default native caption has a visible disabled maximize slot. Parent explicitly authorized a focused native_caption implementation: Windows nonclient geometry remains, custom paint/hit regions expose only minimize and close, retain caption dragging/system-menu/Alt+F4 routing, block maximize/resize system commands, provide TITLEBARINFOEX with absent maximize geometry, and scale by window DPI. Flutter content remains 460×540 logical pixels.
+
+### TDD and commands (checkpoint)
+
+Flutter executable: `C:/Users/Eleme/codex_workspace/.tools/flutter-3.47.2/bin/flutter.bat`. Commands run in `apps/regen_access`, with process-scoped `CI=true`.
+
+- RED: `flutter test test/tray_state_test.dart test/access_client_test.dart` failed because TrayState/WindowsAccessClient/OperationUncertainException were not implemented. After implementing, initial focused suite passed 15 tests.
+- RED: tray/page integration test failed to compile because WindowsShell/MyApp.shell did not exist. GREEN: tray suite passed 4 tests. An initial asynchronous test awaited an intentionally pending action; fixed the harness to dispatch without awaiting that reply, then verified both page/tray ownership assertions.
+- RED: tray latency summary expected “已连接 · 92 ms”, received null. GREEN after adding current-generation-only summary; focused suite passed 17 tests.
+- RED: three invalid timestamps (normalized out-of-range month, date-only, Go zero time) incorrectly produced Status. GREEN after strict parsing: focused suite passed 20 tests.
+- Native RED: `cmake -S windows/runner/tests -B build/native-tests` / `cmake --build build/native-tests --config Release` failed for missing access_bridge.cpp before implementation; later failed for missing native_caption.cpp before caption implementation. Native initial tests passed, then were extended for shutdown and caption behavior.
+- GREEN full suite: `flutter test` -> **74 tests passed**, including unchanged golden pages and lifecycle ownership regressions.
+- GREEN focused final: `flutter test test/access_client_test.dart test/tray_state_test.dart` -> **20 tests passed**.
+- `flutter analyze` initially found style-only missing-braces lints; these were corrected. Subsequent run -> **No issues found**; final checkpoint repeat is pending output collection.
+- `flutter build windows --release` -> success before and after custom caption, output `build/windows/x64/runner/Release/regen_access.exe` (latest caption build 23.7s).
+- Native tool: `C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`; build standalone target then `build/native-tests/Release/native_shell_test.exe` -> **34 actual assertions passed** (dynamic count). Earlier hardcoded “16/23 assertions” summaries described test groups; final dynamic count is authoritative. Covers exact emitted request frame, isolated fake byte-mode pipe fragmentation/oversize/missing newline/timeout, pre-dispatch failures, unsupported action/id rejection, stop-event cancellation while awaiting a reply, owned window hide/focus/minimize/TaskbarCreated handling, absent maximize slot and min/close hit rectangles.
+- Actual owned release smoke: `windows/runner/tests/smoke-owned-window.ps1 -Executable build/windows/x64/runner/Release/regen_access.exe` -> PASS. Native caption state min=0, max=32769 (INVISIBLE|UNAVAILABLE), close=0; maximize bounds=0,0. Actual client **460×540 logical at DPI96**; native caption close click hides; second process exits and restores first; native caption minimize click minimizes; a single tray-select message restores; GUI exit terminates its own process within five seconds. Only read-only automatic service status traffic was permitted. All test-started app processes were closed.
+- `git diff --check` passed (only repository CRLF normalization warnings).
+
+### Actual versus pending native acceptance
+
+Actual: compilation, isolated pipe tests, current-monitor DPI96 logical sizing, native titlebar hit/visibility geometry, actual caption button dispatch, close/restore, duplicate startup, minimize, synthetic single tray select, synthetic TaskbarCreated, clean owned process exit.
+
+Pending: human visual appearance acceptance of the custom nonclient caption, actual multi-monitor/mixed DPI movement and accessibility assistive-technology behavior, actual Explorer restart recovery, actual right-click menu interaction and one-time notification appearance, and per-user login/reboot startup lifecycle. Explorer was not restarted and the user's startup registry was not toggled. Synthetic TaskbarCreated is not evidence of an actual Explorer restart.
+
+Screenshot attempts were invalid: PrintWindow produced black pixels; foreground-checked screen capture returned unrelated compositor content. The exact task-created PNG was deleted, capture code was removed from the test script, and no screenshot is supplied or claimed as visual evidence.
+
+Architecture limitation explicitly agreed with parent: APIv1 has no request-ID operation lookup. Uncertain lifecycle remains locked in the current GUI session; a new GUI performs a fresh status read and represents a new explicit user intent, not proof the prior operation was cancelled. Controller serialization/coalescing remains authoritative. No persistent uncertainty registry/operation database was added. Native worker queue/engine lifetime is code-reviewed plus owned process smoke; no instrumented engine destruction race stress suite is claimed.
+
+### Files / checkpoint status
+
+New: lib/api/windows_shell.dart, lib/model/tray_state.dart, test/access_client_test.dart, test/tray_state_test.dart, windows/runner/access_bridge.{h,cpp}, tray_controller.{h,cpp}, native_caption.{h,cpp}, tests/CMakeLists.txt, tests/native_shell_test.cpp, tests/smoke-owned-window.ps1.
+
+Modified: lib/api/access_client.dart, lib/model/status.dart, lib/main.dart, lib/app.dart, windows/runner/flutter_window.{h,cpp}, main.cpp, win32_window.cpp, runner.exe.manifest, CMakeLists.txt.
+
+Checkpoint: implementation and tests above complete; final self-review, last analyzer result, and scoped commit/SHA to append below. No task commit yet.
+
+### Final self-review before commit
+
+- Final analyzer repeat completed: **No issues found (6.0s)**. Final focused Flutter repeat: **20/20**. The full **74/74** run remains applicable; subsequent production edits were native caption integration and Dart comment/style-only cleanup. Latest native suite dynamically counted **34 passed assertions**.
+- Final owned-release smoke also clicks the actual custom caption regions (WM_NCHITTEST → nonclient press → release), rather than calling ShowWindow to stand in for caption clicks: close hides and minimize enters iconic state. It verifies maximize state32769 with empty bounds, current client460×540 at96DPI, duplicate activation, single tray select restoration, and GUI process exit. No owned release processes remain.
+- Reviewed worker/method-result ownership, event/OVERLAPPED lifetime, bounded queue, payload restrictions, session uncertainty propagation, startup command quoting, tray deletion/re-add, menu exit ordering, native caption geometry/hit testing, and preservation of approved Flutter pages. Exit posts a private GUI message rather than destroying the tray object while its menu handler is still executing.
+- No additional blocker found in reviewed scope. Remaining concerns are the explicit manual acceptance and protocol-correlation limits above, not silently accepted test results. Native caption accessibility exposes titlebar geometry and retains system commands, but assistive-technology validation has not been performed. No claim of actual tunnel/network acceptance is made by this UI task.

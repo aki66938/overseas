@@ -4,6 +4,7 @@
 #include <flutter_windows.h>
 
 #include "resource.h"
+#include "tray_controller.h"
 
 namespace {
 
@@ -16,7 +17,8 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
+constexpr const wchar_t* kWindowClassName = kRegenWindowClass;
+constexpr DWORD kWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
 /// Registry key for app theme preference.
 ///
@@ -137,10 +139,10 @@ bool Win32Window::Create(const std::wstring& title,
   // The shared page size describes client content; caption and borders are extra.
   RECT frame = {0, 0, Scale(size.width, scale_factor),
                 Scale(size.height, scale_factor)};
-  AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+  AdjustWindowRectExForDpi(&frame, kWindowStyle, FALSE, 0, dpi);
 
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(), kWindowStyle,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       frame.right - frame.left, frame.bottom - frame.top,
       nullptr, nullptr, GetModuleHandle(nullptr), this);

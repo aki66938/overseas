@@ -7,6 +7,9 @@
 #include <memory>
 
 #include "win32_window.h"
+#include "access_bridge.h"
+#include "tray_controller.h"
+#include "native_caption.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -28,6 +31,10 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+  std::unique_ptr<AccessBridge> access_bridge_;
+  std::unique_ptr<TrayController> tray_;
+  std::unique_ptr<NativeCaption> caption_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> shell_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

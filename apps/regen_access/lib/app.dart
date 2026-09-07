@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 
 import 'api/access_client.dart';
+import 'api/windows_shell.dart';
+import 'model/tray_state.dart';
 import 'model/status.dart';
 import 'pages/home.dart';
 import 'pages/details.dart';
@@ -14,23 +16,26 @@ class MyApp extends StatelessWidget {
     this.client = const UnavailableAccessClient(),
     this.now,
     this.fontFamily,
+    this.shell,
   });
   final AccessClient client;
   final DateTime Function()? now;
   final String? fontFamily;
+  final WindowsShell? shell;
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'RegenBio 海外访问',
     debugShowCheckedModeBanner: false,
     theme: accessTheme(fontFamily),
-    home: _Desktop(client: client, now: now ?? DateTime.now),
+    home: _Desktop(client: client, now: now ?? DateTime.now, shell: shell),
   );
 }
 
 class _Desktop extends StatefulWidget {
-  const _Desktop({required this.client, required this.now});
+  const _Desktop({required this.client, required this.now, this.shell});
   final AccessClient client;
   final DateTime Function() now;
+  final WindowsShell? shell;
   @override
   State<_Desktop> createState() => _DesktopState();
 }
@@ -38,6 +43,7 @@ class _Desktop extends StatefulWidget {
 class _DesktopState extends State<_Desktop> {
   Status? status;
   bool unavailable = false, busy = false, polling = false, details = false;
+  bool uncertain = false;
   late final Timer timer;
   Timer? requestDeadline;
   static const statusBudget = Duration(seconds: 8);
@@ -48,8 +54,40 @@ class _DesktopState extends State<_Desktop> {
   @override
   void initState() {
     super.initState();
+    widget.shell?.attach(
+      () async {
+        if (TrayState.fromStatus(
+          status,
+          busy: busy,
+          polling: polling,
+          uncertain: uncertain,
+        ).enabled) {
+          await act();
+        }
+      },
+      navigate: (value) {
+        if (mounted) {
+          setState(() {
+            details = value && status != null && !unavailable;
+          });
+        }
+      },
+    );
     refresh();
     timer = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    widget.shell?.update(
+      TrayState.fromStatus(
+        unavailable ? null : status,
+        busy: busy,
+        polling: polling,
+        uncertain: uncertain,
+      ),
+    );
   }
 
   Future<void> refresh() async {
@@ -90,8 +128,8 @@ class _DesktopState extends State<_Desktop> {
   }
 
   /// A deadline invalidates display data, but never abandons request ownership.
-  /// Task 7 transport cancellation must complete the original Future before a
-  /// later request may start. A late status sample cannot restore a stale claim.
+  /// Transport loss is classified separately from completion. A late status
+  /// sample cannot restore a stale claim or unlock an uncertain lifecycle.
   Future<T> observe<T>(
     Future<T> request,
     Duration budget, {
@@ -116,7 +154,13 @@ class _DesktopState extends State<_Desktop> {
   }
 
   Future<void> act({bool probe = false}) async {
-    if (!mounted || busy || polling) return;
+    if (!mounted ||
+        busy ||
+        polling ||
+        uncertain ||
+        status?.transitioning == true) {
+      return;
+    }
     final previous = status;
     if (!probe && previous?.configurationUnavailable == true) {
       return;
@@ -154,6 +198,9 @@ class _DesktopState extends State<_Desktop> {
           unavailable = false;
         });
       }
+    } on OperationUncertainException {
+      uncertain = true;
+      markUnavailable();
     } catch (_) {
       markUnavailable();
     } finally {
@@ -167,6 +214,7 @@ class _DesktopState extends State<_Desktop> {
 
   @override
   void dispose() {
+    widget.shell?.dispose();
     timer.cancel();
     requestDeadline?.cancel();
     super.dispose();
@@ -186,7 +234,7 @@ class _DesktopState extends State<_Desktop> {
                 ? DetailsPage(
                     status: status!,
                     now: widget.now(),
-                    busy: busy,
+                    busy: busy || uncertain,
                     polling: polling,
                     onBack: () => setState(() {
                       details = false;
@@ -197,7 +245,7 @@ class _DesktopState extends State<_Desktop> {
                     status: status,
                     now: widget.now(),
                     unavailable: unavailable,
-                    busy: busy,
+                    busy: busy || uncertain,
                     polling: polling,
                     onAction: () => unavailable ? refresh() : act(),
                     onDetails: () => setState(() {

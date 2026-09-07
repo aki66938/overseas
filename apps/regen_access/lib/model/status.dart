@@ -102,7 +102,8 @@ class Status {
           'restoring',
           'needs_action',
         ].contains(raw['state']) ||
-        !const ['unknown', 'good', 'slow', 'failed'].contains(raw['quality'])) {
+        !const ['unknown', 'good', 'slow', 'failed'].contains(raw['quality']) ||
+        !_statusErrors.contains(raw['error_code'] ?? '')) {
       throw const FormatException('Invalid APIv1 status');
     }
     final results = <ProbeResult>[];
@@ -112,11 +113,24 @@ class Status {
       final id = r['id'] as String;
       final ms = r['latency_ms'] as int;
       final failures = r['consecutive_failures'] as int?;
+      final http = r['http_status'] ?? 0;
       if (!targetNames.containsKey(id) ||
           !seen.add(id) ||
           ms < 0 ||
           ms > 5000 ||
-          (failures != null && (failures < 0 || failures > 3))) {
+          (failures != null && (failures < 0 || failures > 3)) ||
+          http is! int ||
+          http < 0 ||
+          http > 599 ||
+          !const [
+            '',
+            'timeout',
+            'canceled',
+            'tls_error',
+            'network_error',
+            'http_server_error',
+            'invalid_target',
+          ].contains(r['error_code'] ?? '')) {
         throw const FormatException('Invalid probe result');
       }
       results.add(
@@ -124,7 +138,7 @@ class Status {
           id: id,
           latencyMs: ms,
           reachable: r['reachable'] as bool,
-          checkedAt: DateTime.parse(r['checked_at'] as String),
+          checkedAt: _timestamp(r['checked_at'] as String),
           consecutiveFailures: failures,
         ),
       );
@@ -148,7 +162,7 @@ class Status {
       quality: raw['quality'] as String,
       connectedAt: raw['connected_at'] == null || raw['connected_at'] == ''
           ? null
-          : DateTime.parse(raw['connected_at'] as String),
+          : _timestamp(raw['connected_at'] as String),
       generation: generation,
       probeGeneration: probeGeneration,
       probeHistorical: historical,
@@ -156,3 +170,57 @@ class Status {
     );
   }
 }
+
+DateTime _timestamp(String value) {
+  final match = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$',
+  ).firstMatch(value);
+  if (match == null) throw const FormatException('Invalid API timestamp');
+  final parts = [for (var i = 1; i <= 6; i++) int.parse(match.group(i)!)];
+  final date = DateTime.utc(parts[0], parts[1], parts[2]);
+  final zone = match.group(7)!;
+  if (date.year != parts[0] ||
+      date.month != parts[1] ||
+      date.day != parts[2] ||
+      parts[3] > 23 ||
+      parts[4] > 59 ||
+      parts[5] > 59 ||
+      (zone != 'Z' &&
+          (int.parse(zone.substring(1, 3)) > 23 ||
+              int.parse(zone.substring(4)) > 59))) {
+    throw const FormatException('Invalid API timestamp');
+  }
+  final parsed = DateTime.parse(value);
+  if (parsed == DateTime.utc(1)) {
+    throw const FormatException('Empty API timestamp');
+  }
+  return parsed;
+}
+
+const _statusErrors = {
+  '',
+  'invalid_action',
+  'invalid_request',
+  'invalid_policy',
+  'invalid_binary',
+  'credential_unavailable',
+  'credential_expired',
+  'prepared_state_unavailable',
+  'vpn_conflict',
+  'network_changed',
+  'network_capture_failed',
+  'firewall_enable_failed',
+  'firewall_verify_failed',
+  'public_tcp_block_failed',
+  'config_render_failed',
+  'core_start_failed',
+  'core_not_ready',
+  'tun_not_found',
+  'tun_identity_mismatch',
+  'route_activation_failed',
+  'readiness_lost',
+  'restore_failed',
+  'automatic_restore_failed',
+  'canceled',
+  'account_unauthorized',
+};
