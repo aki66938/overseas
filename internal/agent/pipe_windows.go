@@ -97,10 +97,11 @@ func WithTraceSource(source traceevent.Source) PipeOption {
 }
 
 type PipeServer struct {
-	controller  PipeController
-	redactions  [][]byte
-	traceSource traceevent.Source
-	lineProbe   *lineprobe.Scheduler
+	controller     PipeController
+	redactions     [][]byte
+	traceSource    traceevent.Source
+	lineProbe      *lineprobe.Scheduler
+	diagnosticMode diagnosticEnabler
 }
 
 func WithLineProbe(scheduler *lineprobe.Scheduler) PipeOption {
@@ -231,7 +232,11 @@ func (s *PipeServer) serveV1(connection net.Conn, frame []byte) {
 			s.lineProbe.Manual(ctx)
 		}
 	case localapi.ActionDiagnosticEnable:
-		responseError = ErrorInvalidAction
+		if !pipeAdministrator(connection) {
+			responseError = "permission_denied"
+		} else if s.diagnosticMode == nil || s.diagnosticMode.Enable(time.Now(), time.Duration(request.DurationMinutes)*time.Minute) != nil {
+			responseError = "diagnostic_unavailable"
+		}
 	}
 	snapshot := v1SnapshotFor(s.controller)
 	connectedAt := ""

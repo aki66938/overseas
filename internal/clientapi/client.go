@@ -58,12 +58,14 @@ type Option func(*Client)
 
 type Client struct {
 	dialPipe         dialPipeFunc
+	dialAdminPipe    dialPipeFunc
 	requestIDFactory requestIDFunc
 }
 
 func New(options ...Option) *Client {
 	client := &Client{
 		dialPipe:         defaultDialPipe,
+		dialAdminPipe:    defaultDialAdminPipe,
 		requestIDFactory: newRequestID,
 	}
 	for _, option := range options {
@@ -129,6 +131,15 @@ func (c *Client) StatusDetailsV1(ctx context.Context) (localapi.Response, error)
 	return c.requestV1Response(ctx, localapi.ActionStatus, 0)
 }
 
+// DiagnosticEnableV1 requires an elevated administrator token on Windows.
+func (c *Client) DiagnosticEnableV1(ctx context.Context, minutes int) error {
+	if minutes != 15 && minutes != 30 && minutes != 60 {
+		return localapi.ErrInvalidRequest
+	}
+	_, err := c.requestV1Response(ctx, localapi.ActionDiagnosticEnable, minutes)
+	return err
+}
+
 func (c *Client) requestV1Response(ctx context.Context, action string, durationMinutes int) (localapi.Response, error) {
 	if c == nil {
 		return localapi.Response{}, fmt.Errorf("%w: client is nil", ErrServiceUnavailable)
@@ -137,7 +148,11 @@ func (c *Client) requestV1Response(ctx context.Context, action string, durationM
 	if err != nil {
 		return localapi.Response{}, fmt.Errorf("%w: %v", ErrRequestID, err)
 	}
-	connection, err := c.dialPipe(ctx, agent.PipeName)
+	dial := c.dialPipe
+	if action == localapi.ActionDiagnosticEnable {
+		dial = c.dialAdminPipe
+	}
+	connection, err := dial(ctx, agent.PipeName)
 	if err != nil {
 		return localapi.Response{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}

@@ -42,6 +42,17 @@ func recorderEvent(generation uint64, message string) Event {
 	}
 }
 
+func TestRecorderCloseReleasesMemory(t *testing.T) {
+	recorder := testRecorder(t, 8, 2<<20, 5)
+	recorder.Record(recorderEvent(1, "temporary diagnostics"))
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.Batch(0, 8).Events) != 0 {
+		t.Fatal("closed recorder retained diagnostics")
+	}
+}
+
 func TestRecorderAssignsSequenceTimestampAndCopies(t *testing.T) {
 	recorder := testRecorder(t, 8, 1<<20, 5)
 	event := recorderEvent(5, "first")
@@ -169,6 +180,7 @@ func TestRecorderStopsAtFileLimitWithTruncationEvent(t *testing.T) {
 	for index := 0; index < 20; index++ {
 		recorder.Record(recorderEvent(9, strings.Repeat("x", 180)))
 	}
+	batch := recorder.Batch(0, 100)
 	if err := recorder.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +196,7 @@ func TestRecorderStopsAtFileLimitWithTruncationEvent(t *testing.T) {
 		t.Fatalf("file size = %d", info.Size())
 	}
 	count := 0
-	for _, event := range recorder.Batch(0, 100).Events {
+	for _, event := range batch.Events {
 		if event.Stage == StageLoggingDegraded && strings.Contains(event.Message, "截断") {
 			count++
 		}

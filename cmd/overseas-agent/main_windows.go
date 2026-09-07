@@ -16,6 +16,7 @@ import (
 	"corp.example/overseas-access-gateway/internal/accessmodel"
 	"corp.example/overseas-access-gateway/internal/agent"
 	"corp.example/overseas-access-gateway/internal/coreverify"
+	"corp.example/overseas-access-gateway/internal/diagnosticmode"
 	"corp.example/overseas-access-gateway/internal/lineprobe"
 	"corp.example/overseas-access-gateway/internal/runtimeowner"
 	"corp.example/overseas-access-gateway/internal/secret"
@@ -260,13 +261,7 @@ func buildService() (*serviceHandler, error) {
 	if err := yaml.Unmarshal(contents, &bootstrap); err != nil {
 		return nil, err
 	}
-	recorder, err := traceevent.NewRecorder(traceevent.RecorderConfig{
-		Directory: traceDirectory, MemoryCapacity: traceMemoryCapacity,
-		MaxFileBytes: traceMaxFileBytes, RetainFiles: traceRetainFiles, Now: time.Now,
-	})
-	if err != nil {
-		return nil, err
-	}
+	recorder := newServiceDiagnostics(traceDirectory, time.Now)
 	keepRecorder := false
 	defer func() {
 		if !keepRecorder {
@@ -278,7 +273,7 @@ func buildService() (*serviceHandler, error) {
 		return nil, err
 	}
 	verify := verifier.Verify
-	process := &supervisedCore{verifyExecutable: verify}
+	process := &supervisedCore{verifyExecutable: verify, diagnostics: recorder}
 	network, err := agent.NewWindowsNetworkManager(bootstrap.Policy, networkStatePath, agent.WithWindowsTraceSink(recorder))
 	if err != nil {
 		return nil, err
@@ -300,7 +295,7 @@ func buildService() (*serviceHandler, error) {
 	controller = agent.NewController(bootstrap.Policy, network, process, agent.WithDependencies(dependencies))
 	handler := &serviceHandler{
 		controller: controller,
-		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder), agent.WithLineProbe(probes)),
+		pipe:       agent.NewPipeServer(controller, agent.WithTraceSource(recorder), agent.WithLineProbe(probes), agent.WithDiagnosticMode(recorder)),
 		trace:      recorder,
 		preparer:   network,
 	}
@@ -310,6 +305,13 @@ func buildService() (*serviceHandler, error) {
 
 func buildCoreVerifier(bootstrap bootstrapConfig) (*coreverify.CachedVerifier, error) {
 	return coreverify.NewCachedVerifier(bootstrap.CoreSHA256, bootstrap.SignerAllowlist)
+}
+
+func newServiceDiagnostics(directory string, now func() time.Time) *diagnosticmode.Gate {
+	return diagnosticmode.New(traceevent.RecorderConfig{
+		Directory: directory, MemoryCapacity: traceMemoryCapacity,
+		MaxFileBytes: traceMaxFileBytes, RetainFiles: traceRetainFiles, Now: now,
+	})
 }
 
 func loadCredential(ctx context.Context, reference accessmodel.CredentialRef) (agent.Credential, error) {
@@ -381,6 +383,7 @@ func writeConfigAtomic(path string, contents []byte) error {
 
 type supervisedCore struct {
 	verifyExecutable func(string) error
+	diagnostics      io.Writer
 }
 
 type supervisedProcessInstance struct {
@@ -389,13 +392,7 @@ type supervisedProcessInstance struct {
 }
 
 func (s *supervisedCore) Start(ctx context.Context, executable, config string) (agent.ProcessInstance, agent.ProcessStartResult) {
-	process := &supervisor.Process{
-		ReadyTimeout:     10 * time.Second,
-		StopTimeout:      3 * time.Second,
-		LogWriter:        io.Discard,
-		MaxLogBytes:      64 * 1024,
-		VerifyExecutable: s.verifyExecutable,
-	}
+	process := s.newProcess()
 	instance := &supervisedProcessInstance{process: process, done: make(chan agent.ProcessTermination, 1)}
 	// supervisor.Process invokes VerifyExecutable inside its suspended-launch
 	// boundary immediately before CreateProcess.
@@ -407,6 +404,17 @@ func (s *supervisedCore) Start(ctx context.Context, executable, config string) (
 		instance.done <- agent.ProcessTermination{Err: err, Proven: process.TerminationProven()}
 	}()
 	return instance, agent.ProcessStartResult{}
+}
+
+func (s *supervisedCore) newProcess() *supervisor.Process {
+	return &supervisor.Process{
+		ReadyTimeout:          10 * time.Second,
+		StopTimeout:           3 * time.Second,
+		LogWriter:             s.diagnostics,
+		DisableDiagnosticTail: true,
+		MaxLogBytes:           64 * 1024,
+		VerifyExecutable:      s.verifyExecutable,
+	}
 }
 
 func (s *supervisedProcessInstance) Ready(ctx context.Context) error {

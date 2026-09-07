@@ -104,6 +104,8 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.closed = true
+	clear(r.events)
+	r.events = nil
 	return r.closeFileLocked()
 }
 

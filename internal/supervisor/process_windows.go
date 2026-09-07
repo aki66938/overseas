@@ -101,6 +101,8 @@ type Process struct {
 	LogWriter    io.Writer
 	Secrets      []string
 	MaxLogBytes  int
+	// DisableDiagnosticTail lets an opt-in collector own all diagnostic memory.
+	DisableDiagnosticTail bool
 	// VerifyExecutable must perform the caller's pinned hash and signer checks.
 	// Start invokes it immediately before native process creation.
 	VerifyExecutable func(string) error
@@ -155,9 +157,7 @@ func (p *Process) Start(ctx context.Context, exe, config string) error {
 	if logLimit <= 0 {
 		logLimit = 64 * 1024
 	}
-	external := &boundedPrefixWriter{dst: p.LogWriter, max: logLimit}
-	p.diagnostic = newBoundedTailWriter(logLimit)
-	p.redactor = newStreamRedactor(io.MultiWriter(external, p.diagnostic), p.Secrets, 0)
+	p.configureOutput(logLimit)
 
 	ops := p.ops
 	if ops == nil {
@@ -638,11 +638,23 @@ func launchSuspendedProcess(exe, config string, output io.Writer, verify func(st
 	if err != nil {
 		return nil, err
 	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+		return nil, err
+	}
 	closeFiles := func() {
 		_ = pipeR.Close()
 		_ = pipeW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 	}
 	if err := windows.SetHandleInformation(windows.Handle(pipeW.Fd()), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
+		closeFiles()
+		return nil, err
+	}
+	if err := windows.SetHandleInformation(windows.Handle(stderrW.Fd()), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
 		closeFiles()
 		return nil, err
 	}
@@ -662,7 +674,7 @@ func launchSuspendedProcess(exe, config string, output io.Writer, verify func(st
 		return nil, err
 	}
 	defer attributes.Delete()
-	handles := []windows.Handle{windows.Handle(pipeW.Fd()), windows.Handle(nul.Fd())}
+	handles := []windows.Handle{windows.Handle(pipeW.Fd()), windows.Handle(nul.Fd()), windows.Handle(stderrW.Fd())}
 	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0])); err != nil {
 		closeFiles()
 		return nil, err
@@ -673,7 +685,7 @@ func launchSuspendedProcess(exe, config string, output io.Writer, verify func(st
 			Flags:     windows.STARTF_USESTDHANDLES,
 			StdInput:  handles[1],
 			StdOutput: handles[0],
-			StdErr:    handles[0],
+			StdErr:    handles[2],
 		},
 		ProcThreadAttributeList: attributes.List(),
 	}
@@ -698,10 +710,26 @@ func launchSuspendedProcess(exe, config string, output io.Writer, verify func(st
 		return nil, err
 	}
 	_ = pipeW.Close()
+	_ = stderrW.Close()
 	logDone := make(chan struct{})
+	var readers sync.WaitGroup
+	for _, reader := range []*os.File{pipeR, stderrR} {
+		destination := output
+		if provider, ok := output.(interface{ NewOutputStream() io.Writer }); ok {
+			destination = provider.NewOutputStream()
+		}
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			_, _ = io.Copy(destination, reader)
+			_ = reader.Close()
+			if closer, ok := destination.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}()
+	}
 	go func() {
-		_, _ = io.Copy(output, pipeR)
-		_ = pipeR.Close()
+		readers.Wait()
 		close(logDone)
 	}()
 	return &nativeProcess{process: info.Process, thread: info.Thread, pid: info.ProcessId, logDone: logDone}, nil
@@ -888,6 +916,18 @@ func interfaceProbeFromConfig(path string) func(context.Context) error {
 	}
 }
 
+func (p *Process) configureOutput(logLimit int) {
+	if p.DisableDiagnosticTail {
+		// The destination owns both its collection window and output bounds.
+		// A lifetime prefix limit here would exhaust during disabled periods.
+		p.redactor = newStreamRedactor(p.LogWriter, p.Secrets, 0)
+		return
+	}
+	external := &boundedPrefixWriter{dst: p.LogWriter, max: logLimit}
+	p.diagnostic = newBoundedTailWriter(logLimit)
+	p.redactor = newStreamRedactor(io.MultiWriter(external, p.diagnostic), p.Secrets, 0)
+}
+
 type streamRedactor struct {
 	mu        sync.Mutex
 	dst       io.Writer
@@ -895,6 +935,28 @@ type streamRedactor struct {
 	pending   []byte
 	written   int
 	maxOutput int
+}
+
+// Only opt-in destinations provide independent framing. Legacy destinations
+// retain the single shared redactor and bounded prefix/tail behavior.
+func (r *streamRedactor) NewOutputStream() io.Writer {
+	provider, ok := r.dst.(interface{ NewOutputStream() io.Writer })
+	if !ok {
+		return r
+	}
+	destination := provider.NewOutputStream()
+	child := &streamRedactor{dst: destination, secrets: r.secrets, maxOutput: r.maxOutput}
+	return &ownedOutputStream{streamRedactor: child}
+}
+
+type ownedOutputStream struct{ *streamRedactor }
+
+func (s *ownedOutputStream) Close() error {
+	s.Flush()
+	if closer, ok := s.dst.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func newStreamRedactor(dst io.Writer, secrets []string, maxOutput int) *streamRedactor {

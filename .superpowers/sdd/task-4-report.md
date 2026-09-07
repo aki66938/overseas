@@ -399,3 +399,58 @@ Result: PASS; all three Linux/amd64 artifacts were produced and then removed.
 
 Race instrumentation remains unavailable for the already documented workstation
 toolchain reason (`gcc` is absent). No new concern was found in this remediation.
+
+---
+
+## Cross-platform plan Task 4 — temporary administrator diagnostics (2026-09-07)
+
+This section is the current Task 4 implementation report; the historical secret-storage/supervisor report above is preserved.
+
+Implementation base: `76d252b`; parent plan-only commit `aaaea93` arrived during implementation. Worktree: `.worktrees/cross-platform`, branch `feature/cross-platform`. Commit subject: `feat(diagnostics): add expiring admin mode`.
+
+### Implementation
+
+- Added OS-independent `diagnosticmode.Gate`: inert construction/default collection, lazy recorder creation on 15/30/60-minute enable, synchronized automatic timer expiry and access-time expiry, stale-timer protection during renewal, permanent Close, restart disabled. Expiry closes the recorder and drops its event buffer. Recorder limits remain 2 MiB per file / five files; existing truncation, retention and redaction rules are reused.
+- Wired the Windows service/controller/network sink and legacy trace source through the same gate. Network recovery snapshots and process/network transaction interfaces are unchanged. Existing concise startup stderr notices remain; these are not persistent diagnostic collection.
+- Child output uses independently framed stdout/stderr streams, bounded complete lines, existing trace redaction, and drops oversized/incomplete lines. Disabled bytes are never buffered: only a boundary bit is retained, so `off: password=; enable; secret\\n` drops the suffix. Expiry clears pending lines and prevents suffix replay. The service disables the supervisor's separate lifetime diagnostic tail; ordinary supervisor users retain their original tail/prefix behavior. Native launch now supplies two output pipes and joins/closes both before log completion. Completed per-stream writers unregister from the gate.
+- Added v1 `diagnostic-enable` handling, authenticating the accepted pipe **after** request read/decode. Authorization queries the impersonated thread token's enabled Builtin Administrators membership; JSON administrator fields have no authority. Missing handles, anonymous tokens, failed token checks, and deny-only membership reject.
+- Impersonation runs on a dedicated locked goroutine. Token is closed before RevertToSelf; revert failure rejects and exits without unlocking so Go terminates the contaminated OS thread, leaving service recovery available. Verified the installed Go 1.27 runtime's documented guarantee at `src/runtime/proc.go:5658` onward. Actual OS revert failure was not induced.
+- Added Windows administrator client dial using `PipeImpLevelIdentification` and minimal `regen-access diagnostic-enable <15|30|60>` CLI with a five-second bound. No GUI entry, new disable API, account/enrollment/update controls, or deployment changes.
+
+### TDD evidence
+
+All commands used `C:/Users/Eleme/codex_workspace/.tools/go1.27.0/go/bin/go.exe` in this worktree.
+
+1. RED: `go test ./internal/diagnosticmode ./internal/traceevent` failed because new Gate/New/timer types were missing; traceevent passed. GREEN: same packages `-count=1` passed after gate implementation.
+2. RED: `go test ./internal/traceevent -run TestRecorderCloseReleasesMemory -count=1` failed `closed recorder retained diagnostics`. GREEN: recorder Close now clears events; traceevent + gate passed. Existing truncation test captures the batch before Close to match the new release semantics.
+3. RED: `go test ./internal/agent -run TestDiagnosticEnable -count=1` failed on missing `WithDiagnosticMode`. GREEN: real random local pipe tests passed: actual elevated admin identification succeeds, anonymous rejects despite JSON administrator=true, non-pipe transport rejects. A later distinct restricted-token test passed with Administrators SID deny-only plus identification, proving denial is not just anonymous-client rejection. During test setup, a fake controller missing its diagnostic state and CreateRestrictedToken's rejection of a pseudo token were corrected; these were fixture errors, not feature RED evidence.
+4. RED: `go test ./internal/clientapi ./cmd/regen-access -run TestDiagnostic -count=1` failed on missing admin dial/method and CLI run. GREEN: duration validation, admin dial selection, request shape and CLI exit handling passed. A separate random-pipe test exercises the actual default administrator dial and successfully opens its identification token.
+5. RED: service diagnostic wiring test failed on missing `newServiceDiagnostics`, `diagnostics`, `newProcess`. Supervisor test failed on missing `DisableDiagnosticTail`/`configureOutput`. GREEN: focused service/supervisor tests passed, including disabled disk inactivity, enable/redaction, expiry and fresh output only after re-enable.
+6. RED: gate independent-stream test failed on missing `NewOutputStream`; native output test failed `got 0 output streams`. GREEN: independent streams, disabled/expired partial-line boundaries, native two-stream redaction and close-after-stop passed. Readiness-timeout cleanup of both streams also passed.
+
+### Final verification
+
+- Focused: `go test ./internal/diagnosticmode ./internal/traceevent ./internal/agent ./internal/clientapi ./internal/supervisor ./cmd/overseas-agent ./cmd/regen-access -count=1` — PASS, all seven packages.
+- Additional native/default-client coverage: `go test ./internal/clientapi ./internal/supervisor -run 'TestDefaultAdministrator|TestNativeOutput' -count=1` — PASS.
+- Full required suite, run once after code completion: `go test ./... -count=1` — PASS, 31 packages with tests; fakeconnect has no tests. Includes process termination/descendant cleanup, recovery, existing retention/file limits and credential redaction.
+- `git diff --check` — PASS (only repository LF→CRLF advisory messages).
+- `GOOS=linux GOARCH=amd64 go build ./internal/diagnosticmode` — PASS, shared gate has no Windows dependency.
+- Attempted `GOOS=linux GOARCH=amd64 go build ./internal/diagnosticmode ./cmd/regen-access` — blocked by existing `internal/agent` shared files referencing `WindowsNodeRouteSnapshot`, `windowsTUNInterface`, and Windows firewall rule constants. Left for platform adapter/CLI Tasks 5/9; the current CLI is usable on Windows. No Linux runtime claim.
+- Race instrumentation was not run: `Get-Command gcc` found no compiler, consistent with the historical workstation limitation.
+
+### Changed files
+
+- `internal/diagnosticmode/gate.go`, `gate_test.go`
+- `internal/traceevent/recorder.go`, `recorder_test.go`
+- `internal/agent/diagnostic_windows.go`, `diagnostic_windows_test.go`, `pipe_windows.go`
+- `internal/clientapi/client.go`, `client_windows.go`, `client_stub.go`, `diagnostic_test.go`, `diagnostic_windows_test.go`
+- `internal/supervisor/process_windows.go`, `diagnostic_windows_test.go`
+- `cmd/overseas-agent/main_windows.go`, `diagnostic_windows_test.go`
+- `cmd/regen-access/main.go`, `main_test.go`
+- this report (append only)
+
+### Scope and concerns
+
+All authorization tests used unique random **local** pipe names and temporary files. Process tests used only the repository fakeconnect helper. No installed fixed service, production network, remote host, VM, firewall, route, DNS, enrollment, credential provisioning, or deployment was touched.
+
+Self-review: added independent stream framing after discovering the existing native shared stdout/stderr handle; verified disabled-period partial lines cannot leak suffixes after enable and both readers finish on stop/readiness failure. Production service does not keep the legacy child tail, so detailed readiness context comes from the enabled recorder rather than an always-present tail. Partial final/oversized child lines are deliberately discarded. Revert-failure quarantine is source-reviewed but not OS fault-injected; race instrumentation and Linux CLI runtime remain unverified as stated above.
