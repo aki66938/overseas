@@ -16,6 +16,7 @@ $credentialWriterPath = Join-Path $repoRoot 'cmd\credential-provisioner\main_win
 $configWriterPath = Join-Path $repoRoot 'cmd\overseas-agent\main_windows.go'
 $traceEventPath = Join-Path $repoRoot 'internal\traceevent\event.go'
 $pipePath = Join-Path $repoRoot 'internal\agent\pipe_windows.go'
+$pipeContractPath = Join-Path $repoRoot 'internal\agent\pipe_contract.go'
 $clientViewModelPath = Join-Path $repoRoot 'cmd\overseas-client\viewmodel.go'
 $clientWindowPath = Join-Path $repoRoot 'cmd\overseas-client\main_windows.go'
 $realTestPathCommand = Get-Command Test-Path -CommandType Cmdlet
@@ -33,8 +34,11 @@ Describe 'Transactional Windows client installer' {
     It 'defines a bounded redacted trace protocol without secret-bearing fields' {
         $eventSource = Get-Content -LiteralPath $traceEventPath -Raw -Encoding UTF8
         $pipeSource = Get-Content -LiteralPath $pipePath -Raw -Encoding UTF8
+        $pipeContractSource = Get-Content -LiteralPath $pipeContractPath -Raw -Encoding UTF8
         $agentSource = Get-Content -LiteralPath $configWriterPath -Raw -Encoding UTF8
-        $pipeSource | Should Match ([regex]::Escape('ActionTrace       = "trace"'))
+        $pipeContractSource | Should Match ([regex]::Escape('ActionTrace       = "trace"'))
+        $pipeSource | Should Match ([regex]::Escape('if request.Action == ActionTrace {'))
+        $pipeSource | Should Match ([regex]::Escape('case ActionTrace:'))
         foreach ($field in @('schema_version', 'sequence', 'timestamp_utc', 'generation', 'level', 'component', 'stage', 'event', 'elapsed_ms', 'message', 'detail', 'detail_truncated', 'residue')) {
             $eventSource | Should Match ([regex]::Escape('json:"' + $field))
         }
