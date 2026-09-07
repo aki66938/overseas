@@ -81,12 +81,12 @@ type Status struct {
 }
 ```
 
-- [ ] 建立行为测试：未知字段可忽略；未知 action、版本错误、超长输入拒绝；响应 ID 必须匹配；过期 generation 不覆盖新状态。
-- [ ] 执行 `go test ./internal/localapi ./internal/clientapi`，先确认新用例失败。
-- [ ] 实现 v1 解码与状态映射；将旧 `prepared` 映射为用户可见 `idle`，保留原控制器状态，避免再次出现卸载协议字面值冲突。
-- [ ] 普通状态不得携带详情日志；限制消息 64 KiB，超时由调用方 context 控制。IPC 不接受任意路径、命令或 URL。
-- [ ] Windows Named Pipe 接入兼容适配；旧 Walk 客户端仍可连接与断开。
-- [ ] 执行上述测试及 `go test ./internal/agent -count=1`，通过后提交 `feat(api): add versioned local contract`。
+- [x] 建立行为测试：未知字段可忽略；未知 action、版本错误、超长输入拒绝；响应 ID 必须匹配；过期 generation 不覆盖新状态。
+- [x] 执行 `go test ./internal/localapi ./internal/clientapi`，先确认新用例失败。
+- [x] 实现 v1 解码与状态映射；将旧 `prepared` 映射为用户可见 `idle`，保留原控制器状态，避免再次出现卸载协议字面值冲突。
+- [x] 普通状态不得携带详情日志；限制消息 64 KiB，超时由调用方 context 控制。IPC 不接受任意路径、命令或 URL。
+- [x] Windows Named Pipe 接入兼容适配；旧 Walk 客户端仍可连接与断开。
+- [x] 执行上述测试及 `go test ./internal/agent -count=1`，通过后提交 `feat(api): add versioned local contract`。`f4d0c37`、`57bd144`；复审通过，Windows Go 全量回归通过。
 
 ## Task 3: 线路探测与调度
 

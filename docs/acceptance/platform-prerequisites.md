@@ -36,6 +36,8 @@ flutter-3.47.2/bin/flutter.bat --version
 
 Windows `flutter build windows --release` 已成功生成独立 SDK 样例 `regen_build_smoke.exe`（构建阶段 39.7 秒）。它只证明工具链可用，不是产品 UI 或产品发布包。Google Storage 引擎下载停滞后，使用 [Flutter 中国网络说明](https://docs.flutter.dev/community/china)列出的 `storage.flutter-io.cn` 镜像完成下载；仅本次构建进程设置变量，未改全局网络或 SDK 版本。
 
+官方发布清单再次确认相同 Flutter/Dart 版本及提交，并提供 Windows 完整归档 SHA-256，已记录到工具锁。本机采用 Git 源码加 SDK 缓存方式安装，未下载该完整归档，不把发布方提供的哈希当作本机归档校验结果。
+
 ## macOS 企业直发
 
 [Apple TN3134](https://developer.apple.com/documentation/technotes/tn3134-network-extension-provider-deployment)明确：macOS Packet Tunnel 的普通 App Extension 仅限 App Store；Developer ID 直发应使用 **System Extension**。这是已批准 Packet Tunnel 方案的具体打包形式，不改变界面或数据面选择。
