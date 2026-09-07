@@ -10,11 +10,12 @@
     "source": "https://github.com/flutter/flutter.git",
     "commit": "d3b14c876900e553bc736ca19295fc09e3853e8e",
     "engine_commit": "a804b261645ef8c13eb3d5c44a5c2fb0340c5539",
-    "dart_version": null,
-    "initialization_verified": false
+    "dart_version": "3.13.2",
+    "initialization_verified": true
   },
   "sing_box": {
     "version": "1.13.19",
+    "source_commit": "b5ebaa1fc0f2b94256180b95468e73ef53caa27d",
     "windows_manifest": "sing-box.manifest.json",
     "apple_library_verified": false
   },

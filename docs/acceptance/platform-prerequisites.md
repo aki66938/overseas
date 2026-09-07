@@ -7,7 +7,7 @@
 - Windows amd64：Go `go1.27.0 windows/amd64`；`go test ./... -count=1` 全部通过。
 - Windows PowerShell：`Invoke-Pester tests/powershell -EnableExit`，143 通过、0 失败。
 - 以上仅为现有代码回归，不代表跨平台发布通过。
-- Flutter 源码固定到 `3.47.2`、提交 `d3b14c876900e553bc736ca19295fc09e3853e8e`。来源为官方 Git 仓库，SDK 依赖初始化尚未完成。
+- Flutter `3.47.2`、提交 `d3b14c876900e553bc736ca19295fc09e3853e8e`，Dart `3.13.2 windows_x64`：已运行版本命令验证。来源为官方 Git 仓库与 SDK 自带下载流程。
 
 ## 平台清单
 
@@ -32,7 +32,7 @@ git -C flutter-3.47.2 rev-parse HEAD
 flutter-3.47.2/bin/flutter.bat --version
 ```
 
-提交值见 `deploy/toolchains.json`。必须记录实际 Dart/engine 与编译输出后才标记工具链就绪；不要把源码检出当作 SDK 安装成功。
+提交值见 `deploy/toolchains.json`。已验证 SDK 版本输出；仍须通过 C++ 检查和实际 Windows release 构建，才标记完整构建工具链就绪。
 
 ## macOS 企业直发
 
@@ -50,11 +50,11 @@ flutter-3.47.2/bin/flutter.bat --version
 
 [固定版本 Makefile](https://github.com/SagerNet/sing-box/blob/v1.13.19/Makefile)提供 `go run ./cmd/internal/build_libbox -target apple`，实现入口位于 `experimental/libbox`。这是后续 Apple 构建核对入口，不代表当前已生成或验证 framework。Apple 库、绑定工具及源提交仍需单独锁定，不能沿用 Windows exe 哈希。
 
-分发前核验 [固定版本 LICENSE](https://github.com/SagerNet/sing-box/blob/v1.13.19/LICENSE)、嵌入依赖与对应源码交付要求，并保存 notices；尚未完成许可交付清单核验，不把“仅内网”视作自动豁免。
+[固定版本 LICENSE](https://github.com/SagerNet/sing-box/blob/v1.13.19/LICENSE)声明 GPL-3.0-or-later，并有名称/关联限制；已读取原文。分发前仍须核验嵌入依赖与对应源码交付要求，保存 notices；许可交付清单尚未完成，不把“仅内网”视作自动豁免。版本 tag 指向 `b5ebaa1fc0f2b94256180b95468e73ef53caa27d`。
 
 ## 待补证据
 
-- Flutter/Dart 实际版本输出与 Windows 构建成功记录。
+- Windows C++ 工具链和 release 构建成功记录。
 - 原生 Linux 测试机器，macOS arm64/Xcode/签名身份。
 - Apple 最小 System Extension 验证、嵌入构建与许可清单。
 - 五台/平台、100 次循环、72 小时稳定性及卸载恢复证据。
