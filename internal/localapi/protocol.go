@@ -124,7 +124,7 @@ func validProbeResults(response Response) bool {
 	if len(response.ProbeResults) == 0 {
 		return response.ProbeGeneration == 0 && !response.ProbeHistorical
 	}
-	if len(response.ProbeResults) > 5 || response.ProbeGeneration > response.Status.Generation {
+	if len(response.ProbeResults) > len(lineprobe.Targets()) || response.ProbeGeneration > response.Status.Generation {
 		return false
 	}
 	if response.Status.State == StateConnected {

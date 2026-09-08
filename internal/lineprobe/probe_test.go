@@ -124,13 +124,14 @@ func TestProductionTransportAndFixedTargets(t *testing.T) {
 	if tr.Proxy != nil || !tr.DisableKeepAlives || (tr.TLSClientConfig != nil && tr.TLSClientConfig.InsecureSkipVerify) {
 		t.Fatal("unsafe production transport")
 	}
-	expected := []string{"https://www.google.com/", "https://www.pinterest.com/", "https://gemini.google.com/", "https://chatgpt.com/", "https://claude.ai/"}
+	expected := []string{"https://www.google.com/", "https://www.pinterest.com/", "https://gemini.google.com/", "https://chatgpt.com/", "https://claude.ai/", "https://www.tiktok.com/", "https://www.amazon.com/", "https://www.facebook.com/"}
+	ids := []string{"google", "pinterest", "gemini", "chatgpt", "claude", "tiktok", "amazon", "facebook"}
 	targets := Targets()
-	if len(targets) != 5 {
+	if len(targets) != 8 {
 		t.Fatal(targets)
 	}
 	for i, target := range targets {
-		if target.URL != expected[i] {
+		if target.URL != expected[i] || target.ID != ids[i] {
 			t.Fatal(target)
 		}
 	}

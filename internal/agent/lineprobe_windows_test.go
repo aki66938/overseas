@@ -44,7 +44,7 @@ func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 	defer c.Disconnect(context.Background())
 	for _, action := range []string{"probe", "status"} {
 		got := request(action)
-		if len(got.ProbeResults) != 5 || got.ProbeGeneration != got.Status.Generation || got.ErrorCode != "" {
+		if len(got.ProbeResults) != 8 || got.ProbeGeneration != got.Status.Generation || got.ErrorCode != "" {
 			t.Fatal(got)
 		}
 		for _, r := range got.ProbeResults {
@@ -56,10 +56,10 @@ func TestPipeProbeAndStatusUseGenerationResults(t *testing.T) {
 	oldGeneration := c.LocalStatusSnapshot().Generation
 	c.Disconnect(context.Background())
 	before := calls.Load()
-	if got := request("probe"); got.ErrorCode != "probe_unavailable" || len(got.ProbeResults) != 5 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration {
+	if got := request("probe"); got.ErrorCode != "probe_unavailable" || len(got.ProbeResults) != 8 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration {
 		t.Fatal(got)
 	}
-	if got := request("status"); len(got.ProbeResults) != 5 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration || got.ProbeGeneration >= got.Status.Generation {
+	if got := request("status"); len(got.ProbeResults) != 8 || !got.ProbeHistorical || got.ProbeGeneration != oldGeneration || got.ProbeGeneration >= got.Status.Generation {
 		t.Fatal(got)
 	} else {
 		for _, r := range got.ProbeResults {
@@ -101,7 +101,7 @@ func TestPipeReturnsAllTimeoutResults(t *testing.T) {
 		t.Fatal("no timeout response")
 	}
 	got, err := localapi.DecodeResponse(line, "timeout")
-	if err != nil || got.ErrorCode != "" || len(got.ProbeResults) != 5 {
+	if err != nil || got.ErrorCode != "" || len(got.ProbeResults) != 8 {
 		t.Fatalf("%+v %v", got, err)
 	}
 	for _, r := range got.ProbeResults {

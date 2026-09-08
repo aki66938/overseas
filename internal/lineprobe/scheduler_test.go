@@ -93,7 +93,7 @@ func TestSchedulerPeriodBudgetCoalescingAndCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.Start(ctx, 1)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < len(Targets()); i++ {
 		await(t, started)
 	}
 	for i := 0; i < 2; i++ {
@@ -110,7 +110,7 @@ func TestSchedulerPeriodBudgetCoalescingAndCancel(t *testing.T) {
 	clock.advance(5 * time.Second)
 	got := await(t, done)
 	await(t, published)
-	if calls.Load() != 5 || len(got.Results) != 5 || got.Generation != 1 {
+	if calls.Load() != int32(len(Targets())) || len(got.Results) != len(Targets()) || got.Generation != 1 {
 		t.Fatalf("calls=%d snapshot=%+v", calls.Load(), got)
 	}
 	for _, r := range got.Results {
@@ -119,18 +119,18 @@ func TestSchedulerPeriodBudgetCoalescingAndCancel(t *testing.T) {
 		}
 	}
 	clock.advance(24 * time.Second)
-	if calls.Load() != 5 {
+	if calls.Load() != int32(len(Targets())) {
 		t.Fatal("period fired early")
 	}
 	clock.advance(time.Second)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < len(Targets()); i++ {
 		await(t, started)
 	}
 	cancel()
 	// Manual after cancellation returns historical data and cannot launch traffic.
 	s.Manual(context.Background())
 	clock.advance(time.Minute)
-	if calls.Load() != 10 {
+	if calls.Load() != 2*int32(len(Targets())) {
 		t.Fatal(calls.Load())
 	}
 }
@@ -153,14 +153,14 @@ func TestSchedulerRejectsObsoleteGenerationAndResetsHysteresis(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
 	s.Start(ctx1, 1)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < len(Targets()); i++ {
 		await(t, calls)
 	}
 	old.Store(false)
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	s.Start(ctx2, 3)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < len(Targets()); i++ {
 		await(t, calls)
 	}
 	if g := await(t, pub); g != 3 {
@@ -203,14 +203,14 @@ func TestSchedulerFakeClockThreeFailuresRecoveryAndReconnect(t *testing.T) {
 		}
 		await(t, clock.created)
 		await(t, clock.created)
-		for n := 0; n < 5; n++ {
+		for n := 0; n < len(Targets()); n++ {
 			await(t, started)
 		}
 		s.mu.Lock()
 		done := s.current.active.done
 		s.mu.Unlock()
 		fail.Store(step.fail)
-		for n := 0; n < 5; n++ {
+		for n := 0; n < len(Targets()); n++ {
 			release <- struct{}{}
 		}
 		await(t, done)
@@ -243,13 +243,13 @@ func TestSchedulerFakeClockThreeFailuresRecoveryAndReconnect(t *testing.T) {
 	s.Start(next, 3)
 	await(t, clock.created)
 	await(t, clock.created)
-	for n := 0; n < 5; n++ {
+	for n := 0; n < len(Targets()); n++ {
 		await(t, started)
 	}
 	s.mu.Lock()
 	done := s.current.active.done
 	s.mu.Unlock()
-	for n := 0; n < 5; n++ {
+	for n := 0; n < len(Targets()); n++ {
 		release <- struct{}{}
 	}
 	await(t, done)

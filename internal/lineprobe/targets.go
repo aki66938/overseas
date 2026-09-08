@@ -11,5 +11,8 @@ func Targets() []Target {
 		{"gemini", "https://gemini.google.com/"},
 		{"chatgpt", "https://chatgpt.com/"},
 		{"claude", "https://claude.ai/"},
+		{"tiktok", "https://www.tiktok.com/"},
+		{"amazon", "https://www.amazon.com/"},
+		{"facebook", "https://www.facebook.com/"},
 	}
 }

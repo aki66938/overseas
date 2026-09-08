@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -35,7 +36,9 @@ func NewProber(transport http.RoundTripper, now func() time.Time) *Prober {
 		transport = &http.Transport{Proxy: nil, DisableKeepAlives: true,
 			DialContext:         (&net.Dialer{Timeout: RoundBudget}).DialContext,
 			TLSHandshakeTimeout: RoundBudget, ResponseHeaderTimeout: RoundBudget,
-			MaxResponseHeaderBytes: 16 * 1024}
+			// Gemini's verified responses exceed 25 KiB. Keep a finite cap
+			// without rejecting these ordinary security/cookie headers.
+			MaxResponseHeaderBytes: 64 * 1024}
 	}
 	if now == nil {
 		now = time.Now
@@ -70,6 +73,11 @@ func (p *Prober) Probe(ctx context.Context, target Target) Result {
 			result.LatencyMS = RoundBudget.Milliseconds()
 		}
 		if err != nil {
+			// Some upstreams close HEAD without a complete response. Retry
+			// once with GET, sharing the existing deadline and TLS policy.
+			if method == http.MethodHead && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+				continue
+			}
 			result.Reachable = false
 			result.ErrorCode = probeError(err)
 			return result
