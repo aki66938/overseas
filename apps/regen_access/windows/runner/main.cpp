@@ -43,7 +43,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
-  Win32Window::Size size(460, 540);
+  Win32Window::Size size(480, 224);
   if (!window.Create(L"RegenBio 海外访问", origin, size)) {
     CloseHandle(instance_mutex);
     return EXIT_FAILURE;

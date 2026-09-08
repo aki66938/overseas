@@ -69,7 +69,7 @@ try {
   [void][RegenOwnedWindow]::GetClientRect($window, [ref]$rect)
   $width = ($rect.Right - $rect.Left) * 96 / $dpi
   $height = ($rect.Bottom - $rect.Top) * 96 / $dpi
-  if ([Math]::Abs($width - 460) -gt 1 -or [Math]::Abs($height - 540) -gt 1) { throw "Unexpected logical client dimensions $width x $height" }
+  if ([Math]::Abs($width - 480) -gt 1 -or [Math]::Abs($height - 224) -gt 1) { throw "Unexpected logical client dimensions $width x $height" }
   $style = [RegenOwnedWindow]::GetWindowLong($window, -16)
   $caption = [RegenOwnedWindow]::Caption($window)
   Write-Output "Native caption states: min=$($caption.State[2]), max=$($caption.State[3]), close=$($caption.State[5]); maximize bounds=$($caption.Buttons[3].Left),$($caption.Buttons[3].Right)"
