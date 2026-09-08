@@ -1,4 +1,14 @@
 # Pure inventory and WiX authoring helpers. No installation or trust-store work.
+function Assert-ClientTimestampUrl {
+    param([string]$Url)
+    # SignTool rejects HTTPS with the pinned SDK. DigiCert documents this
+    # RFC3161 HTTP endpoint; authenticity comes from the signed TSA response.
+    # Do not generalize this exception to arbitrary cleartext servers.
+    if ($Url -cne 'http://timestamp.digicert.com' -and $Url -notmatch '\Ahttps://[^\s]+\z') {
+        throw 'Release requires HTTPS or the fixed DigiCert RFC3161 endpoint.'
+    }
+}
+
 function Resolve-MsiPayloadDestination {
     param([string]$DirectoryId,[string]$FileName,[hashtable]$Directories)
     $parts = @($FileName.Split('|')[-1]); $seen = @{}

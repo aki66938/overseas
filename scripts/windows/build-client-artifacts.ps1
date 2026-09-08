@@ -32,7 +32,7 @@ $iisExtension = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.iis_exten
 $dtf = [IO.Path]::GetFullPath((Join-Path $workspace $lock.wix.dtf_path))
 $certificate = $null
 if ($Mode -eq 'Release') {
-    if ($TimestampUrl -notmatch '^https://[^\s]+$') { throw 'Release requires an explicit trusted HTTPS timestamp service.' }
+    Assert-ClientTimestampUrl $TimestampUrl
     if ($SigningCertificateThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Release requires a corporate signing certificate thumbprint.' }
     $certificate = @(Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $SigningCertificateThumbprint -and $_.HasPrivateKey })
     if ($certificate.Count -ne 1) { throw 'Release signing certificate is absent or ambiguous.' }
