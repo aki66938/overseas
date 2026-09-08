@@ -206,11 +206,6 @@ class HomePage extends StatelessWidget {
                       ),
                     ],
                     const Spacer(),
-                    const Text(
-                      'HTTPS 首响应延迟 · 按需启用',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: muted, fontSize: 12),
-                    ),
                   ],
                 ),
               ),

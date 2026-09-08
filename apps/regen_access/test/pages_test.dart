@@ -145,6 +145,12 @@ void main() {
     final paragraph = tester.renderObject<RenderParagraph>(find.text('关闭海外访问'));
     expect(paragraph.text.style?.color, Colors.white);
   });
+  testWidgets('home keeps measurement explanation out of the console', (
+    tester,
+  ) async {
+    await mount(tester, FakeClient(snapshot('connected')));
+    expect(find.textContaining('HTTPS 首响应延迟'), findsNothing);
+  });
   testWidgets('a missing native service never claims a connection', (
     tester,
   ) async {

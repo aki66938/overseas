@@ -50,3 +50,9 @@ Generated goldens with `flutter test test/goldens_test.dart --update-goldens`, t
 - Enlarged text switches details rows/header to wrapping layouts and relies on the existing vertical scroll container.
 - Copy says only `HTTPS 首响应延迟`; it makes no bandwidth, login, or AI-functionality claim.
 - No deployment was performed.
+
+## Follow-up: concise home footer
+
+- Added a focused regression that initially failed because the home page still rendered `HTTPS 首响应延迟 · 按需启用`.
+- Removed only that explanatory footer while preserving the existing card and action proportions.
+- Regenerated and reviewed the affected home goldens; measurement semantics remain represented by the details data rather than extra home-page copy.
