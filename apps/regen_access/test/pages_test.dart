@@ -170,19 +170,22 @@ void main() {
       );
     });
   }
-  testWidgets('degraded quality keeps connected tunnel and disconnect action', (
-    tester,
-  ) async {
-    final client = FakeClient(snapshot('connected', quality: 'failed'));
-    await mount(tester, client);
-    expect(find.text('已连接'), findsOneWidget);
-    expect(find.text('部分目标暂不可达'), findsOneWidget);
-    await tester.tap(find.text('关闭海外访问'));
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('未连接'), findsOneWidget);
-    expect(client.disconnects, 1);
-  });
+  for (final quality in ['good', 'slow', 'failed', 'unknown']) {
+    testWidgets('connected $quality stays quietly connected', (tester) async {
+      final client = FakeClient(snapshot('connected', quality: quality));
+      await mount(tester, client);
+      expect(find.text('已连接'), findsOneWidget);
+      expect(find.text('海外线路正常'), findsNothing);
+      expect(find.text('部分目标响应较慢'), findsNothing);
+      expect(find.text('部分目标暂不可达'), findsNothing);
+      expect(find.text('线路质量待确认'), findsNothing);
+      expect(find.byIcon(Icons.priority_high_rounded), findsNothing);
+      await tester.tap(find.text('关闭海外访问'));
+      await tester.pump();
+      await tester.pump();
+      expect(client.disconnects, 1);
+    });
+  }
   testWidgets('connect starts only once and hides stale results', (
     tester,
   ) async {
@@ -198,19 +201,48 @@ void main() {
     expect(find.text('92 ms'), findsNothing);
   });
   testWidgets(
-    'details has fixed targets, timestamp, manual loading, same shell',
+    'details has eight compact targets and keeps both actions reachable',
     (tester) async {
-      final client = FakeClient(snapshot('connected'));
+      final ids = [
+        'google',
+        'pinterest',
+        'gemini',
+        'chatgpt',
+        'claude',
+        'tiktok',
+        'amazon',
+        'facebook',
+      ];
+      final labels = [
+        'Google',
+        'Pinterest',
+        'Gemini',
+        'ChatGPT',
+        'Claude',
+        'TikTok',
+        '亚马逊',
+        'Facebook',
+      ];
+      final client = FakeClient(
+        snapshot(
+          'connected',
+          results: [
+            for (var i = 0; i < ids.length; i++) result(ids[i], ms: 41 + i),
+          ],
+        ),
+      );
       await mount(tester, client);
       expect(find.text('已连接 08:42'), findsOneWidget);
       await tester.tap(find.text('线路详情'));
       await tester.pump();
-      for (final name in targetNames.values) {
+      for (final name in labels) {
         expect(find.text(name), findsOneWidget);
       }
       expect(find.textContaining('12 秒前更新'), findsOneWidget);
-      expect(find.text('92 ms'), findsNWidgets(5));
-      expect(find.text('正常'), findsNWidgets(5));
+      for (var i = 0; i < ids.length; i++) {
+        expect(find.text('${41 + i} ms'), findsOneWidget);
+      }
+      expect(find.text('正常'), findsNWidgets(8));
       expect(
         tester.getSize(find.byKey(const Key('desktop-shell'))),
         const Size(460, 540),
@@ -228,6 +260,16 @@ void main() {
       expect(find.text('已连接'), findsOneWidget);
     },
   );
+  testWidgets('details scrolls at enlarged text without overflow', (
+    tester,
+  ) async {
+    await mount(tester, FakeClient(snapshot('connected')), scale: 2);
+    await tester.tap(find.text('线路详情'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.text('立即测速'));
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('history is marked and cannot trigger probes', (tester) async {
     final client = FakeClient(snapshot('idle', history: true));
     await mount(tester, client);

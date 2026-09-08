@@ -41,12 +41,7 @@ class HomePage extends StatelessWidget {
     final subtitle = unavailable
         ? '请稍后重试'
         : connected
-        ? switch (s!.quality) {
-            'good' => '海外线路正常',
-            'slow' => '部分目标响应较慢',
-            'failed' => '部分目标暂不可达',
-            _ => '线路质量待确认',
-          }
+        ? ''
         : s?.errorTitle != null
         ? ''
         : transitional || loading
@@ -73,114 +68,151 @@ class HomePage extends StatelessWidget {
     final duration = seconds == null
         ? '时长待确认'
         : '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
-    final healthy = connected && s!.quality == 'good';
+    final hasError = unavailable || s?.errorTitle != null;
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: constraints.maxHeight),
           child: IntrinsicHeight(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(32, 54, 32, 22),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 88,
-                      height: 88,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: healthy
-                            ? successBackground
-                            : const Color(0xfff1f5f3),
-                      ),
-                      child: loading || transitional || busy
-                          ? const Padding(
-                              padding: EdgeInsets.all(29),
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
-                              ),
-                            )
-                          : Icon(
-                              healthy
-                                  ? Icons.check_rounded
-                                  : connected ||
-                                        unavailable ||
-                                        s?.state == 'needs_action'
-                                  ? Icons.priority_high_rounded
-                                  : Icons.power_settings_new_rounded,
-                              color: healthy
-                                  ? success
-                                  : connected ||
-                                        unavailable ||
-                                        s?.state == 'needs_action'
-                                  ? warning
-                                  : primary,
-                              size: 38,
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.w600,
-                      color: primary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    subtitle,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: muted),
-                  ),
-                  const SizedBox(height: 34),
-                  if (s?.configurationUnavailable == true)
+            child: ColoredBox(
+              color: canvas,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
                     const Text(
-                      '联系 IT',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: secondary),
-                    )
-                  else
-                    FilledButton(
-                      onPressed: loading || transitional || busy || polling
-                          ? null
-                          : onAction,
-                      child: Text(label),
+                      'REGENBIO  ·  海外访问',
+                      style: TextStyle(
+                        color: muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: .8,
+                      ),
                     ),
-                  const SizedBox(height: 28),
-                  const Spacer(),
-                  if (!unavailable && !loading && s?.errorTitle == null) ...[
-                    const Divider(color: border, height: 1),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      alignment: WrapAlignment.spaceBetween,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 12,
-                      children: [
-                        if (connected)
+                    const SizedBox(height: 18),
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: border),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: cardShadow,
+                            blurRadius: 18,
+                            offset: Offset(0, 5),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 112,
+                            height: 112,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: connected ? successBackground : canvas,
+                              border: Border.all(
+                                color: connected ? primary : border,
+                                width: connected ? 4 : 2,
+                              ),
+                            ),
+                            child: loading || transitional || busy
+                                ? const Padding(
+                                    padding: EdgeInsets.all(29),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.5,
+                                    ),
+                                  )
+                                : Icon(
+                                    connected
+                                        ? Icons.check_rounded
+                                        : hasError || s?.state == 'needs_action'
+                                        ? Icons.priority_high_rounded
+                                        : Icons.power_settings_new_rounded,
+                                    color: connected
+                                        ? primary
+                                        : hasError || s?.state == 'needs_action'
+                                        ? warning
+                                        : primary,
+                                    size: 42,
+                                  ),
+                          ),
+                          const SizedBox(height: 18),
                           Text(
-                            '已连接 $duration',
-                            style: const TextStyle(fontSize: 13, color: muted),
-                          )
-                        else
-                          const SizedBox(),
-                        TextButton(
+                            title,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.w600,
+                              color: primary,
+                            ),
+                          ),
+                          if (subtitle.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              subtitle,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: muted),
+                            ),
+                          ],
+                          if (connected) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              '已连接 $duration',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: muted,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          if (s?.configurationUnavailable == true)
+                            const Text(
+                              '联系 IT',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: secondary),
+                            )
+                          else
+                            FilledButton(
+                              onPressed:
+                                  loading || transitional || busy || polling
+                                  ? null
+                                  : onAction,
+                              child: Text(label),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    if (!unavailable && !loading && s?.errorTitle == null) ...[
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: border),
+                        ),
+                        child: TextButton(
                           onPressed: onDetails,
                           child: const Row(
-                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text('线路详情'),
                               Icon(Icons.chevron_right, size: 18),
                             ],
                           ),
                         ),
-                      ],
+                      ),
+                    ],
+                    const Spacer(),
+                    const Text(
+                      'HTTPS 首响应延迟 · 按需启用',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: muted, fontSize: 12),
                     ),
                   ],
-                ],
+                ),
               ),
             ),
           ),
