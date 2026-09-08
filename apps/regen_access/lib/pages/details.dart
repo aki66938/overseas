@@ -35,99 +35,105 @@ class DetailsPage extends StatelessWidget {
     final historical =
         status.probeHistorical || (!status.connected && results.isNotEmpty);
     final entries = targetNames.entries.toList();
-    final compact = MediaQuery.textScalerOf(context).scale(1) > 1.5;
 
     return ColoredBox(
       color: Colors.white,
       child: LayoutBuilder(
-        builder: (context, constraints) => SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(12, 7, 12, 9),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight - 16),
-            child: IntrinsicHeight(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      const Text(
-                        '线路详情',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const Spacer(),
-                      Flexible(
-                        child: Text(
-                          historical ? '历史结果 · $updated' : updated,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 9, color: muted),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 3),
-                  if (compact)
-                    for (var index = 0; index < entries.length; index++)
-                      _TargetCell(
-                        entry: entries[index],
-                        result: results[entries[index].key],
-                        historical: historical,
-                        compact: true,
-                      )
-                  else
-                    for (var row = 0; row < 4; row++)
-                      Row(
-                        key: Key('site-grid-row-$row'),
-                        children: [
-                          Expanded(
-                            child: _TargetCell(
-                              entry: entries[row * 2],
-                              result: results[entries[row * 2].key],
-                              historical: historical,
-                            ),
+        builder: (context, constraints) {
+          final compact =
+              MediaQuery.textScalerOf(context).scale(1) > 1.5 ||
+              constraints.maxWidth < 300;
+          return SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(12, 7, 12, 9),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight - 16,
+              ),
+              child: IntrinsicHeight(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          '线路详情',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: _TargetCell(
-                              entry: entries[row * 2 + 1],
-                              result: results[entries[row * 2 + 1].key],
-                              historical: historical,
-                            ),
-                          ),
-                        ],
-                      ),
-                  const Spacer(),
-                  Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      const Text(
-                        'HTTPS 首响应',
-                        style: TextStyle(fontSize: 9, color: muted),
-                      ),
-                      OutlinedButton(
-                        onPressed: status.connected && !busy && !polling
-                            ? onProbe
-                            : null,
-                        child: Text(
-                          polling
-                              ? '正在读取状态'
-                              : busy
-                              ? '正在测速'
-                              : '立即测速',
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                        const Spacer(),
+                        Flexible(
+                          child: Text(
+                            historical ? '历史结果 · $updated' : updated,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 9, color: muted),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    if (compact)
+                      for (var index = 0; index < entries.length; index++)
+                        _TargetCell(
+                          entry: entries[index],
+                          result: results[entries[index].key],
+                          historical: historical,
+                          compact: true,
+                        )
+                    else
+                      for (var row = 0; row < 4; row++)
+                        Row(
+                          key: Key('site-grid-row-$row'),
+                          children: [
+                            Expanded(
+                              child: _TargetCell(
+                                entry: entries[row * 2],
+                                result: results[entries[row * 2].key],
+                                historical: historical,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: _TargetCell(
+                                entry: entries[row * 2 + 1],
+                                result: results[entries[row * 2 + 1].key],
+                                historical: historical,
+                              ),
+                            ),
+                          ],
+                        ),
+                    const Spacer(),
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        const Text(
+                          'HTTPS 首响应',
+                          style: TextStyle(fontSize: 9, color: muted),
+                        ),
+                        OutlinedButton(
+                          onPressed: status.connected && !busy && !polling
+                              ? onProbe
+                              : null,
+                          child: Text(
+                            polling
+                                ? '正在读取状态'
+                                : busy
+                                ? '正在测速'
+                                : '立即测速',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }

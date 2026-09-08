@@ -73,7 +73,7 @@ class ConnectionRail extends StatelessWidget {
                         _title,
                         style: TextStyle(
                           color: railText,
-                          fontSize: _title.length > 5 ? 15 : 20,
+                          fontSize: _title.length >= 5 ? 15 : 20,
                           height: 1.3,
                           fontWeight: FontWeight.w600,
                         ),

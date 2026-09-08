@@ -449,4 +449,20 @@ void main() {
     await tester.ensureVisible(find.text('立即测速'));
     expect(tester.takeException(), isNull);
   });
+  testWidgets('narrow viewport reflows long latency results at normal text', (
+    tester,
+  ) async {
+    final client = FakeClient(
+      snapshot(
+        'connected',
+        results: targetNames.keys.map((id) => result(id, ms: 5000)).toList(),
+      ),
+    );
+    await mount(tester, client, size: const Size(280, 320));
+    await tester.ensureVisible(find.text('线路详情'));
+    await tester.tap(find.text('线路详情'));
+    await tester.pump();
+    expect(find.text('5000 ms'), findsNWidgets(8));
+    expect(tester.takeException(), isNull);
+  });
 }
