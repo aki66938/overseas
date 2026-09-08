@@ -73,7 +73,7 @@ class FakeClient implements AccessClient {
 Future<void> mount(
   WidgetTester tester,
   FakeClient client, {
-  Size size = const Size(460, 540),
+  Size size = const Size(480, 224),
   double scale = 1,
 }) async {
   tester.view.devicePixelRatio = 1;
@@ -172,7 +172,7 @@ void main() {
       expect(find.text(entry.value), findsOneWidget);
       expect(
         tester.getSize(find.byKey(const Key('desktop-shell'))),
-        const Size(460, 540),
+        const Size(480, 224),
       );
     });
   }
@@ -238,9 +238,35 @@ void main() {
         ),
       );
       await mount(tester, client);
-      expect(find.text('已连接 08:42'), findsOneWidget);
+      expect(find.text('08:42'), findsOneWidget);
+      expect(
+        tester.getCenter(find.byKey(const Key('home-content-group'))).dy,
+        closeTo(112, 16),
+      );
+      expect(find.text('查看站点延迟'), findsNothing);
       await tester.tap(find.text('线路详情'));
       await tester.pump();
+      expect(find.text('已连接'), findsOneWidget);
+      expect(find.text('返回主页'), findsOneWidget);
+      final back = find.ancestor(
+        of: find.text('返回主页'),
+        matching: find.byType(TextButton),
+      );
+      expect(tester.widget<TextButton>(back).onPressed, isNotNull);
+      expect(
+        tester
+            .renderObject<RenderParagraph>(find.text('返回主页'))
+            .text
+            .style
+            ?.color,
+        const Color(0xffedf5ef),
+      );
+      expect(find.text('线路详情'), findsOneWidget);
+      expect(find.byKey(const Key('connection-rail')), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const Key('connection-rail'))).width,
+        138,
+      );
       for (final name in labels) {
         expect(find.text(name), findsOneWidget);
       }
@@ -251,8 +277,21 @@ void main() {
       expect(find.text('正常'), findsNWidgets(8));
       expect(
         tester.getSize(find.byKey(const Key('desktop-shell'))),
-        const Size(460, 540),
+        const Size(480, 224),
       );
+      final rows = tester
+          .widgetList<Row>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is Row &&
+                  widget.key is ValueKey<String> &&
+                  (widget.key! as ValueKey<String>).value.startsWith(
+                    'site-grid-row-',
+                  ),
+            ),
+          )
+          .toList();
+      expect(rows, hasLength(4));
       client.probing = Completer<List<ProbeResult>>();
       await tester.tap(find.text('立即测速'));
       await tester.pump();
@@ -261,7 +300,7 @@ void main() {
       client.probing!.complete(client.value.results);
       await tester.pump();
       await tester.pump();
-      await tester.tap(find.text('返回'));
+      await tester.tap(find.text('返回主页'));
       await tester.pump();
       expect(find.text('已连接'), findsOneWidget);
     },
@@ -270,6 +309,7 @@ void main() {
     tester,
   ) async {
     await mount(tester, FakeClient(snapshot('connected')), scale: 2);
+    await tester.ensureVisible(find.text('线路详情'));
     await tester.tap(find.text('线路详情'));
     await tester.pump();
     expect(tester.takeException(), isNull);
@@ -384,11 +424,11 @@ void main() {
   ) async {
     await mount(tester, FakeClient(snapshot('connected')));
     tester.view.devicePixelRatio = 2;
-    tester.view.physicalSize = const Size(920, 1080);
+    tester.view.physicalSize = const Size(960, 448);
     await tester.pump();
     expect(
       tester.getSize(find.byKey(const Key('desktop-shell'))),
-      const Size(460, 540),
+      const Size(480, 224),
     );
     expect(tester.takeException(), isNull);
   });

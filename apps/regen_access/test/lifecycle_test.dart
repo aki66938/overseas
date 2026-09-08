@@ -113,7 +113,7 @@ void main() {
         expect(find.text('正在读取状态'), findsOneWidget);
         if (state == 'connected') {
           expect(find.text('已连接'), findsOneWidget);
-          expect(find.text('已连接 08:42'), findsOneWidget);
+          expect(find.text('08:42'), findsOneWidget);
         }
         final button = state == 'probe'
             ? find.byType(OutlinedButton)

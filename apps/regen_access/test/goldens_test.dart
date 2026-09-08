@@ -36,7 +36,7 @@ void main() {
   ]) {
     testWidgets('golden home $state', (tester) async {
       tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(460, 540);
+      tester.view.physicalSize = const Size(480, 224);
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       final client = FakeClient(
@@ -64,7 +64,7 @@ void main() {
   for (final history in [false, true]) {
     testWidgets('golden details history=$history', (tester) async {
       tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(460, 540);
+      tester.view.physicalSize = const Size(480, 224);
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       final client = FakeClient(
@@ -86,7 +86,7 @@ void main() {
       );
       await tester.pump();
       await tester.tap(find.text('线路详情'));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       await expectLater(
         find.byKey(const Key('desktop-shell')),
         matchesGoldenFile(

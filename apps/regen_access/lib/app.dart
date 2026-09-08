@@ -8,6 +8,7 @@ import 'model/tray_state.dart';
 import 'model/status.dart';
 import 'pages/home.dart';
 import 'pages/details.dart';
+import 'pages/connection_rail.dart';
 import 'theme.dart';
 
 class MyApp extends StatelessWidget {
@@ -223,34 +224,44 @@ class _DesktopState extends State<_Desktop> {
   Widget build(BuildContext context) => Scaffold(
     body: Center(
       child: SizedBox(
-        width: 460,
-        height: 540,
+        width: 480,
+        height: 224,
         child: RepaintBoundary(
           key: const Key('desktop-shell'),
           child: ColoredBox(
             color: Colors.white,
-            child: details && !unavailable && status != null
-                ? DetailsPage(
-                    status: status!,
-                    now: widget.now(),
-                    busy: busy || uncertain,
-                    polling: polling,
-                    onBack: () => setState(() {
-                      details = false;
-                    }),
-                    onProbe: () => act(probe: true),
-                  )
-                : HomePage(
-                    status: status,
-                    now: widget.now(),
-                    unavailable: unavailable,
-                    busy: busy || uncertain,
-                    polling: polling,
-                    onAction: () => unavailable ? refresh() : act(),
-                    onDetails: () => setState(() {
-                      details = true;
-                    }),
-                  ),
+            child: Row(
+              children: [
+                ConnectionRail(
+                  status: status,
+                  now: widget.now(),
+                  unavailable: unavailable,
+                  details: details,
+                  onNavigate: unavailable || status == null
+                      ? null
+                      : () => setState(() {
+                          details = !details;
+                        }),
+                ),
+                Expanded(
+                  child: details && !unavailable && status != null
+                      ? DetailsPage(
+                          status: status!,
+                          now: widget.now(),
+                          busy: busy || uncertain,
+                          polling: polling,
+                          onProbe: () => act(probe: true),
+                        )
+                      : HomePage(
+                          status: status,
+                          unavailable: unavailable,
+                          busy: busy || uncertain,
+                          polling: polling,
+                          onAction: () => unavailable ? refresh() : act(),
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

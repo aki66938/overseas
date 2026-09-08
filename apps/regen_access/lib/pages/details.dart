@@ -10,17 +10,20 @@ class DetailsPage extends StatelessWidget {
     required this.now,
     required this.busy,
     required this.polling,
-    required this.onBack,
     required this.onProbe,
   });
   final Status status;
   final DateTime now;
   final bool busy, polling;
-  final VoidCallback onBack, onProbe;
+  final VoidCallback onProbe;
+
   @override
   Widget build(BuildContext context) {
-    final results = {for (final r in status.visibleResults) r.id: r};
-    final dates = results.values.map((r) => r.checkedAt).toList()..sort();
+    final results = {
+      for (final result in status.visibleResults) result.id: result,
+    };
+    final dates = results.values.map((result) => result.checkedAt).toList()
+      ..sort();
     final seconds = dates.isEmpty
         ? null
         : now.difference(dates.last).inSeconds.clamp(0, 999999999);
@@ -29,103 +32,98 @@ class DetailsPage extends StatelessWidget {
         : seconds < 60
         ? '$seconds 秒前更新'
         : '${dates.last.toLocal().hour.toString().padLeft(2, '0')}:${dates.last.toLocal().minute.toString().padLeft(2, '0')} 更新';
-    final history =
+    final historical =
         status.probeHistorical || (!status.connected && results.isNotEmpty);
-    final compactLayout =
-        MediaQuery.sizeOf(context).width < 320 ||
-        MediaQuery.textScalerOf(context).scale(1) > 1.5;
-    final back = TextButton(
-      onPressed: onBack,
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [Icon(Icons.chevron_left, size: 18), Text('返回')],
-      ),
-    );
-    const heading = Text(
-      '线路详情',
-      style: TextStyle(fontSize: 21, fontWeight: FontWeight.w600),
-    );
-    final connection = Text(
-      status.connected ? '已连接' : '历史记录',
-      style: TextStyle(fontSize: 12, color: status.connected ? success : muted),
-    );
-    return LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight),
-          child: IntrinsicHeight(
-            child: ColoredBox(
-              color: canvas,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 20, 18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (compactLayout)
-                      Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8,
-                        runSpacing: 4,
-                        children: [back, heading, connection],
-                      )
-                    else
-                      Row(
-                        children: [
-                          back,
-                          const SizedBox(width: 2),
-                          heading,
-                          const Spacer(),
-                          connection,
-                        ],
+    final entries = targetNames.entries.toList();
+    final compact = MediaQuery.textScalerOf(context).scale(1) > 1.5;
+
+    return ColoredBox(
+      color: Colors.white,
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(12, 7, 12, 9),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight - 16),
+            child: IntrinsicHeight(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        '线路详情',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    const SizedBox(height: 10),
-                    Text(
-                      history ? '历史结果 · $updated' : updated,
-                      style: const TextStyle(fontSize: 13, color: muted),
-                    ),
-                    const SizedBox(height: 12),
-                    Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.all(color: border),
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: cardShadow,
-                            blurRadius: 14,
-                            offset: Offset(0, 4),
+                      const Spacer(),
+                      Flexible(
+                        child: Text(
+                          historical ? '历史结果 · $updated' : updated,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 9, color: muted),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  if (compact)
+                    for (var index = 0; index < entries.length; index++)
+                      _TargetCell(
+                        entry: entries[index],
+                        result: results[entries[index].key],
+                        historical: historical,
+                        compact: true,
+                      )
+                  else
+                    for (var row = 0; row < 4; row++)
+                      Row(
+                        key: Key('site-grid-row-$row'),
+                        children: [
+                          Expanded(
+                            child: _TargetCell(
+                              entry: entries[row * 2],
+                              result: results[entries[row * 2].key],
+                              historical: historical,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _TargetCell(
+                              entry: entries[row * 2 + 1],
+                              result: results[entries[row * 2 + 1].key],
+                              historical: historical,
+                            ),
                           ),
                         ],
                       ),
-                      child: Column(
-                        children: [
-                          for (var i = 0; i < targetNames.entries.length; i++)
-                            _TargetRow(
-                              entry: targetNames.entries.elementAt(i),
-                              result:
-                                  results[targetNames.entries.elementAt(i).key],
-                              historical: history,
-                              showDivider: i != targetNames.entries.length - 1,
-                            ),
-                        ],
+                  const Spacer(),
+                  Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      const Text(
+                        'HTTPS 首响应',
+                        style: TextStyle(fontSize: 9, color: muted),
                       ),
-                    ),
-                    const SizedBox(height: 14),
-                    const Spacer(),
-                    OutlinedButton(
-                      onPressed: status.connected && !busy && !polling
-                          ? onProbe
-                          : null,
-                      child: Text(
-                        polling
-                            ? '正在读取状态'
-                            : busy
-                            ? '正在测速'
-                            : '立即测速',
+                      OutlinedButton(
+                        onPressed: status.connected && !busy && !polling
+                            ? onProbe
+                            : null,
+                        child: Text(
+                          polling
+                              ? '正在读取状态'
+                              : busy
+                              ? '正在测速'
+                              : '立即测速',
+                        ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
@@ -135,22 +133,22 @@ class DetailsPage extends StatelessWidget {
   }
 }
 
-class _TargetRow extends StatelessWidget {
-  const _TargetRow({
+class _TargetCell extends StatelessWidget {
+  const _TargetCell({
     required this.entry,
     required this.result,
     required this.historical,
-    required this.showDivider,
+    this.compact = false,
   });
-
   final MapEntry<String, String> entry;
   final ProbeResult? result;
-  final bool historical, showDivider;
+  final bool historical;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final health = result?.health ?? '待测速';
-    final healthColor = historical
+    final color = historical
         ? muted
         : health == '正常'
         ? success
@@ -158,65 +156,100 @@ class _TargetRow extends StatelessWidget {
         ? warning
         : muted;
     return Container(
-      constraints: const BoxConstraints(minHeight: 41),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        border: showDivider
-            ? const Border(bottom: BorderSide(color: border))
-            : null,
+      constraints: BoxConstraints(minHeight: compact ? 52 : 33),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: border)),
       ),
-      child: Builder(
-        builder: (context) {
-          final name = Text(
-            entry.value,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          );
-          final latency = Text(
-            result?.reachable == true ? '${result!.latencyMs} ms' : '—',
-            textAlign: TextAlign.right,
-            style: const TextStyle(fontSize: 13, color: primary),
-          );
-          final state = Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(
-                  color: healthColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(health, style: TextStyle(fontSize: 12, color: healthColor)),
-            ],
-          );
-          if (MediaQuery.sizeOf(context).width < 320 ||
-              MediaQuery.textScalerOf(context).scale(1) > 1.5) {
-            return Column(
+      child: compact
+          ? Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(
-                  children: [
-                    Expanded(child: name),
-                    latency,
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Align(alignment: Alignment.centerRight, child: state),
+                nameAndHealth(entry.value, health, color),
+                Align(alignment: Alignment.centerRight, child: latency()),
               ],
-            );
-          }
-          return Row(
-            children: [
-              Expanded(child: name),
-              SizedBox(width: 76, child: latency),
-              const SizedBox(width: 14),
-              SizedBox(width: 70, child: state),
-            ],
-          );
-        },
-      ),
+            )
+          : Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.value,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          height: 1,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                            width: 4,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              health,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 9,
+                                height: 1,
+                                color: color,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                latency(),
+              ],
+            ),
     );
   }
+
+  Widget nameAndHealth(String name, String health, Color color) => Column(
+    mainAxisAlignment: MainAxisAlignment.center,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        name,
+        style: const TextStyle(
+          fontSize: 11,
+          height: 1,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+      Row(
+        children: [
+          Container(
+            width: 4,
+            height: 4,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              health,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 9, height: 1, color: color),
+            ),
+          ),
+        ],
+      ),
+    ],
+  );
+
+  Widget latency() => Text(
+    result?.reachable == true ? '${result!.latencyMs} ms' : '—',
+    style: const TextStyle(fontSize: 12, color: primary),
+  );
 }

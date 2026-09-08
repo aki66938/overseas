@@ -9,6 +9,11 @@ const border = Color(0xffe1e9e5);
 const warning = Color(0xffa36b16);
 const canvas = Color(0xfff2f6f3);
 const cardShadow = Color(0x0d183c31);
+const railBackground = Color(0xff12382c);
+const railText = Color(0xffedf5ef);
+const railDot = Color(0xff71cf9a);
+const railDivider = Color(0xff3c5c4e);
+const railLabelStyle = TextStyle(fontSize: 10, color: Color(0xffa8c2b3));
 
 ThemeData accessTheme(String? fontFamily) => ThemeData(
   useMaterial3: true,
@@ -32,19 +37,19 @@ ThemeData accessTheme(String? fontFamily) => ThemeData(
   ),
   filledButtonTheme: FilledButtonThemeData(
     style: FilledButton.styleFrom(
-      minimumSize: const Size(double.infinity, 48),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      minimumSize: const Size(double.infinity, 36),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
     ),
   ),
   outlinedButtonTheme: OutlinedButtonThemeData(
     style: OutlinedButton.styleFrom(
-      minimumSize: const Size(double.infinity, 44),
+      minimumSize: const Size(74, 28),
       side: const BorderSide(color: border),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       foregroundColor: primary,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
     ),
   ),
   textButtonTheme: TextButtonThemeData(
