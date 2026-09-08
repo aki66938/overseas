@@ -4,6 +4,9 @@ const targetNames = <String, String>{
   'gemini': 'Gemini',
   'chatgpt': 'ChatGPT',
   'claude': 'Claude',
+  'tiktok': 'TikTok',
+  'amazon': '亚马逊',
+  'facebook': 'Facebook',
 };
 
 class ProbeResult {

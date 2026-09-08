@@ -4,6 +4,22 @@ import 'package:regen_access/model/status.dart';
 import 'pages_test.dart' show result;
 
 void main() {
+  test('accepts eight sites but rejects unknown and duplicate IDs', () {
+    const ids = ['google', 'pinterest', 'gemini', 'chatgpt', 'claude', 'tiktok', 'amazon', 'facebook'];
+    Map<String, dynamic> response(List<String> sites) => {
+      'version': 1,
+      'status': {'state': 'connected', 'quality': 'good', 'generation': 1},
+      'probe_generation': 1,
+      'probe_results': [for (final id in sites) {
+        'id': id, 'latency_ms': 50, 'reachable': true, 'http_status': 200,
+        'consecutive_failures': 0, 'checked_at': '2026-09-08T12:00:00Z',
+      }],
+    };
+    expect(Status.fromResponse(response(ids)).results.map((r) => r.id), ids);
+    expect(targetNames.keys, ids);
+    expect(() => Status.fromResponse(response([...ids, 'unknown'])), throwsFormatException);
+    expect(() => Status.fromResponse(response([...ids, 'google'])), throwsFormatException);
+  });
   test('authoritative counters and production slow threshold', () {
     expect(result('google', ms: 92).health, '正常');
     expect(result('google', ms: 999).health, '正常');
