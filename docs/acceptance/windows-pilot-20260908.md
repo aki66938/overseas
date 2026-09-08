@@ -21,3 +21,12 @@ Target: 172.20.20.200 only. User approved replacing the app components using the
 - Official endpoint reference: https://knowledge.digicert.com/solution/troubleshooting-timestamping-problems . The narrow HTTP exception does not disable TSA signature verification or permit arbitrary cleartext endpoints.
 
 No pilot upgrade has occurred at this checkpoint. Package build, signature/payload validation, upgrade/rollback evidence, and real GUI/connection tests remain pending.
+
+## First pilot attempt and correction
+
+- f3b1074 produced signed 0.1.8 MSI SHA256 90FF3B48DFC63EE4A9054173F8E6213EE4A88C2CA5031284D273411F7D185246. Package trust verifier and SignTool /pa /tw both passed.
+- Existing app files and configuration backed up on target under C:\ProgramData\RegenBio\PilotBackup-20260908 with SYSTEM/Administrators-only ACL. Old MSI also retained in the test download directory. No private keys exported.
+- Upgrade returned 1603 at BackupUpgradeSnapshot. Windows Installer rolled back; registration remained 0.1.7 and service resumed (PID 5020). No manual file replacement or firewall alteration used.
+- Read-only function-level reproduction: ACL and runtime ownership checks passed; firewall failed because InterfaceType was read from Get-NetFirewallInterfaceFilter, whose actual Win10 object contains InterfaceAlias only. Get-NetFirewallInterfaceTypeFilter supplies InterfaceType.
+- Corrected test fixtures to mirror the real separate filter objects: RED 0/3 reproduced PropertyNotFoundException. Fix uses the correct cmdlet, rejects missing/ambiguous filters, and retains exact semantic checks.
+- Corrected read-only checks on target: acl OK, runtime OK, firewall OK. Full PowerShell suite 198/198; Go installer verifier and contracts passed. Updated candidate will use version 0.1.9 to distinguish it from the failed 0.1.8 artifact.

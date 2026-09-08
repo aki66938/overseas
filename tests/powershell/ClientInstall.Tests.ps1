@@ -565,7 +565,7 @@ Describe 'Transactional Windows client installer' {
         $verifier | Should Match 'Get-NetFirewallPortFilter'
         $verifier | Should Match 'Get-NetFirewallSecurityFilter'
         $verifier | Should Match 'Normalize-AnyValue \$applications\[0\]\.Package'
-        $verifier | Should Match 'Normalize-AnyValue \$interfaces\[0\]\.InterfaceType'
+        $verifier | Should Match 'Normalize-AnyValue \$interfaceTypes\[0\]\.InterfaceType'
         $verifier | Should Match "PSObject\.Properties\.Name -notcontains 'owned_rules'"
         $verifier | Should Not Match '\$null -eq \$value\.owned_rules'
         $verifier | Should Match 'Write-FirewallJournal'
@@ -598,7 +598,7 @@ Describe 'Transactional Windows client installer' {
         $lifecycleText = $match.Groups[1].Value.Replace("`$data='C:\ProgramData\RegenBio\OverseasAccess'", "`$data='" + $data.Replace("'", "''") + "'")
         $lifecycleText = $lifecycleText -replace '& "\$env:WINDIR\\System32\\icacls\.exe"[^\r\n]*', '$global:LASTEXITCODE=0'
         $lifecycleText = $lifecycleText -replace 'exit 0', 'return'
-        foreach ($command in @('Get-NetFirewallRule','Get-NetFirewallApplicationFilter','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetFirewallServiceFilter','Get-NetFirewallInterfaceFilter','Get-NetFirewallSecurityFilter','New-NetFirewallRule','Remove-NetFirewallRule')) {
+        foreach ($command in @('Get-NetFirewallRule','Get-NetFirewallApplicationFilter','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetFirewallServiceFilter','Get-NetFirewallInterfaceFilter','Get-NetFirewallInterfaceTypeFilter','Get-NetFirewallSecurityFilter','New-NetFirewallRule','Remove-NetFirewallRule')) {
             $lifecycleText = $lifecycleText.Replace($command, ('Test-' + $command))
         }
         $lifecycle = [scriptblock]::Create($lifecycleText)
@@ -612,6 +612,7 @@ Describe 'Transactional Windows client installer' {
         function Test-Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.Address) } }
         function Test-Get-NetFirewallServiceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.ServiceFilter) } }
         function Test-Get-NetFirewallInterfaceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.InterfaceFilter) } }
+        function Test-Get-NetFirewallInterfaceTypeFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.InterfaceTypeFilter) } }
         function Test-Get-NetFirewallSecurityFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process { return ($InputObject.SecurityFilter) } }
         function New-TestFirewallRecord {
             param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled)
@@ -621,7 +622,8 @@ Describe 'Transactional Windows client installer' {
             $record.Rule | Add-Member Port ([pscustomobject]@{ Protocol=$Protocol; LocalPort='Any'; RemotePort='Any' })
             $record.Rule | Add-Member Address ([pscustomobject]@{ LocalAddress='Any'; RemoteAddress='Any' })
             $record.Rule | Add-Member ServiceFilter ([pscustomobject]@{ Service='Any' })
-            $record.Rule | Add-Member InterfaceFilter ([pscustomobject]@{ InterfaceType='Any'; InterfaceAlias='Any' })
+            $record.Rule | Add-Member InterfaceFilter ([pscustomobject]@{ InterfaceAlias='Any' })
+            $record.Rule | Add-Member InterfaceTypeFilter ([pscustomobject]@{ InterfaceType='Any' })
             $record.Rule | Add-Member SecurityFilter ([pscustomobject]@{ Authentication='NotRequired'; Encryption='NotRequired'; LocalUser='Any'; RemoteUser='Any'; RemoteMachine='Any'; OverrideBlockRules=$false })
             return $record
         }

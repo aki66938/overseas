@@ -233,11 +233,13 @@ function Get-ExactFirewallRule($definition,[switch]$AllowDisabled){
   $addresses=@($rule|Get-NetFirewallAddressFilter)
   $services=@($rule|Get-NetFirewallServiceFilter)
   $interfaces=@($rule|Get-NetFirewallInterfaceFilter)
+  $interfaceTypes=@($rule|Get-NetFirewallInterfaceTypeFilter)
+  if($interfaceTypes.Count -ne 1 -or $null -eq $interfaceTypes[0] -or $interfaceTypes[0].PSObject.Properties.Name -notcontains 'InterfaceType'){throw 'Firewall rule does not exactly match the product definition.'}
   $security=@($rule|Get-NetFirewallSecurityFilter)
-  if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1 -and $security.Count -eq 1){
-    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=(Normalize-AnyValue $interfaces[0].InterfaceType);authentication=[string]$security[0].Authentication;encryption=[string]$security[0].Encryption;local_user=[string]$security[0].LocalUser;remote_user=[string]$security[0].RemoteUser;remote_machine=[string]$security[0].RemoteMachine;override_block_rules=[string]$security[0].OverrideBlockRules}
+  if($applications.Count -eq 1 -and $ports.Count -eq 1 -and $addresses.Count -eq 1 -and $services.Count -eq 1 -and $interfaces.Count -eq 1 -and $interfaceTypes.Count -eq 1 -and $security.Count -eq 1){
+    $observed=[ordered]@{name=[string]$rule.Name;display_name=[string]$rule.DisplayName;program=[string]$applications[0].Program;protocol=[string]$ports[0].Protocol;local_port=[string]$ports[0].LocalPort;remote_port=[string]$ports[0].RemotePort;local_address=[string]$addresses[0].LocalAddress;remote_address=[string]$addresses[0].RemoteAddress;service=[string]$services[0].Service;interface_type=(Normalize-AnyValue $interfaceTypes[0].InterfaceType);authentication=[string]$security[0].Authentication;encryption=[string]$security[0].Encryption;local_user=[string]$security[0].LocalUser;remote_user=[string]$security[0].RemoteUser;remote_machine=[string]$security[0].RemoteMachine;override_block_rules=[string]$security[0].OverrideBlockRules}
   }else{$observed=$null}
-  if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or $security.Count -ne 1 -or
+  if($applications.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $services.Count -ne 1 -or $interfaces.Count -ne 1 -or $interfaceTypes.Count -ne 1 -or $security.Count -ne 1 -or
     $rule.Group -ne $group -or $rule.DisplayName -ne $definition.display_name -or
     [string]$rule.Direction -ne 'Outbound' -or [string]$rule.Action -ne 'Allow' -or
     ((-not $AllowDisabled -and [string]$rule.Enabled -ne 'True') -or [string]$rule.Enabled -notin @('True','False')) -or [string]$rule.Profile -ne 'Any' -or

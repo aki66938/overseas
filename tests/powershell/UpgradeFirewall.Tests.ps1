@@ -15,13 +15,14 @@ Describe 'Upgrade installer firewall baseline' {
         function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process {$InputObject.Address} }
         function Get-NetFirewallServiceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process {$InputObject.ServiceFilter} }
         function Get-NetFirewallInterfaceFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process {$InputObject.InterfaceFilter} }
+        function Get-NetFirewallInterfaceTypeFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process {$InputObject.InterfaceTypeFilter} }
         function Get-NetFirewallSecurityFilter { param([Parameter(ValueFromPipeline=$true)]$InputObject); process {$InputObject.SecurityFilter} }
         function New-NetFirewallRule {
             param($Name,$DisplayName,$Group,$Direction,$Action,$Program,$Protocol,$Profile,$Enabled,$PolicyStore)
             $script:rules[$Name]=[pscustomobject]@{Name=$Name;DisplayName=$DisplayName;Group=$Group;Direction=$Direction;Action=$Action;Profile=$Profile;Enabled=[string]$Enabled;
                 App=[pscustomobject]@{Program=$Program;Package='Any'};Port=[pscustomobject]@{Protocol=$Protocol;LocalPort='Any';RemotePort='Any'};
                 Address=[pscustomobject]@{LocalAddress='Any';RemoteAddress='Any'};ServiceFilter=[pscustomobject]@{Service='Any'};
-                InterfaceFilter=[pscustomobject]@{InterfaceType='Any';InterfaceAlias='Any'};
+                InterfaceFilter=[pscustomobject]@{InterfaceAlias='Any'};InterfaceTypeFilter=[pscustomobject]@{InterfaceType='Any'};
                 SecurityFilter=[pscustomobject]@{Authentication='NotRequired';Encryption='NotRequired';LocalUser='Any';RemoteUser='Any';RemoteMachine='Any';OverrideBlockRules='False'}}
         }
         function Set-NetFirewallRule { param($Name,$Enabled,$PolicyStore,$ErrorAction); $script:rules[$Name].Enabled=[string]$Enabled }
@@ -46,5 +47,11 @@ Describe 'Upgrade installer firewall baseline' {
         (Get-UpgradeFirewallFailure { Get-UpgradeFirewallBaseline }) | Should Match 'exactly match'
         (Get-UpgradeFirewallFailure { Restore-UpgradeFirewallBaseline -Baseline $baseline -CurrentJournal $script:oldJournal }) | Should Match 'exactly match'
         $script:rules[$definitions[0].name].App.Program | Should Be 'C:\foreign.exe'
+    }
+    It 'rejects missing ambiguous and restricted interface type filters' {
+        foreach($value in @($null, @([pscustomobject]@{InterfaceType='Any'},[pscustomobject]@{InterfaceType='Any'}), [pscustomobject]@{InterfaceType='Wireless'})) {
+            $script:rules[$definitions[0].name].InterfaceTypeFilter=$value
+            (Get-UpgradeFirewallFailure { Get-UpgradeFirewallBaseline }) | Should Match 'exactly match'
+        }
     }
 }
