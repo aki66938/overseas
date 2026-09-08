@@ -17,3 +17,37 @@ Describe 'Client timestamp endpoint policy' {
         }
     }
 }
+
+Describe 'Bounded Authenticode signing retries' {
+    BeforeEach {
+        $script:signCalls = 0
+        $script:failures = 0
+        function Test-SignTool {
+            $script:signCalls++
+            $global:LASTEXITCODE = 0
+            if ($script:signCalls -le $script:failures) { $global:LASTEXITCODE = 1 }
+        }
+        Mock Start-Sleep {}
+    }
+    It 'does not retry a successful signature' {
+        Invoke-ClientAuthenticodeSign -SignToolPath Test-SignTool -Path candidate.exe -Thumbprint ('A' * 40) -TimestampUrl http://timestamp.digicert.com
+        $script:signCalls | Should Be 1
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly -Scope It
+    }
+    It 'retries transient failures with a finite delay' {
+        $script:failures = 2
+        Invoke-ClientAuthenticodeSign -SignToolPath Test-SignTool -Path candidate.exe -Thumbprint ('A' * 40) -TimestampUrl http://timestamp.digicert.com
+        $script:signCalls | Should Be 3
+        Assert-MockCalled Start-Sleep -Times 2 -Exactly -Scope It -ParameterFilter { $Seconds -eq 2 }
+    }
+    It 'fails closed after three unsuccessful attempts' {
+        $script:failures = 100
+        { Invoke-ClientAuthenticodeSign -SignToolPath Test-SignTool -Path candidate.exe -Thumbprint ('A' * 40) -TimestampUrl http://timestamp.digicert.com } | Should Throw
+        $script:signCalls | Should Be 3
+        Assert-MockCalled Start-Sleep -Times 2 -Exactly -Scope It
+    }
+    It 'does not accept a missing signer with a stale successful exit code' {
+        $global:LASTEXITCODE = 0
+        { Invoke-ClientAuthenticodeSign -SignToolPath 'RegenBio-Nonexistent-Signer-20260908' -Path candidate.exe -Thumbprint ('A' * 40) -TimestampUrl http://timestamp.digicert.com } | Should Throw
+    }
+}

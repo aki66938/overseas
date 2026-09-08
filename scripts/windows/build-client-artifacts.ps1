@@ -156,8 +156,7 @@ if ($Mode -eq 'Release') {
     [IO.File]::WriteAllText($harnessPath, $harness.Replace($sentinel, $SigningCertificateThumbprint.ToUpperInvariant()), (New-Object Text.UTF8Encoding($false)))
     Write-DetachedCms -ContentPath (Join-Path $target 'agent.yaml') -SignaturePath (Join-Path $target 'agent.yaml.p7s')
     foreach ($name in $firstParty) {
-        & $SignToolPath sign /fd SHA256 /tr $TimestampUrl /td SHA256 /sha1 $SigningCertificateThumbprint (Join-Path $target $name) | Out-Null
-        if (-not $? -or $LASTEXITCODE -ne 0) { throw "Authenticode signing failed for '$name'." }
+        Invoke-ClientAuthenticodeSign -SignToolPath $SignToolPath -Path (Join-Path $target $name) -Thumbprint $SigningCertificateThumbprint -TimestampUrl $TimestampUrl
     }
 }
 else { [IO.File]::WriteAllText($harnessPath, $harness, (New-Object Text.UTF8Encoding($false))) }

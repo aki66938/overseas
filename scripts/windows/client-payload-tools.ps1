@@ -1,4 +1,28 @@
-# Pure inventory and WiX authoring helpers. No installation or trust-store work.
+# Release signing, inventory and WiX helpers. No installation or trust-store work.
+function Invoke-ClientAuthenticodeSign {
+    param(
+        [Parameter(Mandatory = $true)][string] $SignToolPath,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Thumbprint,
+        [Parameter(Mandatory = $true)][string] $TimestampUrl
+    )
+    Assert-ClientTimestampUrl $TimestampUrl
+    # A timestamp outage must not force rebuilding the entire signed payload.
+    # Each retry replaces the same signature; it never drops the timestamp.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $signOutput = @(& $SignToolPath sign /fd SHA256 /tr $TimestampUrl /td SHA256 /sha1 $Thumbprint $Path 2>&1)
+            $signExitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $previousErrorPreference }
+        if ($signExitCode -eq 0) { return }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+    }
+    throw ("Authenticode signing failed after three attempts for '$([IO.Path]::GetFileName($Path))': " + ($signOutput -join ' '))
+}
+
 function Assert-ClientTimestampUrl {
     param([string]$Url)
     # SignTool rejects HTTPS with the pinned SDK. DigiCert documents this

@@ -134,8 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Release payload build failed.' }
     & $wixExecutable build (Join-Path $repo 'deploy\client\Product.wxs') (Join-Path $repo 'deploy\client\Files.wxs') ($payload + '.FlutterFiles.wxs') -d CorporateSigningThumbprint=$SigningCertificateThumbprint -d PackageTrustMode=RELEASE_SIGNED -d ProductVersion=$ReleaseVersion -bindpath $payload -arch x64 -ext $utilExtension -ext $firewallExtension -ext $iisExtension -intermediateFolder (Join-Path $temporaryRoot 'wixobj') -pdbtype none -out $temporaryMsi
     if ($LASTEXITCODE -ne 0) { throw 'wix release build failed.' }
-    & $signTool sign /fd SHA256 /tr $TimestampUrl /td SHA256 /sha1 $SigningCertificateThumbprint $temporaryMsi | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'signtool release signing failed.' }
+    Invoke-ClientAuthenticodeSign -SignToolPath $signTool -Path $temporaryMsi -Thumbprint $SigningCertificateThumbprint -TimestampUrl $TimestampUrl
     & (Join-Path $PSScriptRoot 'inspect-client-msi.ps1') -MsiPath $temporaryMsi -StagingPath $payload -OutputDirectory ('build/release-' + $id + '/inspect')
     if ($LASTEXITCODE -ne 0) { throw 'Release inspection failed.' }
     Wait-ExclusiveFileAccess -Path $temporaryMsi -TimeoutSeconds 15
