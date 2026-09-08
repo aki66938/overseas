@@ -86,3 +86,12 @@ Reuse: `scripts/windows/publish-client-release.ps1`; dedicated clean build clone
 ## Self-review
 
 The tasks cover visual hierarchy, eight targets, Gemini evidence, truthful details, unchanged window/tray behavior, bounded diagnostics and signed deployment. Gemini cause is deliberately an evidence gate, not a speculative endpoint or TLS change. No production infrastructure or Linux drafts are included.
+
+## Execution receipt — 2026-09-08
+
+- [x] Task 1: Gemini reproduced on pilot; 25 KiB headers exceed old16KiB limit; HEAD sporadic EOF, GET200. Same actual Go Prober validated after fix.
+- [x] Task 2: Eight targets and bounded compatibility fallback; TDD and full Go PASS; independent review approved at1d0ff0c, Dart f49651d.
+- [x] Task 3: UI4288cac + footer refinement0f325d4; Flutter82PASS/analyze clean,10goldens reviewed, final integrated review approved.
+- [x] Task 4: Three initial timestamp failures led to bounded signing retry1239e5b; Pester202PASS and review approved. Signed0.1.10 published/verified, pilotMSI0/payload0/serviceRunning/APIconnected/eighttargetsresponding; interactiveGUI launched.
+
+Detailed evidence, source commit and MSI hash: `docs/acceptance/windows-ui-refresh-20260908.md`. Existing backup retained; no main merge/push. User GUI assessment and long-duration validation remain outside automated completion.
