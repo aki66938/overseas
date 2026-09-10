@@ -219,7 +219,8 @@ func TestRunPassesAndBindsRequestedSourceIPToInjectedDialerFactory(t *testing.T)
 	}))
 	defer server.Close()
 
-	wantSource := net.ParseIP("127.0.0.2")
+	// Darwin only configures 127.0.0.1 by default; bind a configured address.
+	wantSource := net.ParseIP("127.0.0.1")
 	var factorySource net.IP
 	result := run(contextWithDeadline(t), targetFor(server), wantSource, time.Second, localResolver,
 		dialerFactory(func(_ time.Duration, source net.IP) dialFunc {
@@ -245,6 +246,21 @@ func TestRunPassesAndBindsRequestedSourceIPToInjectedDialerFactory(t *testing.T)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not observe a connection")
+	}
+}
+
+func TestRunForwardsNondefaultSourceToDialerFactory(t *testing.T) {
+	want := net.ParseIP("192.0.2.37")
+	var got net.IP
+	result := run(contextWithDeadline(t), config.Target{Name: "approved", URL: "https://approved.example.invalid/"}, want, time.Second, localResolver,
+		dialerFactory(func(_ time.Duration, source net.IP) dialFunc {
+			got = append(net.IP(nil), source...)
+			return func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("deliberate non-network forwarding test")
+			}
+		}), nil)
+	if !got.Equal(want) || result.ErrorCode != "tcp_failed" {
+		t.Fatalf("source = %v, result = %s; want requested source and injected failure", got, result.ErrorCode)
 	}
 }
 
