@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -222,6 +223,22 @@ func validateAccount(a account) error {
 type lifecycle interface {
 	status() (string, error)
 	step(string) error
+}
+
+func classifyLaunchQuery(output []byte, code int, err error) (bool, error) {
+	if err == nil && code == 0 {
+		return true, nil
+	}
+	// Exact C-locale output and exit status observed on the target Mac. Any
+	// changed, truncated or failed query stays uncertain instead of skipping stop.
+	missing := "Bad request.\nCould not find service \"" + label + "\" in domain for system"
+	if code == 113 && err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && strings.TrimSpace(string(output)) == missing {
+		return false, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("launchctl exited %d", code)
+	}
+	return false, fmt.Errorf("launchd registration is uncertain: %w", err)
 }
 
 func replace(f lifecycle) error {

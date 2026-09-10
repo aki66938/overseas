@@ -28,6 +28,9 @@ func command(program string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, program, args...)
 	c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/var/root", "LANG=C"}
 	out, e := c.CombinedOutput()
+	if ctx.Err() != nil {
+		return out, fmt.Errorf("%s failed: %w", filepath.Base(program), ctx.Err())
+	}
 	if e != nil {
 		return out, fmt.Errorf("%s failed: %w (%s)", filepath.Base(program), e, strings.TrimSpace(string(out)))
 	}
@@ -76,12 +79,78 @@ func protect(p string, missingOK bool) error {
 	}
 	return nil
 }
+
+// Darwin inherits the containing directory's group even after setgid(0).
+// These helpers are called only for objects just created by this installer.
+func ownFD(fd int, mode uint32, kind uint16) error {
+	if e := unix.Fchown(fd, 0, 0); e != nil {
+		return e
+	}
+	if e := unix.Fchmod(fd, mode); e != nil {
+		return e
+	}
+	var st unix.Stat_t
+	if e := unix.Fstat(fd, &st); e != nil {
+		return e
+	}
+	if st.Uid != 0 || st.Gid != 0 || st.Mode&unix.S_IFMT != kind || uint32(st.Mode&07777) != mode {
+		return errors.New("created object is not root:wheel with required mode")
+	}
+	return nil
+}
+func ownDirectory(p string, mode os.FileMode) error {
+	fd, e := unix.Open(p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if e != nil {
+		return e
+	}
+	defer unix.Close(fd)
+	return ownFD(fd, uint32(mode.Perm()), unix.S_IFDIR)
+}
+func mkdirOwned(p string, mode os.FileMode) error {
+	if e := os.Mkdir(p, mode); e != nil {
+		return e
+	}
+	return ownDirectory(p, mode)
+}
+func verifyOwnedDirectory(p string, mode os.FileMode) error {
+	var st unix.Stat_t
+	if e := unix.Lstat(p, &st); e != nil {
+		return e
+	}
+	if st.Uid != 0 || st.Gid != 0 || st.Mode&unix.S_IFMT != unix.S_IFDIR || os.FileMode(st.Mode&07777) != mode {
+		return errors.New("existing owned directory must be root:wheel with required mode")
+	}
+	return nil
+}
+func ownLink(p string) error {
+	var st unix.Stat_t
+	if e := unix.Lstat(p, &st); e != nil {
+		return e
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFLNK {
+		return errors.New("created link changed type")
+	}
+	if e := unix.Lchown(p, 0, 0); e != nil {
+		return e
+	}
+	if e := unix.Lstat(p, &st); e != nil {
+		return e
+	}
+	if st.Uid != 0 || st.Gid != 0 || st.Mode&unix.S_IFMT != unix.S_IFLNK {
+		return errors.New("created link is not root:wheel")
+	}
+	return nil
+}
 func privateWrite(p string, data []byte, mode os.FileMode) error {
 	if e := protect(filepath.Dir(p), false); e != nil {
 		return e
 	}
 	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if e != nil {
+		return e
+	}
+	if e = ownFD(int(f.Fd()), uint32(mode.Perm()), unix.S_IFREG); e != nil {
+		f.Close()
 		return e
 	}
 	if _, e = f.Write(data); e == nil {
@@ -143,14 +212,38 @@ type macLife struct {
 	backup, stage, oldPlist string
 	r                       receipt
 	addedNow                bool
+	runNative               func(string, ...string) ([]byte, error)
+}
+
+func (l *macLife) run(program string, args ...string) ([]byte, error) {
+	if l.runNative != nil {
+		return l.runNative(program, args...)
+	}
+	return command(program, args...)
+}
+func (l *macLife) registered() (bool, error) {
+	out, e := l.run("/bin/launchctl", "print", "system/"+label)
+	code := 0
+	if e != nil {
+		code = -1
+		var exit *exec.ExitError
+		if errors.As(e, &exit) {
+			code = exit.ExitCode()
+		}
+	}
+	return classifyLaunchQuery(out, code, e)
 }
 
 func (l *macLife) status() (string, error) {
-	if !l.old {
+	present, e := l.registered()
+	if e != nil {
+		return "", e
+	}
+	if !present {
 		return "absent", nil
 	}
-	if _, e := command("/bin/launchctl", "print", "system/"+label); e != nil {
-		return "absent", nil
+	if !l.old {
+		return "", errors.New("orphan registered service")
 	}
 	ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
 	defer c()
@@ -166,9 +259,20 @@ func (l *macLife) status() (string, error) {
 func (l *macLife) step(s string) error {
 	switch s {
 	case "stop":
-		if _, e := command("/bin/launchctl", "print", "system/"+label); e == nil {
-			if _, e = command("/bin/launchctl", "bootout", "system/"+label); e != nil {
+		present, e := l.registered()
+		if e != nil {
+			return e
+		}
+		if present {
+			if _, e = l.run("/bin/launchctl", "bootout", "system/"+label); e != nil {
 				return e
+			}
+			present, e = l.registered()
+			if e != nil {
+				return e
+			}
+			if present {
+				return errors.New("service still registered after bootout; state preserved")
 			}
 		}
 		// Wait for the stopped daemon to release its persistent lock, but never unlink it.
@@ -308,11 +412,14 @@ func copyPayload(source, dest string, m manifest) error {
 		p := filepath.Join(dest, filepath.FromSlash(e.Path))
 		switch e.Kind {
 		case "dir":
-			if err := os.Mkdir(p, 0755); err != nil {
+			if err := mkdirOwned(p, 0755); err != nil {
 				return err
 			}
 		case "link":
 			if err := os.Symlink(e.Target, p); err != nil {
+				return err
+			}
+			if err := ownLink(p); err != nil {
 				return err
 			}
 		case "file":
@@ -329,6 +436,11 @@ func copyPayload(source, dest string, m manifest) error {
 			}
 			out, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 			if err != nil {
+				in.Close()
+				return err
+			}
+			if err = ownFD(int(out.Fd()), uint32(mode.Perm()), unix.S_IFREG); err != nil {
+				out.Close()
 				in.Close()
 				return err
 			}
@@ -354,10 +466,13 @@ func (l *macLife) prepareStage() error {
 	if e != nil {
 		return e
 	}
+	if e = ownDirectory(l.stage, 0700); e != nil {
+		return e
+	}
 	if e = copyPayload(l.payload, l.stage, l.m); e != nil {
 		return e
 	}
-	if e = os.Mkdir(l.stage+"/state", 0700); e != nil {
+	if e = mkdirOwned(l.stage+"/state", 0700); e != nil {
 		return e
 	}
 	config := fmt.Sprintf(`{"schema_version":1,"owner_uid":%d,"core_sha256":%q,"policy":%s}`, l.owner.UID, coreDigest, fixedPolicy)
@@ -390,7 +505,7 @@ func (l *macLife) prepareStage() error {
 	if _, e = command("/usr/bin/codesign", "--verify", "--deep", "--strict", l.stage+"/"+appName); e != nil {
 		return e
 	}
-	return os.Chmod(l.stage, 0755)
+	return ownDirectory(l.stage, 0755)
 }
 func (l *macLife) activate() (result error) {
 	suffix := time.Now().UTC().Format("20060102T150405.000000000Z")
@@ -508,7 +623,11 @@ func uninstall(l *macLife) error {
 		return errors.New("no verified installation exists")
 	}
 	// Disconnect through the authenticated existing client, then stop and restore offline.
-	if _, e := command("/bin/launchctl", "print", "system/"+label); e == nil {
+	present, e := l.registered()
+	if e != nil {
+		return e
+	}
+	if present {
 		ctx, c := context.WithTimeout(context.Background(), 105*time.Second)
 		s, e := clientapi.New().DisconnectV1(ctx)
 		c()
@@ -560,7 +679,7 @@ func runPlatform(args []string) error {
 	unix.Umask(0022)
 	if e := unix.Setgid(0); e != nil {
 		return e
-	} // All created objects are root:wheel.
+	} // New objects also explicitly chown: Darwin inherits parent-directory GID.
 	if len(args) < 1 {
 		return errors.New("usage: install --payload DIR --owner DAILY_USER --accept-ca SHA256 | uninstall")
 	}
@@ -596,7 +715,13 @@ func runPlatform(args []string) error {
 		if _, e := os.Lstat(plistPath); e == nil {
 			return errors.New("orphan launch plist; manual audit required")
 		}
-		if _, e := command("/bin/launchctl", "print", "system/"+label); e == nil {
+	}
+	{
+		present, e := l.registered()
+		if e != nil {
+			return e
+		}
+		if present && !l.old {
 			return errors.New("orphan live daemon; manual audit required")
 		}
 	}
@@ -626,23 +751,35 @@ func runPlatform(args []string) error {
 		}
 	}
 	if _, e := os.Stat(runtimeRoot); errors.Is(e, os.ErrNotExist) {
-		if e = os.Mkdir(runtimeRoot, 0755); e != nil {
+		if e = mkdirOwned(runtimeRoot, 0755); e != nil {
 			return e
 		}
 	}
 	if e := protect(runtimeRoot, false); e != nil {
 		return e
 	}
-	fd, e := unix.Open(runtimeRoot+"/installer.lock", unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if e := verifyOwnedDirectory(runtimeRoot, 0755); e != nil {
+		return e
+	}
+	fd, e := unix.Open(runtimeRoot+"/installer.lock", unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	created := e == nil
+	if e == unix.EEXIST {
+		fd, e = unix.Open(runtimeRoot+"/installer.lock", unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
 	if e != nil {
 		return e
 	}
 	defer unix.Close(fd)
+	if created {
+		if e = ownFD(fd, 0600, unix.S_IFREG); e != nil {
+			return e
+		}
+	}
 	var st unix.Stat_t
 	if e = unix.Fstat(fd, &st); e != nil {
 		return e
 	}
-	if st.Uid != 0 || st.Mode&0077 != 0 || st.Mode&unix.S_IFMT != unix.S_IFREG {
+	if st.Uid != 0 || st.Gid != 0 || st.Mode&07777 != 0600 || st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return errors.New("unsafe installer lock")
 	}
 	if e = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); e != nil {
@@ -668,7 +805,13 @@ func runPlatform(args []string) error {
 		if _, e = os.Lstat(plistPath); e == nil {
 			return errors.New("orphan plist; audit required")
 		}
-		if _, e = command("/bin/launchctl", "print", "system/"+label); e == nil {
+	}
+	{
+		present, e := l.registered()
+		if e != nil {
+			return e
+		}
+		if present && !l.old {
 			return errors.New("orphan daemon; audit required")
 		}
 	}

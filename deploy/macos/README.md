@@ -16,6 +16,8 @@ Telecom GoMITM Root 用于企业出口 HTTPS 流量检查，信任它意味着�
 
 安装目录 root:wheel 0755，二进制 root:wheel 0755，state 0700，配置与安装记录 0600，LaunchDaemon plist 0644。`/private/var/run/regen-access` 为 root:wheel 0755，原系统 `/private/var/run` 的 root:daemon 0775 不改动。后台进程组随 launchd 管理，停止期限 100 秒。
 
+由于 macOS 会继承父目录所属组，安装器对所有新建目录、文件和框架链接显式设定并验证 root:wheel，不依赖进程的主组。已存在但权限或所属组不符的运行目录会被拒绝，需 IT 先审核。launchd 查询只在返回明确的指定服务不存在错误时才允许继续；超时和通信错误均中止操作。停止后再次查询确认服务已注销，不以锁暂时空闲替代该证据。
+
 升级必须 idle；connected 或恢复不确定即拒绝。先停止后台，再调用固定服务 `--restore` 获取独占锁，按持久核心归属记录、网络日志的顺序恢复。恢复不成功保留所有文件。旧安装与旧 plist 在同目录备份；新后台启动失败则停止新服务、执行恢复并还原旧版。备份包含 root-only 状态，永久保留供 IT 审核。安装被强制中断或磁盘故障时可能留下 stage/backup/failed 目录；不要手工删状态或强行重启，先由 IT 审核具体残留。
 
 卸载可运行镜像中的 `Uninstall.command`，也可 `sudo '/Library/Application Support/RegenBioAccess/regen-access-installer' uninstall`。先断开、停止并离线恢复，成功后才将精确安装目录和 plist 改名为 `.uninstalled-时间戳`。此为可恢复卸载，不递归删除状态、旧备份、系统目录、预览包或其他软件；保留运行时锁目录防止锁 inode 分裂。恢复未确认则拒绝卸载。撤销 CA 信任以后，重新使用保留备份必须再次走安装器。

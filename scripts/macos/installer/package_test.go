@@ -1,11 +1,48 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLaunchQueryFailsClosedOnErrorsAndTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		code int
+		err  error
+	}{
+		{"", 5, errors.New("communication failure")},
+		{"", -1, context.DeadlineExceeded},
+		{"Could not find service", 113, errors.New("truncated response")},
+		{"Could not find service \"other.service\" in domain for system", 113, errors.New("missing different service")},
+	} {
+		if present, e := classifyLaunchQuery([]byte(tc.out), tc.code, tc.err); e == nil || present {
+			t.Fatalf("query uncertainty accepted as absence: %#v", tc)
+		}
+	}
+	if present, e := classifyLaunchQuery([]byte("system/com.regenbio.access.poc = {}"), 0, nil); e != nil || !present {
+		t.Fatal(present, e)
+	}
+}
+
+func TestLaunchQueryAcceptsOnlyObservedExactAbsence(t *testing.T) {
+	output := []byte("Bad request.\nCould not find service \"com.regenbio.access.poc\" in domain for system\n")
+	if present, e := classifyLaunchQuery(output, 113, errors.New("exit status 113")); e != nil || present {
+		t.Fatalf("explicit absence rejected: present=%v err=%v", present, e)
+	}
+	for _, e := range []error{context.DeadlineExceeded, context.Canceled} {
+		if _, got := classifyLaunchQuery(output, 113, e); got == nil {
+			t.Fatal("timeout/cancel accepted as absence")
+		}
+	}
+	if _, e := classifyLaunchQuery(output, 5, errors.New("communication failure")); e == nil {
+		t.Fatal("wrong exit status accepted")
+	}
+}
 
 func TestManifestRejectsMalformedAndEscapingEntries(t *testing.T) {
 	for _, raw := range []string{`{`, `{"version":1,"files":[],"extra":true}`, `{"version":1,"files":[]} {}`, `{"version":1,"files":[{"path":"../escape","kind":"file","sha256":"00"}]}`, `{"version":1,"files":[{"path":"/etc/passwd","kind":"file"}]}`} {
