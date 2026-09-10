@@ -611,11 +611,21 @@ func removeCA(r receipt) error {
 	if e != nil || h != caDigest {
 		return errors.New("CA copy integrity failure; trust retained")
 	}
-	if _, e = command("/usr/bin/security", "remove-trusted-cert", "-d", installRoot+"/Telecom-GoMITM-Root.cer"); e != nil {
-		return e
-	}
-	_, e = command("/usr/bin/security", "delete-certificate", "-Z", caSHA1, "/Library/Keychains/System.keychain")
-	return e
+	return finishOwnedCARemoval(r, h, func() ([]byte, int, error) {
+		out, err := command("/usr/bin/security", "remove-trusted-cert", "-d", installRoot+"/Telecom-GoMITM-Root.cer")
+		code := 0
+		if err != nil {
+			code = -1
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				code = exit.ExitCode()
+			}
+		}
+		return out, code, err
+	}, func() error {
+		_, err := command("/usr/bin/security", "delete-certificate", "-Z", caSHA1, "/Library/Keychains/System.keychain")
+		return err
+	})
 }
 
 func uninstall(l *macLife) error {

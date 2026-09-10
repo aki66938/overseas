@@ -4,11 +4,17 @@
 
 打开镜像并运行 `Install.command`，输入实际日常使用者的本地短账户名（测试机为 `regen-bio`；程序查询实际 UID，不硬编码 501）。阅读并明确接受流量 CA 说明后，仅一次 sudo 管理员授权。若系统策略阻止运行，请由 IT 审核来源后通过系统提供的正常批准方式打开；脚本不会绕过系统保护。
 
+脚本只调用一次 sudo，但 macOS 系统证书信任可能另需本机图形会话中的授权确认。实测无交互 SSH 会话中的 root 也可被系统拒绝；此时安装失败并执行回滚，不宣称已安装成功，不放宽 authorizationdb 或其他系统授权策略。
+
+请在日常使用者已登录的 Mac 桌面挂载 DMG，双击 `Install.command`，保持打开的终端窗口在前台，阅读并处理系统可能显示的信任授权。本机 GUI 安装是待验证步骤，不保证仅切换会话就会通过系统策略。若仍出现“no user interaction was possible”，停止重试，由 IT 在本机系统钥匙串界面核对指定 CA 与授权要求；不通过 SSH 放宽授权策略。
+
 安装后的 GUI 路径为 `/Library/Application Support/RegenBioAccess/RegenBio Access.app`。以所选普通账户打开，日常连接与断开无需管理员授权。原 `/Users/Shared/RegenBio-PoC-20260910/RegenBio-UI-Preview.app` 不受影响。后台服务名称为 `com.regenbio.access.poc`，初始状态 idle，不自动连接。
 
 ## 流量信任变更
 
 Telecom GoMITM Root 用于企业出口 HTTPS 流量检查，信任它意味着相应网关可以解密和检查 HTTPS 流量；它不是应用签名证书。SHA256 为 `0D344A6F39FD4252C96F0E5606E2F4E7205CB2E59C44603C542AA8C132A711F8`，SHA1 为 `7903068AAA22CA51185706C23611E6B5EEEF2729`。本 PoC 的测试出口已验证需要该 CA，安装需明确输入 TRUST。若系统钥匙串已有精确证书，安装器验证现有信任，不重写；现有信任不足则拒绝安装并回滚。新建信任仅用于 SSL，记录在 root-only receipt.json；卸载仅撤销本次管理安装所添加的精确证书。TLS 验证始终开启。
+
+系统可能先导入证书，再拒绝写入信任。回滚在核对本次新增收据、固定指纹和系统钥匙串中的精确证书后，允许“指定信任记录明确不存在”的固定系统返回，继续删除这张本次新增证书。授权失败、超时或任何不确定返回仍保留证书和安装现场供 IT 处理。
 
 ## 安装完整性、升级与卸载
 

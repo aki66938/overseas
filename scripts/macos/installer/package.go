@@ -269,3 +269,24 @@ func replace(f lifecycle) error {
 	return fmt.Errorf("new service failed; previous installation restored: %w", original)
 }
 func ownedRemovalTarget(p string) bool { return p == installRoot || p == plistPath }
+
+// Presence in the System keychain is checked by the native caller first. The
+// receipt and pinned DER digest remain required before either cleanup operation.
+func finishOwnedCARemoval(r receipt, digest string, removeTrust func() ([]byte, int, error), deleteCertificate func() error) error {
+	if !shouldRemoveCA(r) {
+		return nil
+	}
+	if digest != caDigest {
+		return errors.New("CA copy integrity failure; trust retained")
+	}
+	output, code, err := removeTrust()
+	missing := "SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain."
+	confirmedMissing := code == 1 && err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && strings.TrimSpace(string(output)) == missing
+	if err != nil && !confirmedMissing {
+		return err
+	}
+	if err == nil && code != 0 {
+		return fmt.Errorf("trust removal exited %d without a confirmed result", code)
+	}
+	return deleteCertificate()
+}

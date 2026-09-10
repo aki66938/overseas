@@ -165,6 +165,57 @@ func TestRecoveryReceiptIsNotAuthorizationToRemovePreexistingTrust(t *testing.T)
 	}
 }
 
+func TestOwnedCertificateCleanupContinuesAfterExactMissingTrust(t *testing.T) {
+	calls := []string{}
+	remove := func() ([]byte, int, error) {
+		calls = append(calls, "remove-trust")
+		return []byte("SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.\n"), 1, errors.New("exit status 1")
+	}
+	deleteCert := func() error { calls = append(calls, "delete-exact-certificate"); return nil }
+	if e := finishOwnedCARemoval(receipt{CAAdded: true, CASHA256: caDigest}, caDigest, remove, deleteCert); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Join(calls, ",") != "remove-trust,delete-exact-certificate" {
+		t.Fatal(calls)
+	}
+}
+
+func TestOwnedCertificateCleanupPreservesOnUncertainTrustRemoval(t *testing.T) {
+	absent := "SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain."
+	for _, tc := range []struct {
+		out  string
+		code int
+		err  error
+	}{
+		{"SecTrustSettingsRemoveTrustSettings: The authorization was denied since no user interaction was possible.", 1, errors.New("denied")},
+		{absent, 1, context.DeadlineExceeded}, {absent, 1, context.Canceled},
+		{absent, 2, errors.New("wrong code")}, {absent + "\nadditional error", 1, errors.New("ambiguous")},
+		{"", 1, errors.New("unknown")},
+	} {
+		deleted := false
+		e := finishOwnedCARemoval(receipt{CAAdded: true, CASHA256: caDigest}, caDigest, func() ([]byte, int, error) { return []byte(tc.out), tc.code, tc.err }, func() error { deleted = true; return nil })
+		if e == nil || deleted {
+			t.Fatalf("uncertain cleanup deleted certificate: %#v", tc)
+		}
+	}
+}
+
+func TestCertificateCleanupPreservesPreexistingAndRejectsWrongDigest(t *testing.T) {
+	called := false
+	remove := func() ([]byte, int, error) { called = true; return nil, 0, nil }
+	del := func() error { called = true; return nil }
+	if e := finishOwnedCARemoval(receipt{CAAdded: false, CASHA256: caDigest}, caDigest, remove, del); e != nil || called {
+		t.Fatal("preexisting trust touched", e)
+	}
+	if e := finishOwnedCARemoval(receipt{CAAdded: true, CASHA256: caDigest}, "wrong", remove, del); e == nil || called {
+		t.Fatal("tampered certificate accepted")
+	}
+	deletionErr := errors.New("certificate deletion failed")
+	if e := finishOwnedCARemoval(receipt{CAAdded: true, CASHA256: caDigest}, caDigest, remove, func() error { return deletionErr }); !errors.Is(e, deletionErr) {
+		t.Fatal("delete failure hidden", e)
+	}
+}
+
 type fakeLife struct {
 	current                           string
 	failStart, failRestore, failStage bool
