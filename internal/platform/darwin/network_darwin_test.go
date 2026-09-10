@@ -3,10 +3,89 @@
 package darwin
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestDarwinRouteNotation(t *testing.T) {
+	for _, tc := range []struct{ destination, flags, want string }{
+		{"127", "UCS", "127.0.0.0/8"},
+		{"169.254", "UCS", "169.254.0.0/16"},
+		{"172.20", "UGSc", "172.20.0.0/16"},
+		{"192.168.1", "UCS", "192.168.1.0/24"},
+		{"172.20.20/22", "UCS", "172.20.20.0/22"},
+		{"172.20.20.1", "UHLWIir", "172.20.20.1/32"},
+		{"172.20.0.0", "UH", "172.20.0.0/32"},
+		{"172.20.20.1/32", "UCS", "172.20.20.1/32"},
+		{"0/1", "UCS", "0.0.0.0/1"},
+		{"128/1", "UCS", "128.0.0.0/1"},
+	} {
+		t.Run(tc.destination+tc.flags, func(t *testing.T) {
+			rows, e := parseRoutes("Destination Gateway Flags Netif Expire\n"+tc.destination+" link#4 "+tc.flags+" en0\n", map[string]int{"en0": 4})
+			if e != nil {
+				t.Fatal(e)
+			}
+			if len(rows) != 1 || rows[0].Destination != tc.want {
+				t.Fatalf("parsed %v, want %s", rows, tc.want)
+			}
+		})
+	}
+}
+
+// Model native netstat rendering at the network-system boundary: an owned
+// management /16 is abbreviated, while the other routes retain CIDR output.
+type abbreviatedRoutesSystem struct{ *fakeSystem }
+
+func (s abbreviatedRoutesSystem) Routes(ctx context.Context) ([]ownedRoute, error) {
+	routes, e := s.fakeSystem.Routes(ctx)
+	if e != nil {
+		return nil, e
+	}
+	var text strings.Builder
+	text.WriteString("Destination Gateway Flags Netif Expire\n")
+	indexes := map[string]int{}
+	for _, r := range routes {
+		destination := r.Destination
+		if destination == "172.20.0.0/16" {
+			destination = "172.20"
+		}
+		fmt.Fprintf(&text, "%s %s UGSc %s\n", destination, r.Gateway, r.Interface)
+		indexes[r.Interface] = r.Index
+	}
+	return parseRoutes(text.String(), indexes)
+}
+
+func TestAbbreviatedManagementRouteLifecycle(t *testing.T) {
+	_, system, journal := fixture()
+	manager := newNetworkManager(abbreviatedRoutesSystem{system}, journal)
+	capture(t, manager)
+	activate(t, manager, system)
+	if len(system.routes) != 3 {
+		t.Fatal("activation missing routes")
+	}
+	if e := manager.Restore(context.Background(), nil); e != nil {
+		t.Fatal(e)
+	}
+	if len(system.routes) != 0 || journal.value != nil {
+		t.Fatalf("owned management route survived restore: %+v", system.routes)
+	}
+}
+
+func TestAbbreviatedManagementRouteConflict(t *testing.T) {
+	_, system, journal := fixture()
+	system.routes = []ownedRoute{{Destination: "172.20.0.0/16", Gateway: "172.20.20.1", Interface: "en0", Index: 4}}
+	manager := newNetworkManager(abbreviatedRoutesSystem{system}, journal)
+	if _, e := manager.Prepare(context.Background()); e == nil {
+		t.Fatal("preexisting abbreviated management route accepted")
+	}
+	if system.changes != 0 {
+		t.Fatal("preflight mutated network")
+	}
+}
 
 func TestParseRoutes(t *testing.T) {
 	v, e := parseRoutes("Routing tables\n\nInternet:\nDestination Gateway Flags Netif Expire\ndefault 172.20.20.1 UGScg en0\n0/1 link#12 UCS utun9\n172.20/16 172.20.20.1 UGSc en0\n", map[string]int{"en0": 4, "utun9": 12})

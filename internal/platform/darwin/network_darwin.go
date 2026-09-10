@@ -274,7 +274,7 @@ func parseRoutes(text string, indexes map[string]int) ([]ownedRoute, error) {
 		if len(f) < 4 || len(f) > 5 {
 			return nil, errors.New("ambiguous route row")
 		}
-		dest, e := routePrefix(f[0])
+		dest, e := routePrefix(f[0], f[2])
 		if e != nil {
 			return nil, e
 		}
@@ -289,7 +289,7 @@ func parseRoutes(text string, indexes map[string]int) ([]ownedRoute, error) {
 	}
 	return result, nil
 }
-func routePrefix(text string) (string, error) {
+func routePrefix(text, flags string) (string, error) {
 	if text == "default" {
 		return "0.0.0.0/0", nil
 	}
@@ -298,11 +298,17 @@ func routePrefix(text string) (string, error) {
 	if len(parts) > 4 {
 		return "", errors.New("invalid route destination")
 	}
-	for len(parts) < 4 {
-		parts = append(parts, "0")
-	}
 	if !has {
 		bits = "32"
+		if !strings.Contains(flags, "H") {
+			// Darwin netstat abbreviates byte-aligned network routes: 127,
+			// 169.254 and 172.20 represent /8, /16 and /16. RTF_HOST (H)
+			// identifies host routes; explicit CIDR masks always take precedence.
+			bits = strconv.Itoa(len(parts) * 8)
+		}
+	}
+	for len(parts) < 4 {
+		parts = append(parts, "0")
 	}
 	p, e := netip.ParsePrefix(strings.Join(parts, ".") + "/" + bits)
 	if e != nil {
