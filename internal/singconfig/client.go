@@ -12,7 +12,8 @@ import (
 
 type ClientInput struct {
 	// Empty retains the shipped Windows configuration. Linux has a shorter
-	// fixed interface name because IFNAMSIZ includes the terminating NUL.
+	// fixed interface name; Darwin uses a reserved utun and explicit route/DNS
+	// ownership in the privileged network adapter.
 	Platform         string
 	Node             accessmodel.Node
 	CorporateCIDRs   []string
@@ -93,6 +94,8 @@ func RenderClient(input ClientInput) ([]byte, error) {
 	case "", "windows":
 	case "linux":
 		interfaceName = "regen-access"
+	case "darwin":
+		interfaceName = "utun9"
 	default:
 		return nil, fmt.Errorf("unsupported client platform")
 	}
@@ -181,15 +184,16 @@ func RenderClient(input ClientInput) ([]byte, error) {
 			InterfaceName: interfaceName,
 			Address:       []string{tunAddress},
 			MTU:           tunMTU,
-			// auto_route: sing-box installs the two default-half routes and
+			// On Windows/Linux, sing-box installs the two default-half routes and
 			// the tun DNS itself, and they vanish with the process. No
-			// product-owned route table to build, verify, or restore.
-			AutoRoute: true,
+			// product-owned route table to build, verify, or restore. Darwin
+			// disables this: sing-tun can replace an existing route on EEXIST.
+			AutoRoute: input.Platform != "darwin",
 			// strict_route adds the firewall rules that stop resolvers and
 			// processes bypassing the tun: without it Windows' parallel DNS
 			// (IPv6 RDNSS, per-adapter overrides) leaks real addresses and
 			// browsers connect directly into the corp MITM.
-			StrictRoute: true,
+			StrictRoute: input.Platform != "darwin",
 		}},
 		Outbounds: []clientOutbound{
 			{

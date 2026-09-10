@@ -9,6 +9,15 @@ import (
 	"corp.example/overseas-access-gateway/internal/singconfig"
 )
 
+func TestDarwinOwnsRoutesExplicitly(t *testing.T) {
+	input := singconfig.ClientInput{Platform: "darwin", Node: accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080}, CorporateCIDRs: []string{"172.20.0.0/16"}}
+	config := decodeRenderedConfig(t, mustRenderClient(t, input))
+	in := config.Inbounds[0]
+	if in["interface_name"] != "utun9" || in["auto_route"] != false || in["strict_route"] != false {
+		t.Fatalf("unsafe Darwin inbound: %v", in)
+	}
+}
+
 func TestLinuxPlatformOnlyChangesTUNName(t *testing.T) {
 	input := singconfig.ClientInput{Node: accessmodel.Node{ID: "vm101", Transport: "http-connect", Address: "172.20.9.15", Port: 8080}, CorporateCIDRs: []string{"172.20.8.0/22"}, CorporateDNS: []string{"172.20.9.1"}, InternalSuffixes: []string{"ad.intra.regen-bio.com"}}
 	windows := mustRenderClient(t, input)
