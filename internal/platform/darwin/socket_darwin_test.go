@@ -30,10 +30,25 @@ func (h *recordingHandler) Dispatch(_ context.Context, request localapi.Request,
 }
 
 func TestNewSocketServerRejectsInvalidOwnerUID(t *testing.T) {
-	for _, uid := range []int{-1, 0, 1, 499, 500} {
+	for _, uid := range []int{-1, 0, 1, 499, 500, 987654, 4294967294} {
 		if server, err := NewSocketServer(&recordingHandler{make(chan bool, 1)}, uid); err == nil {
 			server.listener.Close()
 			t.Fatalf("owner UID %d accepted", uid)
+		}
+	}
+}
+
+func TestValidateOwnerUIDUsesDarwinAccountDatabase(t *testing.T) {
+	uid := os.Getuid()
+	if uid < 501 {
+		t.Skip("regular Darwin login account required")
+	}
+	if err := validateOwnerUID(uid); err != nil {
+		t.Fatalf("current regular account rejected: %v", err)
+	}
+	for _, invalid := range []int{987654, 4294967294} {
+		if err := validateOwnerUID(invalid); err == nil {
+			t.Fatalf("invalid or reserved UID %d accepted", invalid)
 		}
 	}
 }
@@ -57,6 +72,15 @@ func TestSocketCredentialHelper(t *testing.T) {
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	if os.Getenv("REGEN_ACCESS_EXPECT_PEER_REJECT") == "1" {
+		if _, err := conn.Write([]byte("{\"version\":1,\"id\":\"intruder\",\"action\":\"status\"}\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bufio.NewReader(conn).ReadByte(); err == nil {
+			t.Fatal("server answered unauthorized peer")
+		}
+		return
 	}
 	if _, err := conn.Write([]byte("{\"version\":1,\"id\":\"owner\",\"action\":\"status\"}\n")); err != nil {
 		t.Fatal(err)
@@ -132,6 +156,66 @@ func TestSocketAuthenticatesOwnerAndRejectsNonOwner(t *testing.T) {
 		t.Fatal("owner peer authenticated as administrator")
 	}
 	runHelper(502, true)
+}
+
+func TestSocketRejectsNonOwnerAfterAccept(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("native root fixture required for real UID subprocess")
+	}
+	dir, err := os.MkdirTemp("/tmp", "regen-access-darwin-post-accept-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(dir, "peer-test")
+	if err := os.WriteFile(helper, contents, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "control.sock")
+	handler := &recordingHandler{make(chan bool, 1)}
+	server, err := newSocketServer(path, 501, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Test-only relaxation gets UID 502 past filesystem DAC so LOCAL_PEERCRED
+	// rejection, rather than connect(2), is what closes the connection.
+	if err := os.Chmod(path, 0666); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	command := exec.Command(helper, "-test.run=^TestSocketCredentialHelper$", "-test.v")
+	command.Env = append(os.Environ(), "REGEN_ACCESS_TEST_SOCKET="+path, "REGEN_ACCESS_EXPECT_PEER_REJECT=1")
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 502, Gid: 20}}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("UID 502 helper: %v: %s", err, output)
+	}
+	select {
+	case <-handler.administrator:
+		t.Fatal("non-owner request reached handler")
+	default:
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown hung")
+	}
 }
 
 func TestSocketRejectsUnsafeParentAndExistingPath(t *testing.T) {

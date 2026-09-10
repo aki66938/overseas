@@ -9,7 +9,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,8 +40,22 @@ func NewSocketServer(handler localDispatcher, ownerUID int) (*SocketServer, erro
 	return newSocketServer(SocketPath, ownerUID, handler)
 }
 
-func validOwnerUID(ownerUID int) bool {
-	return ownerUID >= 501 && uint64(ownerUID) <= uint64(^uint32(0))
+func validateOwnerUID(ownerUID int) error {
+	// Darwin reserves low IDs for system accounts and uses very high unsigned
+	// IDs for identities such as nobody. The selected owner must resolve to a
+	// real, ordinary local/directory-service login account.
+	if ownerUID < 501 || uint64(ownerUID) > uint64(^uint32(0)>>1) {
+		return errors.New("invalid socket owner UID")
+	}
+	account, err := user.LookupId(strconv.Itoa(ownerUID))
+	if err != nil {
+		return errors.New("socket owner UID does not resolve")
+	}
+	resolvedUID, err := strconv.Atoi(account.Uid)
+	if err != nil || resolvedUID != ownerUID || account.Username == "" || strings.HasPrefix(account.Username, "_") || account.Username == "nobody" {
+		return errors.New("socket owner is a system account")
+	}
+	return nil
 }
 
 func socketParent(path string) error {
@@ -58,8 +75,8 @@ func socketParent(path string) error {
 }
 
 func newSocketServer(path string, ownerUID int, handler localDispatcher) (*SocketServer, error) {
-	if !validOwnerUID(ownerUID) {
-		return nil, errors.New("invalid socket owner UID")
+	if err := validateOwnerUID(ownerUID); err != nil {
+		return nil, err
 	}
 	if os.Geteuid() != 0 || handler == nil {
 		return nil, errors.New("socket service requires root and handler")
@@ -228,7 +245,7 @@ func dialSocket(ctx context.Context, path string) (net.Conn, error) {
 	}
 	callerUID := uint32(os.Geteuid())
 	ownerIsCaller := stat.Uid == callerUID || callerUID == 0
-	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || !validOwnerUID(int(stat.Uid)) || !ownerIsCaller || stat.Gid != 0 || stat.Mode&0777 != 0600 {
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || validateOwnerUID(int(stat.Uid)) != nil || !ownerIsCaller || stat.Gid != 0 || stat.Mode&0777 != 0600 {
 		return nil, errors.New("unsafe service socket")
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)

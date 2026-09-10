@@ -14,7 +14,7 @@ Implemented only the Darwin Unix-domain socket server/client transport and its D
 ## Behavior implemented
 
 - Fixed endpoint `/var/run/regen-access/control.sock`.
-- Requires root service execution and rejects owner UIDs below 501, root, negative, or outside uint32.
+- Requires root service execution, resolves the selected UID through Darwin's account database, and rejects absent, low/system, underscore-prefixed, `nobody`, or reserved upper-range identities.
 - Requires the final parent directory to be a real root:wheel `0755` directory. The standard `/var` to `/private/var` ancestor mapping is not rejected because only the final runtime directory is checked with `Lstat`.
 - Fails closed when the endpoint exists and removes only the exact socket inode created by this server.
 - Creates owner-UID:wheel `0600` socket; accepts only root or selected owner UID using Darwin `LOCAL_PEERCRED`/`Xucred`.
@@ -31,7 +31,9 @@ Implemented only the Darwin Unix-domain socket server/client transport and its D
 - Windows host: `go test ./internal/agent` — pass.
 - `git diff --check` — pass; Git emitted only its existing LF/CRLF working-copy warning for `client_stub.go`.
 - Native Mac Go 1.27.0: `go test ./internal/platform/darwin ./internal/clientapi` — pass (`darwin` 1.344s, `clientapi` 0.886s).
-- Native Mac root test binary: `sudo .../darwin.test -test.v -test.timeout=60s` — exit 0. Real UID 501/502 credential test passed (0.47s), all four unsafe-path cases passed, root-authenticated client round trip and owned cleanup passed, and the explicit oversized-frame/idle-client cancellation test passed.
+- Native Mac root test binary: `sudo /Users/codexdiag/regen-access-poc/darwin-socket.test -test.v -test.timeout=60s` — exit 0. Real UID 501/502 credential test passed (0.47s), all four unsafe-path cases passed, root-authenticated client round trip and owned cleanup passed, and the explicit oversized-frame/idle-client cancellation test passed.
+- Review-fix RED: Darwin cross-compilation failed on the intentionally missing `validateOwnerUID` API before implementation.
+- Review-fix native rerun: both non-root packages passed; the non-root current-account database test passed; the sudo suite passed including `TestSocketRejectsNonOwnerAfterAccept`. That test relaxes only its fixture socket mode and proves a real UID 502 connection is rejected by post-accept `LOCAL_PEERCRED` before dispatch. The current-user lookup test skips under root by design.
 
 ## Required native Mac commands
 
@@ -53,4 +55,4 @@ The root command is required for filesystem ownership, peer credential, request 
 
 ## Remaining concern
 
-Native Darwin behavior is not claimed until the parent runs both native commands, especially the root fixtures. The server intentionally refuses stale sockets rather than unlinking them; an administrator must inspect/remove stale state during service recovery.
+Parent completed both native non-root and root fixture runs, as recorded above. The server intentionally refuses stale sockets rather than unlinking them; protected stale-socket recovery remains a service-composition requirement, not an implemented feature of this transport task.
