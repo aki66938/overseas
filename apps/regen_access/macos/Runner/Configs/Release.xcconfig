@@ -1,2 +1,5 @@
 #include "../../Flutter/Flutter-Release.xcconfig"
 #include "Warnings.xcconfig"
+
+// Ad-hoc internal PoC must not acquire debugger task access implicitly.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO

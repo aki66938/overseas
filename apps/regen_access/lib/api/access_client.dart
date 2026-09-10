@@ -38,7 +38,7 @@ class OperationUncertainException implements Exception {
 }
 
 /// Only the native runner can choose the pipe. There is no path/command API.
-class WindowsAccessClient implements AccessClient {
+class NativeAccessClient implements AccessClient {
   static const _channel = MethodChannel('regen_access/access');
   final _random = Random.secure();
   bool _lifecycle = false, _uncertain = false;
@@ -119,3 +119,14 @@ class WindowsAccessClient implements AccessClient {
   @override
   Future<List<ProbeResult>> probe() async => (await _request('probe')).results;
 }
+
+// Retain the shipped Windows type and its lifecycle contract.
+class WindowsAccessClient extends NativeAccessClient {}
+
+class MacAccessClient extends NativeAccessClient {}
+
+AccessClient createAccessClient(String platform) => switch (platform) {
+  'windows' => WindowsAccessClient(),
+  'macos' => MacAccessClient(),
+  _ => const UnavailableAccessClient(),
+};

@@ -24,8 +24,10 @@ import (
 // constructor deliberately cannot attest that an arbitrary binary's descendants
 // remain in that group, and therefore never claims process-tree termination.
 type ProcessSupervisor struct {
-	command     func(string, string) *exec.Cmd
-	groupSHA256 string
+	command         func(string, string) *exec.Cmd
+	groupSHA256     string
+	afterStart      func(*exec.Cmd) error
+	afterProvenStop func() error
 }
 
 var _ agent.ProcessSupervisor = (*ProcessSupervisor)(nil)
@@ -82,8 +84,18 @@ func (s *ProcessSupervisor) Start(ctx context.Context, exe, config string) (agen
 	if e := cmd.Start(); e != nil {
 		return fail(e)
 	}
-	p := &processInstance{cmd: cmd, pid: cmd.Process.Pid, attested: s.groupSHA256 != "", stop: make(chan struct{}), finished: make(chan struct{}), done: make(chan agent.ProcessTermination, 1)}
+	p := &processInstance{cmd: cmd, pid: cmd.Process.Pid, attested: s.groupSHA256 != "", afterProvenStop: s.afterProvenStop, stop: make(chan struct{}), finished: make(chan struct{}), done: make(chan agent.ProcessTermination, 1)}
+	var registrationErr error
+	if s.afterStart != nil {
+		registrationErr = s.afterStart(cmd)
+	}
 	go p.supervise()
+	if registrationErr != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		r := p.Stop(cleanup)
+		return p, agent.ProcessStartResult{Err: errors.Join(registrationErr, r.Err), TerminationProven: r.Proven}
+	}
 	if e := ctx.Err(); e != nil {
 		cleanup, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
@@ -94,16 +106,17 @@ func (s *ProcessSupervisor) Start(ctx context.Context, exe, config string) (agen
 }
 
 type processInstance struct {
-	cmd      *exec.Cmd
-	pid      int
-	attested bool
-	stop     chan struct{}
-	finished chan struct{}
-	done     chan agent.ProcessTermination
-	once     sync.Once
-	result   agent.ProcessTermination
-	mu       sync.Mutex
-	reaping  bool
+	cmd             *exec.Cmd
+	pid             int
+	attested        bool
+	stop            chan struct{}
+	finished        chan struct{}
+	done            chan agent.ProcessTermination
+	once            sync.Once
+	result          agent.ProcessTermination
+	mu              sync.Mutex
+	reaping         bool
+	afterProvenStop func() error
 }
 
 func (p *processInstance) Done() <-chan agent.ProcessTermination { return p.done }
@@ -241,6 +254,12 @@ func (p *processInstance) supervise() {
 		waitErr = errors.New("owned core reap timeout")
 	}
 	p.result = agent.ProcessTermination{Err: errors.Join(monitorErr, termErr, killErr, auditErr, waitErr), Proven: p.attested && empty && auditErr == nil && termErr == nil && killErr == nil && waited}
+	if p.result.Proven && p.afterProvenStop != nil {
+		if err := p.afterProvenStop(); err != nil {
+			p.result.Proven = false
+			p.result.Err = errors.Join(p.result.Err, err)
+		}
+	}
 	if !p.attested {
 		p.result.Err = errors.Join(p.result.Err, fmt.Errorf("process-group containment not attested for this executable"))
 	}
