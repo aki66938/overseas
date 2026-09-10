@@ -279,10 +279,17 @@ func parseRoutes(text string, indexes map[string]int) ([]ownedRoute, error) {
 			return nil, e
 		}
 		index, ok := indexes[f[3]]
-		if !ok {
+		if !ok || index <= 0 {
 			return nil, errors.New("route interface identity missing")
 		}
-		result = append(result, ownedRoute{dest, f[1], f[3], index})
+		gateway := f[1]
+		// Darwin renders an interface-only utun route with either its name or
+		// link#<index>. Normalize only the owned interface and non-gateway route;
+		// never disguise a different interface, index, or IP next hop.
+		if f[3] == TUNName && gateway == TUNName && !strings.Contains(f[2], "G") {
+			gateway = fmt.Sprintf("link#%d", index)
+		}
+		result = append(result, ownedRoute{dest, gateway, f[3], index})
 	}
 	if !header {
 		return nil, errors.New("route table missing header")

@@ -11,6 +11,22 @@ import (
 	"testing"
 )
 
+func TestNamedTUNRouteIdentity(t *testing.T) {
+	for _, tc := range []struct{ gateway, flags, iface, want string }{
+		{"utun9", "UScg", "utun9", "link#19"},
+		{"link#19", "UScg", "utun9", "link#19"},
+		{"link#20", "UScg", "utun9", "link#20"},
+		{"utun8", "UScg", "utun9", "utun8"},
+		{"utun9", "UGSc", "utun9", "utun9"},
+		{"172.19.0.1", "UGSc", "utun9", "172.19.0.1"},
+	} {
+		rows, err := parseRoutes("Destination Gateway Flags Netif\n0/1 "+tc.gateway+" "+tc.flags+" "+tc.iface+"\n", map[string]int{"utun9": 19})
+		if err != nil || len(rows) != 1 || rows[0] != (ownedRoute{"0.0.0.0/1", tc.want, "utun9", 19}) {
+			t.Fatalf("%+v: rows=%+v err=%v", tc, rows, err)
+		}
+	}
+}
+
 func TestDarwinRouteNotation(t *testing.T) {
 	for _, tc := range []struct{ destination, flags, want string }{
 		{"127", "UCS", "127.0.0.0/8"},
@@ -53,7 +69,11 @@ func (s abbreviatedRoutesSystem) Routes(ctx context.Context) ([]ownedRoute, erro
 		if destination == "172.20.0.0/16" {
 			destination = "172.20"
 		}
-		fmt.Fprintf(&text, "%s %s UGSc %s\n", destination, r.Gateway, r.Interface)
+		gateway, flags := r.Gateway, "UGSc"
+		if r.Interface == TUNName && gateway == fmt.Sprintf("link#%d", r.Index) {
+			gateway, flags = TUNName, "UScg"
+		}
+		fmt.Fprintf(&text, "%s %s %s %s\n", destination, gateway, flags, r.Interface)
 		indexes[r.Interface] = r.Index
 	}
 	return parseRoutes(text.String(), indexes)
