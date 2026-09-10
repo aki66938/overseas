@@ -29,7 +29,11 @@ enum AccessTransport {
   static func checkPaths() -> Bool {
     // /var is a standard OS symlink; validate its canonical target and every
     // writable boundary explicitly instead of following caller-selected paths.
-    guard URL(fileURLWithPath: path).resolvingSymlinksInPath().path == "/private/var/run/regen-access/control.sock" else { return false }
+    // Foundation may abbreviate /private/var back to /var after resolution.
+    // POSIX realpath returns the actual filesystem target without that rewrite.
+    guard let resolved = realpath(path, nil) else { return false }
+    defer { free(resolved) }
+    guard String(cString: resolved) == "/private/var/run/regen-access/control.sock" else { return false }
     for dir in ["/private", "/private/var", "/private/var/run", "/private/var/run/regen-access"] {
       var value = stat()
       guard lstat(dir, &value) == 0, value.st_uid == 0,

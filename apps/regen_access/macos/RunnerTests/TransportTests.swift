@@ -4,6 +4,19 @@ import Darwin
 // Standalone native test: swiftc Runner/AccessTransport.swift RunnerTests/TransportTests.swift -o transport-tests
 @main struct TransportTests {
   static func main() throws {
+    // Opt-in integration check: run as the installed daily owner, status only.
+    // This exercises real macOS /var -> /private/var resolution and socket ACLs.
+    if CommandLine.arguments.contains("--installed-service") {
+      guard AccessTransport.checkPaths() else {
+        print("FAIL: valid installed socket path rejected")
+        exit(1)
+      }
+      let frame = try AccessTransport.request(["id": "native-status-regression", "action": "status"])
+      let response = try JSONSerialization.jsonObject(with: Data(frame.utf8)) as! [String: Any]
+      precondition(response["id"] as? String == "native-status-regression")
+      precondition(response["version"] as? Int == 1)
+      print("installed owner status request passed")
+    }
     assert(AccessTransport.timeout("connect") == 125)
     assert(AccessTransport.timeout("disconnect") == 95)
     assert(AccessTransport.timeout("status") == 5)
