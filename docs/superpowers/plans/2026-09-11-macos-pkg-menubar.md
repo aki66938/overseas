@@ -120,3 +120,14 @@ assert(host.popover.contentViewController === controller)
 ## 执行审查
 
 任务1–2覆盖宿主交互和退出；3–4覆盖身份、停止等待、迁移与回滚；5覆盖图形安装和首次信任；6覆盖实际交付与未验证边界。首次CA授权是显式验证门禁，不是预先承诺成功的实现细节。安装器实现前必须完整读取现有 lifecycle/manifest 测试，沿用其注入接口，不另造第二套安装流程。
+
+## 2026-09-11 首批执行状态
+
+- [x] 任务1–2代码、native宿主/退出状态测试、7项Flutter定向测试、release构建；提交d96f720。
+- [ ] 任务1–2实际Flutter画面及全部交互验收：预览已在测试Mac运行，截图失败，等待本机画面确认。不能把native测试标为完整视觉验收。
+- [x] 任务3代码、普通用户/root安装器测试；提交0a72901。选择函数拆为可移植纯逻辑`owner.go`及本地目录适配`owner_darwin.go`，显式依赖注入方便测试。停止等待同样拆为可测试时钟循环和受限native查询。
+- [x] Mac `go test ./...` 全部通过；`bash scripts/macos/test-menubar.sh`通过。
+- [ ] 任务4–5 Applications迁移事务与PKG，尚未实施。
+- [ ] 任务6完整安装生命周期/首次CA/60分钟/睡眠唤醒，尚未完成。
+
+阶段证据：`docs/acceptance/2026-09-11-macos-menubar-preview.md`。用户已允许测试期间短暂中断；本次GUI切换后已重连，旧后台未替换。
