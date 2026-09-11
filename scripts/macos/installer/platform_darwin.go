@@ -23,7 +23,10 @@ import (
 
 // These are fixed arguments to native programs, never shell source.
 func command(program string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 115*time.Second)
+	return commandWithTimeout(115*time.Second, program, args...)
+}
+func commandWithTimeout(timeout time.Duration, program string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, program, args...)
 	c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/var/root", "LANG=C"}
@@ -213,6 +216,7 @@ type macLife struct {
 	r                       receipt
 	addedNow                bool
 	runNative               func(string, ...string) ([]byte, error)
+	waitTimeout             time.Duration
 }
 
 func (l *macLife) run(program string, args ...string) ([]byte, error) {
@@ -223,6 +227,9 @@ func (l *macLife) run(program string, args ...string) ([]byte, error) {
 }
 func (l *macLife) registered() (bool, error) {
 	out, e := l.run("/bin/launchctl", "print", "system/"+label)
+	return launchQueryResult(out, e)
+}
+func launchQueryResult(out []byte, e error) (bool, error) {
 	code := 0
 	if e != nil {
 		code = -1
@@ -232,6 +239,20 @@ func (l *macLife) registered() (bool, error) {
 		}
 	}
 	return classifyLaunchQuery(out, code, e)
+}
+
+func (l *macLife) waitUnregistered() error {
+	timeout := l.waitTimeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	return awaitUnregistered(timeout, time.Now, time.Sleep, func(budget time.Duration) (bool, error) {
+		if l.runNative != nil {
+			return l.registered()
+		}
+		out, e := commandWithTimeout(budget, "/bin/launchctl", "print", "system/"+label)
+		return launchQueryResult(out, e)
+	})
 }
 
 func (l *macLife) status() (string, error) {
@@ -267,12 +288,8 @@ func (l *macLife) step(s string) error {
 			if _, e = l.run("/bin/launchctl", "bootout", "system/"+label); e != nil {
 				return e
 			}
-			present, e = l.registered()
-			if e != nil {
+			if e = l.waitUnregistered(); e != nil {
 				return e
-			}
-			if present {
-				return errors.New("service still registered after bootout; state preserved")
 			}
 		}
 		// Wait for the stopped daemon to release its persistent lock, but never unlink it.
@@ -740,10 +757,6 @@ func runPlatform(args []string) error {
 			return errors.New("explicit traffic inspection CA consent required")
 		}
 		var e error
-		l.owner, e = lookupOwner(*owner)
-		if e != nil {
-			return e
-		}
 		l.payload, e = filepath.Abs(*payload)
 		if e != nil || *payload == "" {
 			return errors.New("payload required")
@@ -827,6 +840,10 @@ func runPlatform(args []string) error {
 	}
 	if mode == "uninstall" {
 		return uninstall(l)
+	}
+	l.owner, e = installOwner(l.old, *owner)
+	if e != nil {
+		return e
 	}
 	if e = replace(l); e != nil {
 		return e

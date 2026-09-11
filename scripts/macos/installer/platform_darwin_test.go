@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestQueryFailureStopsStatusStopAndUninstall(t *testing.T) {
@@ -41,7 +42,7 @@ func TestQueryFailureStopsStatusStopAndUninstall(t *testing.T) {
 func TestStopRequiresConfirmedLaunchdUnregistration(t *testing.T) {
 	for _, failQuery := range []bool{false, true} {
 		calls := 0
-		l := &macLife{runNative: func(program string, args ...string) ([]byte, error) {
+		l := &macLife{waitTimeout: -time.Second, runNative: func(program string, args ...string) ([]byte, error) {
 			calls++
 			if program != "/bin/launchctl" {
 				t.Fatal(program)
@@ -60,7 +61,10 @@ func TestStopRequiresConfirmedLaunchdUnregistration(t *testing.T) {
 			}
 			return []byte("service remains registered"), nil
 		}}
-		if e := l.step("stop"); e == nil || calls != 3 {
+		if failQuery {
+			l.waitTimeout = time.Second
+		}
+		if e := l.step("stop"); e == nil || (!failQuery && calls != 2) || (failQuery && calls != 3) {
 			t.Fatalf("unregistration not proved: calls=%d err=%v", calls, e)
 		}
 	}
